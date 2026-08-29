@@ -28,6 +28,7 @@
 
 #include <pthread.h>
 #include <stdint.h>
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -69,6 +70,17 @@ typedef struct {
   size_t size[MAX_ABI_PARAMS];
   KernelAttrs attrs;
 } KernelAbi;
+
+// Monotonic wall-clock per launch record. Launches inside one forward pass
+// are issued back-to-back (µs apart); pass boundaries — profiling run,
+// warmup runs, real requests — show up as ms+ gaps, so downstream tooling
+// can slice launches.jsonl into passes without knowing anything about the
+// model or engine.
+static uint64_t now_ns(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
 
 static KernelAttrs read_attrs(CUfunction func) {
   KernelAttrs a = {0};
@@ -274,7 +286,8 @@ static void record_launch(const char *symbol, CUfunction func,
       attrs = abi->attrs;
     }
   }
-  fprintf(g_launches, "{\"symbol\":\"%s\",", symbol ? symbol : "");
+  fprintf(g_launches, "{\"t_ns\":%llu,\"symbol\":\"%s\",",
+          (unsigned long long)now_ns(), symbol ? symbol : "");
   fprintf(g_launches, "\"grid\":[%u,%u,%u],\"block\":[%u,%u,%u],",
           grid_x, grid_y, grid_z, block_x, block_y, block_z);
   fprintf(g_launches, "\"dynamic_shared_mem_bytes\":%u,", shared_bytes);

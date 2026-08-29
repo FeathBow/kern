@@ -1,3 +1,3 @@
 [workspace]
-members = ["crates/kern-manifest"]
+members = ["crates/kern-manifest", "crates/kern-runtime"]
 resolver = "2"

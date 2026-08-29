@@ -69,18 +69,10 @@ impl Manifest {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Meta {
-    /// Manifest format version. Only 1 is accepted.
+    /// Manifest format version. Only 2 is accepted.
     pub version: u32,
     /// Free-form label; the runtime assigns no meaning to it.
     pub model: String,
-    pub cubin: Artifact,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Artifact {
-    pub file: String,
-    pub sha256: String,
 }
 
 /// A runtime-provided scalar (e.g. token count this step). The declared
@@ -247,6 +239,9 @@ pub enum ScalarType {
     U32,
     I64,
     F32,
+    /// Single-byte scalar (bool flags in mined vLLM kernel ABIs stage as
+    /// one-byte params).
+    U8,
 }
 
 impl fmt::Display for ScalarType {
@@ -256,6 +251,7 @@ impl fmt::Display for ScalarType {
             ScalarType::U32 => "u32",
             ScalarType::I64 => "i64",
             ScalarType::F32 => "f32",
+            ScalarType::U8 => "u8",
         })
     }
 }
@@ -277,6 +273,7 @@ impl ParamType {
         match self {
             ParamType::Buf { .. } | ParamType::Ptr { .. } => 8,
             ParamType::Scalar(ScalarType::I64) => 8,
+            ParamType::Scalar(ScalarType::U8) => 1,
             ParamType::Scalar(_) => 4,
         }
     }
@@ -292,6 +289,7 @@ impl FromStr for ParamType {
             "u32" => return Ok(ParamType::Scalar(ScalarType::U32)),
             "i64" => return Ok(ParamType::Scalar(ScalarType::I64)),
             "f32" => return Ok(ParamType::Scalar(ScalarType::F32)),
+            "u8" => return Ok(ParamType::Scalar(ScalarType::U8)),
             _ => {}
         }
         let (dir_s, rest) = s
@@ -337,16 +335,108 @@ impl<'de> Deserialize<'de> for ParamType {
     }
 }
 
+/// A kernel is an **interface** (the typed params a dispatch passes — the
+/// only thing a call site knows) plus an **implementation**: how those args
+/// are lowered onto actual launches. Swapping the implementation — a faster
+/// kernel from elsewhere with the same interface — touches only `impl`;
+/// every dispatch stays untouched.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Kernel {
-    /// Entry symbol inside the cubin.
+    /// The interface: typed, directional params. Call-site semantics
+    /// (what each position means) are the contract implementations must
+    /// honor; the verifier can only check shape, not meaning.
+    pub params: Vec<ParamType>,
+    #[serde(rename = "impl")]
+    pub imp: Impl,
+}
+
+/// An implementation is a micro-program: private scratch buffers (sized by
+/// expressions over the interface's symbols, provisioned by the runtime,
+/// dead outside one dispatch) and one or more launch steps. Launch geometry
+/// lives here, not at the call site — it belongs to the implementation.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Impl {
+    #[serde(
+        default,
+        deserialize_with = "unique_map",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub scratch: BTreeMap<String, Scratch>,
+    pub steps: Vec<Step>,
+}
+
+/// One scratch buffer declaration: like a workspace buffer, but private to
+/// the implementation.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Scratch {
+    pub dtype: DType,
+    pub shape: Vec<Dim>,
+}
+
+/// One launch inside an implementation.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Step {
+    /// Cubin file (relative to the kernel artifact dir) this step's symbol
+    /// must come from. Absent: the runtime searches every loaded module
+    /// (disambiguating by param layout). `extern:` symbols have no cubin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cubin: Option<String>,
+    /// sha256 of that cubin file, checked by the runtime when both are set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    /// Entry symbol, or `extern:<op>` for runtime built-ins.
     pub symbol: String,
+    /// This step's own launch ABI (what the cubin function actually takes).
     pub params: Vec<ParamType>,
     pub block: [u32; 3],
-    /// Dynamic shared memory in bytes, if the kernel needs any.
+    pub grid: [Expr; 3],
+    /// Dynamic shared memory in bytes, if the step needs any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_mem: Option<Expr>,
+    /// Wiring: where each step param comes from — a forwarded interface
+    /// arg, a scratch buffer, or an implementation-private literal.
+    pub args: Vec<StepArg>,
+}
+
+/// A step argument. `{"arg": 0}` forwards the dispatch's arg #0 verbatim;
+/// `{"scratch": "pmax"}` passes a private scratch pointer (optional byte
+/// `offset`); scalar literals are implementation constants the interface
+/// never sees (e.g. a partial-count baked into a two-stage reduction).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum StepArg {
+    Arg {
+        arg: usize,
+    },
+    Scratch {
+        scratch: String,
+        #[serde(default, skip_serializing_if = "offset_is_zero")]
+        offset: u64,
+    },
+    I32 { i32: i32 },
+    U32 { u32: u32 },
+    I64 { i64: i64 },
+    F32 { f32: f32 },
+    U8 { u8: u8 },
+}
+
+impl fmt::Display for StepArg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StepArg::Arg { arg } => write!(f, "interface arg #{arg}"),
+            StepArg::Scratch { scratch, offset: 0 } => write!(f, "scratch `{scratch}`"),
+            StepArg::Scratch { scratch, offset } => write!(f, "scratch `{scratch}`+{offset}"),
+            StepArg::I32 { i32: v } => write!(f, "i32 literal {v}"),
+            StepArg::U32 { u32: v } => write!(f, "u32 literal {v}"),
+            StepArg::I64 { i64: v } => write!(f, "i64 literal {v}"),
+            StepArg::F32 { f32: v } => write!(f, "f32 literal {v}"),
+            StepArg::U8 { u8: v } => write!(f, "u8 literal {v}"),
+        }
+    }
 }
 
 /// The closed scalar-expression set. This is deliberately not a language:
@@ -406,41 +496,64 @@ pub struct Program {
     pub dispatches: Vec<Dispatch>,
 }
 
+/// A call site: which kernel interface, with which args. No geometry —
+/// grid/block belong to the kernel's implementation.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Dispatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     pub kernel: String,
-    pub grid: [Expr; 3],
     pub args: Vec<Arg>,
 }
 
 /// A dispatch argument. Explicitly tagged so a buffer name can never be
 /// mistaken for a symbol name: `{"buf": "hidden"}`, `{"state": "kv"}`,
 /// `{"sym": "tokens"}`, `{"i32": 2560}`, `{"i64": 4096}`, `{"f32": 1e-6}`.
+///
+/// Buffer and state args carry an optional byte `offset` (default 0): the
+/// kernel receives base + offset. This is how a provider addresses a view
+/// inside a fused buffer (q/k/v slices of a merged qkv projection) or a
+/// per-layer region inside an opaque state — the offset is a literal from
+/// the provider's own layout arithmetic, the runtime just adds it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Arg {
-    Buf { buf: String },
-    State { state: String },
+    Buf {
+        buf: String,
+        #[serde(default, skip_serializing_if = "offset_is_zero")]
+        offset: u64,
+    },
+    State {
+        state: String,
+        #[serde(default, skip_serializing_if = "offset_is_zero")]
+        offset: u64,
+    },
     Sym { sym: String },
     I32 { i32: i32 },
     U32 { u32: u32 },
     I64 { i64: i64 },
     F32 { f32: f32 },
+    U8 { u8: u8 },
+}
+
+fn offset_is_zero(v: &u64) -> bool {
+    *v == 0
 }
 
 impl fmt::Display for Arg {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Arg::Buf { buf } => write!(f, "buffer `{buf}`"),
-            Arg::State { state } => write!(f, "state `{state}`"),
+            Arg::Buf { buf, offset: 0 } => write!(f, "buffer `{buf}`"),
+            Arg::Buf { buf, offset } => write!(f, "buffer `{buf}`+{offset}"),
+            Arg::State { state, offset: 0 } => write!(f, "state `{state}`"),
+            Arg::State { state, offset } => write!(f, "state `{state}`+{offset}"),
             Arg::Sym { sym } => write!(f, "symbol `{sym}`"),
             Arg::I32 { i32: v } => write!(f, "i32 literal {v}"),
             Arg::U32 { u32: v } => write!(f, "u32 literal {v}"),
             Arg::I64 { i64: v } => write!(f, "i64 literal {v}"),
             Arg::F32 { f32: v } => write!(f, "f32 literal {v}"),
+            Arg::U8 { u8: v } => write!(f, "u8 literal {v}"),
         }
     }
 }
