@@ -65,13 +65,63 @@ docker exec kernel-lab bash -c 'export PATH=/root/.cargo/bin:$PATH && cd /work/k
 
 改 schema 后重新生成样例：`python3 tools/gen_qwen3.py`。
 
+## Kernel 来源：从 vLLM 挖（kernel mining）
+
+MVP 的 cubin 不自己写，从 vLLM 生产路径里挖——挖出来的是 GB300 上真正在
+跑的一流核。工具 `tools/kernel-capture/`（vendored from pegainfer PR #982，
+Apache-2.0）是一个 CUPTI 注入库：`CUDA_INJECTION64_PATH` 挂进任意 CUDA 进程，
+把每个 module 的 cubin、每次 launch 的 grid/block/attrs 和完整 staged 参数
+（含指针→device/host + 所属 allocation range 归类）dump 到
+`dumped-kernels/pid<N>/`（`module_*.cubin` + `launches.jsonl`）。host `cc`
+直编（CUPTI 在 `/usr/local/cuda/targets/sbsa-linux`）。
+
+`tools/capture_qwen3.sh`：uv venv 装 vLLM 0.28.0，`enforce_eager=True`（每个
+launch 都是真实 `cuLaunchKernel`、staged 参数可读），prompt `"hi"` 出 1 token。
+两个必须的环境设置：`VLLM_ENABLE_V1_MULTIPROCESSING=0`（engine 跑主进程，注入
+才作用到真正 launch 的 pid，stderr 也不被子进程吞），PATH 里要有 ninja/nvcc
+（FlashInfer 运行时 JIT attention 核）。Qwen3-4B 一次实测挖到 **67 cubin /
+4713 launch / 94 唯一 symbol**。
+
+### 关键发现：两个主力核挖得到、却 replay 不了
+
+capture 按 kernelParams 逐参数拆分，对 flat ABI 的核完美——但恰好最重要的两个
+核不是 flat ABI：
+
+- **GEMM**（`nvjet_sm103_tst_*`）走 `cuLaunchKernel` 的 packed `extra` 缓冲区
+  传参，不走 kernelParams → capture 只能记 `params: null`，参数指向抓不到。
+  cublasLt `splitKreduce` 同类。
+- **Attention**（FlashInfer trtllm-gen `fmhaSm103aKernel...PagedKvCausal`）只有
+  **1 个 1280 字节 packed struct 参数**，所有指针埋在 struct 内部、无字段
+  offset，无法 rebind 到别的 buffer。
+
+flat ABI 的核全部可直接 replay：`rms_norm`(12 param)、`rotary_embedding`(13)、
+`act_and_mul`/silu(6)、`reshape_and_cache_flash`(16)。
+
+**结论**：mining 用作 ABI 参考 + 收编 flat 核；**GEMM 和 attention 改用 Triton**
+（flat kernelParams，可 AOT 也可同法挖、可校验、可 rebind）。
+
+### KV 布局：vLLM 是 paged（实锤）
+
+`reshape_and_cache_flash` 的 ABI 暴露了 vLLM 的 KV 模型：新 token 的 K/V 写进
+两个 paged 池，靠 `slot_mapping` buffer 定位；`block_size=16`、`kv_heads=8`、
+`head_dim=128`。attention 再吃页池 + block_table。写 KV 与读 KV 是两个独立核。
+
+对我们的 schema：`state<KV>` 在边界处解构出来的不是单指针，而是「页池 ptr +
+runtime 每 step 填的 `block_table`/`slot_mapping`/`seq_lens` 小 buffer」。state
+声明从「`bytes_per_token` 一个数」演进为「runtime 要替我维护哪几样东西」的清单
+——runtime 依旧不知道池子里是 K 还是 V，边界不破，只是更具体。
+
 ## 后续（未做）
 
-- runtime crate：cubin 加载 + phase-2 参数布局校验、workspace 静态规划
-  （liveness + 贪心 offset）、单 stream 顺序执行器、contiguous KV state
-  供应；之后换 paged 验证边界隔离论点（应只动 attention kernel 与 state
-  声明，计算图不变）。
-- state 粒度目前仅 per-token；per-seq 定长（Mamba 类）是已知的 schema
-  扩展点。
-- 多卡 collective 不是 kernel，将来以少量 runtime 内置 `extern op` 形式
-  进入 schema。
+- provider 生成器工具：把 `launches.jsonl` 里一次真实 flat-核 launch 自动转成
+  一条 manifest dispatch（指针归类 → buffer/state/weight 初步分类），验证
+  manifest 模型接得住真实挖矿数据。
+- MVP kernel 集：norm/rope/silu 收编 vLLM 挖来的 cubin；GEMM/attention 用
+  Triton 补齐（KV 布局仿 vLLM paged，block_size=16）。
+- runtime crate：cubin 加载 + phase-2 参数布局校验（`cuKernelGetParamInfo`
+  比对 `ParamType::size_bytes`）、workspace 静态规划（liveness + 贪心 offset）、
+  单 stream 顺序执行器、paged KV state 供应（block_table/slot_mapping 簿记，
+  仿 vLLM）。
+- state 粒度目前仅 per-token；per-seq 定长（Mamba 类）是已知的 schema 扩展点。
+- 多卡 collective 不是 kernel，将来以少量 runtime 内置 `extern op` 形式进入
+  schema。

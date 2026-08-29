@@ -1,2 +1,5 @@
 /target
 __pycache__/
+/.venv
+/dumped-kernels
+tools/kernel-capture/libkernelcapture.so
