@@ -394,13 +394,15 @@ impl Runtime {
             bail!("buffer `{name}` is {}, not input", b.class);
         }
         let dst = self.buffers.get_mut(name).unwrap();
-        if data.len() as u64 != dst.bytes {
+        if data.len() as u64 > dst.bytes {
             bail!("input `{name}`: got {} bytes, buffer is {}", data.len(), dst.bytes);
         }
         let pinned = self.staging.get_mut(name).unwrap();
         // Waits on the pinned slice's event: the previous step's DMA from
-        // this staging must finish before we overwrite it.
-        pinned.as_mut_slice()?.copy_from_slice(data);
+        // this staging must finish before we overwrite it. A prefix write
+        // (variable-length inputs) still DMAs the whole buffer — the stale
+        // tail is never read, grids are bounded by the symbols.
+        pinned.as_mut_slice()?[..data.len()].copy_from_slice(data);
         self.stream.memcpy_htod(pinned, &mut dst.slice)?;
         Ok(())
     }
@@ -527,6 +529,7 @@ impl Runtime {
     fn scalar(&self, arg: &Arg, env: &BTreeMap<String, u64>) -> Result<u64> {
         Ok(match arg {
             Arg::Sym { sym } => env[sym],
+            Arg::Expr { expr } => ev(expr, env)?,
             Arg::I32 { i32: v } => *v as u32 as u64,
             Arg::U32 { u32: v } => *v as u64,
             Arg::I64 { i64: v } => *v as u64,

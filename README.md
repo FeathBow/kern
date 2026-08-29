@@ -51,8 +51,12 @@ impl 与接口的自洽（方向、dtype、scratch 数据流），runtime 加载
 
 Manifest 是**生成产物**（类比 `Cargo.lock`）：provider 手写的是生成器，
 不是 manifest。样例见 `tools/gen_qwen3_decode.py` →
-`examples/qwen3-4b-decode.json`（Qwen3-4B decode，436 dispatches，真实
-挖矿 ABI）。
+`examples/qwen3-4b.json`（Qwen3-4B，两个 program：`prefill` 433 dispatch
+/ `decode` 436 dispatch，真实挖矿 ABI）。
+
+标量实参除 symbol 和字面量外还可以是表达式（`{"expr": {"mul":
+["tokens", 32]}}`，同一封闭表达式语言）——prefill 逼出来的：head-norm
+的"总 head 数"参数 = tokens×heads，decode 恒 tokens=1 时它伪装成字面量。
 
 ## Verifier（`kern-manifest`）
 
@@ -69,10 +73,11 @@ Manifest 是**生成产物**（类比 `Cargo.lock`）：provider 手写的是生
    step 写到、scratch dtype/offset 对界检查 + 跨 step 数据流（禁止读未写
    的 scratch）、未使用的 scratch 拒绝；
 7. dispatch：kernel 引用、实参与**接口**参数逐位匹配（dtype 精确匹配、
-   state 只能接 `ptr`、symbol 范围必须装进标量参数类型、offset 对齐
-   且在界内）；
+   state 只能接 `ptr`、symbol/表达式的取值范围必须装进标量参数类型、
+   offset 对齐且在界内）；
 8. 逐 program 数据流：禁止读未写（read-before-write）、禁止写 input/
-   weight、每个 output 必须被写到；
+   weight；output 必须被**某个** program 写到（prefill 这类只落 state
+   的 program 合法地不写任何 output）；
 9. 拒绝一切未使用的声明。
 
 反序列化层已拒绝：未知字段、重复名字、非法参数类型串。
@@ -242,19 +247,23 @@ runtime 每 step 填的 `block_table`/`slot_mapping`/`seq_lens` 小 buffer」。
 pid5992 实测结果：5 个 flat 核全部拟出（grid `tokens`/`tokens*32`/`tokens*8`，
 7 个 token 采样点），指针分类与人工判读一致（逐层 KV 池、slot_mapping 全局
 persistent、逐层权重、workspace）。仅有的拟不出标量是 **stride 且 prefill/
-decode 取值不同**（reshape_and_cache 的 key stride：decode 恒 1024=连续 K，
-prefill 6144=qkv 融合 buffer 视图）——decode-only program 下是常量。
+decode 取值不同**（reshape_and_cache 的 value stride：vLLM decode 1024=
+连续、prefill 6144=qkv 融合视图）——在我们的布局里 v 恒在融合 qkv 中，
+取 6144 即两个 program 共用的常量（decode tokens=1 时 stride 无效，当初
+照抄 1024 也"对"，prefill 把真值逼了出来）。
 
 ## 生成器后端：`tools/gen_qwen3_decode.py`（已做）
 
-产出 `examples/qwen3-4b-decode.json`（436 dispatch / 310 buffer），**过
-verifier**（`qwen3_decode_mined_verifies` 测试）。数据源是 TRITON_ATTN
-capture（`dumped-kernels/pid3977275`）。MVP decode-only：
+产出 `examples/qwen3-4b.json`（310 buffer；`prefill` 433 dispatch +
+`decode` 436 dispatch），**过 verifier**（`qwen3_decode_mined_verifies`
+测试）。数据源是 TRITON_ATTN capture（`dumped-kernels/pid3977275`）。
+bs=1，两个 program：
 
 - 七个真核：rms/rms_head/rope/fused（vLLM CUDA cubin）+ Triton 版
-  reshape_and_cache + `kernel_unified_attention` 3D decode 实例（31 参数）
-  + `reduce_segments`（num_seqs=1 特化实例，12 参数）。真实 symbol、逐
-  参数类型/方向表、标量字面量逐位取自代表性 decode forward。
+  reshape_and_cache + `kernel_unified_attention`（decode 用 3D split-KV
+  实例 31 参数 + `reduce_segments` 12 参数；prefill 用 2D 实例 28 参数）。
+  真实 symbol、逐参数类型/方向表、标量字面量逐位取自代表性 decode/prefill
+  forward。
 - 连线是手写的（provider 知道模型），**挖矿数据负责证伪**：发射前断言
   q/k/v 在 qkv 融合 buffer 中的视图偏移（+0/+8192B/+10240B，q/k norm
   out-of-place）、residual 全程同址、6×36 个逐层权重指针互异、KV 池
@@ -263,12 +272,23 @@ capture（`dumped-kernels/pid3977275`）。MVP decode-only：
 - KV state 从 vLLM 逐层池改为层交织 `[page][layer][16][8][2][128]`——
   同一批 kernel 靠 page-stride 参数 ×36 和 state offset 字面量
   （layer×65536）适配，bytes_per_token=147456，runtime 仍只知一个数。
-- attention 是一个两 step impl：unified 写 f32 segm 部分和
-  （`[tokens,32,16,128]`，impl 私有 scratch），reduce_segments 归并到
-  attn_out——调用方只见 28 参数的 `attn` 接口，一次 dispatch/层；
-  seq_lens/cu_seqlens_q 是 caller 每 step 填的 input buffer（bs=1：
-  `[pos+1]` / `[0,1]`）。rms_norm_head 因 q/k 调用点 grid 不同
-  （×32 vs ×8，v2 里 grid 归 impl）拆成 qhead/khead 两个 kernel 条目。
+- decode attention 是一个两 step impl：unified 3D 写 f32 segm 部分和
+  （impl 私有 scratch），reduce_segments 归并到 attn_out——调用方只见
+  28 参数的 `attn` 接口，一次 dispatch/层。**prefill attention
+  （`attn_prefill`）是同一接口的另一份实现**：2D 实例单步无 scratch，
+  其 28 参 launch ABI 恰好就是接口本身（接口切分正确的实证）；grid =
+  `[ceil_div(tokens,4), 8, 1]`（两个真实 prompt 长度拟合证实）。
+  seq_lens/cu_seqlens_q 是 caller 每次调用前填的 input buffer。
+  rms_norm_head 因 q/k 调用点 grid 不同（×32 vs ×8，v2 里 grid 归
+  impl）拆成 qhead/khead 两个 kernel 条目。
+- **prefill program = decode 去掉 final_norm/lm_head/sample 尾巴**（只落
+  KV），chunked prefill = caller 连调 prefill + 最后一个 prompt token 走
+  decode 出首个 logits——"prefill_last"就是 decode，免掉 symbol 依赖的
+  offset。三个 decode 时被 tokens=1 掩盖的字面量由 prefill capture 现形
+  并修正：head-norm 输入行距=6144（融合 qkv）、head-norm 总 head 数 =
+  tokens×heads（表达式标量）、cache value 行距=6144。logits/next_token
+  定常形状 `[1,·]`、decode 专属 kernel（attn 3D/argmax）grid 与 scratch
+  定常——否则按 CHUNK_MAX=2048 上界要多付 ~1GB。
 - GEMM dispatch 用 `extern:cublaslt_bf16_tn` 符号（runtime 按前缀特判为
   cublasLt matmul）；embedding 是唯一手写核（`tools/kernels-src/embedding.cu`，
   `kern_embedding_i64_bf16`，20 行 gather）。
@@ -293,19 +313,23 @@ dispatch 表：接口实参解析一次，逐 step 按 `args` 连线转发/接 s
 `extern:cublaslt_bf16_tn` 特判：行主序 `C[m,n]=A[m,k]@W[n,k]^T` 映射成列
 主序 `C'=W_cm^T×A_cm`（transa=T、lda=ldb=k、m'=n、ldc=n）。
 
-`kern-run` 是 qwen3-4b-decode 的 caller 契约：每 step 填 token_ids/
-positions/slot_mapping（=pos）/seq_lens（=pos+1），block_table 恒等、
-cu_seqlens_q=[0,1] 一次性；prefill 即重复 tokens=1 decode；greedy argmax。
-权重由 `tools/export_weights.py` 从 HF checkpoint 导出（qkv/gate_up 合并、
+`kern-run` 是 qwen3-4b 的 caller 契约：**chunked prefill**——前 n-1 个
+prompt token 按 `--chunk`（默认 512，clamp 到 tokens 上界）切块连调
+`prefill`（每块填 token_ids/positions/slot_mapping 前缀 + seq_lens=已见
+数 + cu_seqlens_q=[0,块长]；`write_input` 支持前缀写，尾部 stale 字节
+grid 界内永不被读），最后一个 prompt token 走 decode 出首个 logits；此后
+每 step 填四个小 input（=pos），block_table 恒等；greedy argmax。权重由
+`tools/export_weights.py` 从 HF checkpoint 导出（qkv/gate_up 合并、
 cos_sin_cache 预计算、kv_scales 全 1、tied lm_head clone）。
 
 **CUDA graph（默认开，`--eager` 回退）**：tokens=1 下 436 个 dispatch 的
 grid/标量实参全是常量，每步只有 4 个小 input buffer 的**内容**变、指针不变
 → 整个 dispatch 表 stream-capture 成一张静态图，H2D 写留在图外，每步一次
-`cuGraphLaunch`。要点：capture 不能用 legacy NULL stream（runtime 已改
-`new_stream()`）；cublasLt 可被捕获（workspace 预分配，算法启发式在捕获时
-定死，顺带省了每步的 CPU 开销）；`run_captured` 校验 env 与捕获时一致
-（symbol 值烧死在图里）。
+`cuGraphLaunch`。graph 按 (program, env) 键控：decode 捕在 tokens=1，
+prefill 捕在 tokens=chunk（整块走图、余数块 eager 一次）。要点：capture
+不能用 legacy NULL stream（runtime 已改 `new_stream()`）；cublasLt 可被
+捕获（workspace 预分配，算法启发式在捕获时定死，顺带省了每步的 CPU
+开销）；`run_captured` 校验 env 与捕获时一致（symbol 值烧死在图里）。
 
 **greedy 采样已下沉 GPU**：`tools/kernels-src/argmax.cu` 两段式行 argmax（64 block
 分部归约 + 1 block 收尾；单 block 版 nsys 实测 55.7µs/步——单 SM 读 300KB
@@ -315,11 +339,15 @@ manifest 进 graph；`logits` 降级为 workspace，新增 output `next_token`
 i64["tokens"]，每步回读从 300KB 变 8B。input 侧 H2D 走常驻 pinned
 staging（pageable 会退化成驱动同步拷贝）。
 
-**实测（GB300，容器内 `--gpu 3`）**：输出连贯（"The capital of France is
+**实测（GB300，`--gpu 3`）**：输出连贯（"The capital of France is
 Paris. The capital of Germany is Berlin. ..."；150 token 长文不劣化，KV
 跨页正常），完整 step（含采样回读）graph 2.7 ms ≈ 377 tok/s、eager
 ~3.0 ms，两路输出逐 token 一致。对照：vLLM 0.28 本尊同卡 bs=1
 （TRITON_ATTN、graph 默认开）2.44 ms/token ≈ 409 tok/s——kern ~92%。
+**chunked prefill 实测**：709 token prompt 两块（512+197）58–60ms ≈
+**12k tok/s**，vs 逐 token 假 prefill 2.18s——TTFT 提升 ~37×；三路交叉
+验证（chunk=512 走图 / chunk=1 逐 token / eager）生成逐字节一致，2D 与
+3D attention 实例在重叠输入上数值互证。
 **nsys 定位（别猜，profile；纯 decode 窗口 + CUPTI 区间求并对账）**：
 - GEMM 虽是唯一没从 vLLM 挖的核（nvjet ABI 挖不动，runtime 自己调
   cublasLt），但 heuristic 选出的 nvjet 内核和 vLLM 完全一致、逐核耗时
@@ -342,7 +370,7 @@ CUDA_VISIBLE_DEVICES=0 tools/capture_qwen3.sh        # -> dumped-kernels/pid<N>/
 
 # 3) 生成 manifest：真实 ABI + 手写连线，挖矿地址逐项断言证伪
 .venv/bin/python tools/gen_qwen3_decode.py dumped-kernels/pid<N>/launches.jsonl
-                                                     # -> examples/qwen3-4b-decode.json
+                                                     # -> examples/qwen3-4b.json
 
 # 4) 抽核：从 dump 的 module 里拷 manifest 用到的 cubin + nvcc 编两个自写核
 tools/extract_kernels.sh dumped-kernels/pid<N>       # -> kernels/
@@ -352,9 +380,9 @@ tools/extract_kernels.sh dumped-kernels/pid<N>       # -> kernels/
 
 # 6) 跑（构建在 kernel-lab 容器里做；binary 宿主机 dlopen CUDA 直接跑）
 ./target/release/kern-run \
-  --manifest examples/qwen3-4b-decode.json --kernels kernels \
+  --manifest examples/qwen3-4b.json --kernels kernels \
   --weights weights/qwen3-4b-decode.safetensors --tokenizer weights/tokenizer.json \
-  --gpu 3 --capacity 4096 --prompt "The capital of France is" --steps 320
+  --gpu 3 --capacity 4096 --chunk 512 --prompt "The capital of France is" --steps 320
 ```
 
 启动输出即配置声明的展示面：manifest 元信息/symbol/state/buffer 分类统计、

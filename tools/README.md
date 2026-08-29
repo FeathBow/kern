@@ -6,7 +6,7 @@
 |---|------|-------------|
 | 1 | `capture_qwen3.sh` | vLLM 0.28（TRITON_ATTN，enforce_eager）跑 4 条递增 prompt → `dumped-kernels/pid<N>/`：全部 module cubin + `launches.jsonl`（每次 launch 的符号/grid/block/shmem/逐参数值 + `t_ns`） |
 | 2 | `mine_capture.py` | `launches.jsonl` → 分析报告：按时间隙切 pass / 按核爆发切 forward、(range,offset) 指针稳定性分类、grid 表达式拟合（const/sym/mul/ceil_div）。纯分析，无模型知识 |
-| 3 | `gen_qwen3_decode.py` | `launches.jsonl` → `examples/qwen3-4b-decode.json`：真实 ABI + 手写连线，发射前用挖矿地址逐项断言证伪（q/k/v 视图偏移、KV 池布局、权重指针互异…） |
+| 3 | `gen_qwen3_decode.py` | `launches.jsonl` → `examples/qwen3-4b.json`：真实 ABI + 手写连线，发射前用挖矿地址逐项断言证伪（q/k/v 视图偏移、KV 池布局、权重指针互异…） |
 | 4 | `extract_kernels.sh` | dump 目录 → `kernels/`：拷出 manifest 用到的 module cubin + nvcc 编 `kernels-src/*.cu` |
 | 5 | `export_weights.py` | HF checkpoint → `weights/`：qkv/gate_up 合并、rope cos_sin_cache 预计算、kv_scales 全 1、tied lm_head clone + tokenizer 文件 |
 

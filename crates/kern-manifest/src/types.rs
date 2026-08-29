@@ -530,6 +530,10 @@ pub enum Arg {
         offset: u64,
     },
     Sym { sym: String },
+    /// Symbol-derived integer scalar, e.g. `{"expr": {"mul": ["tokens", 32]}}`.
+    /// Same closed expression language as launch grids; f32 params cannot
+    /// bind one.
+    Expr { expr: Expr },
     I32 { i32: i32 },
     U32 { u32: u32 },
     I64 { i64: i64 },
@@ -549,6 +553,7 @@ impl fmt::Display for Arg {
             Arg::State { state, offset: 0 } => write!(f, "state `{state}`"),
             Arg::State { state, offset } => write!(f, "state `{state}`+{offset}"),
             Arg::Sym { sym } => write!(f, "symbol `{sym}`"),
+            Arg::Expr { .. } => write!(f, "expression"),
             Arg::I32 { i32: v } => write!(f, "i32 literal {v}"),
             Arg::U32 { u32: v } => write!(f, "u32 literal {v}"),
             Arg::I64 { i64: v } => write!(f, "i64 literal {v}"),

@@ -23,12 +23,13 @@ struct Opts {
     steps: usize,
     gpu: usize,
     capacity: u64,
+    chunk: u64,
     eager: bool,
 }
 
 fn parse_opts() -> Opts {
     let mut o = Opts {
-        manifest: "examples/qwen3-4b-decode.json".into(),
+        manifest: "examples/qwen3-4b.json".into(),
         kernels: "kernels".into(),
         weights: "weights/qwen3-4b-decode.safetensors".into(),
         tokenizer: "weights/tokenizer.json".into(),
@@ -36,6 +37,7 @@ fn parse_opts() -> Opts {
         steps: 32,
         gpu: 0,
         capacity: 4096,
+        chunk: 512,
         eager: false,
     };
     let mut args = std::env::args().skip(1);
@@ -50,6 +52,7 @@ fn parse_opts() -> Opts {
             "--steps" => o.steps = val().parse().expect("--steps"),
             "--gpu" => o.gpu = val().parse().expect("--gpu"),
             "--capacity" => o.capacity = val().parse().expect("--capacity"),
+            "--chunk" => o.chunk = val().parse().expect("--chunk"),
             "--eager" => o.eager = true,
             _ => panic!("unknown flag {a}"),
         }
@@ -190,6 +193,47 @@ fn main() -> Result<()> {
         s => panic!("unexpected block_table shape {s:?}"),
     };
     rt.write_input("block_table", &le_bytes_i32(&(0..n_pages).collect::<Vec<_>>()))?;
+
+    // Chunked prefill over the first n-1 prompt tokens: repeated `prefill`
+    // calls (KV writes only, no logits). The final prompt token goes through
+    // `decode`, which produces the first logits — decode doubles as
+    // "prefill of the last token".
+    let chunk = o.chunk.min(rt.manifest.symbols["tokens"].max).max(1);
+    let n_prompt = prompt_ids.len();
+    let mut pos: i64 = 0;
+    if n_prompt > 1 {
+        let t = Instant::now();
+        let mut captured = false;
+        while (pos as usize) < n_prompt - 1 {
+            let c = ((n_prompt - 1 - pos as usize) as u64).min(chunk);
+            let ids = &prompt_ids[pos as usize..pos as usize + c as usize];
+            let positions: Vec<i64> = (pos..pos + c as i64).collect();
+            rt.write_input("token_ids", &le_bytes_i64(ids))?;
+            rt.write_input("positions", &le_bytes_i64(&positions))?;
+            rt.write_input("slot_mapping", &le_bytes_i64(&positions))?;
+            rt.write_input("seq_lens", &le_bytes_i32(&[pos as i32 + c as i32]))?;
+            rt.write_input("cu_seqlens_q", &le_bytes_i32(&[0, c as i32]))?;
+            let env = BTreeMap::from([("tokens".to_string(), c)]);
+            if !o.eager && c == chunk {
+                if !captured {
+                    rt.capture("prefill", &env)?;
+                    captured = true;
+                }
+                rt.run_captured("prefill", &env)?;
+            } else {
+                rt.run("prefill", &env)?; // remainder chunk: eager
+            }
+            pos += c as i64;
+        }
+        let dt = t.elapsed();
+        let n_chunks = (pos as u64).div_ceil(chunk);
+        eprintln!(
+            "[kern-run] prefill: {pos} tokens in {n_chunks} chunk(s) of <= {chunk} \
+             ({dt:?}, {:.0} tok/s{})",
+            pos as f64 / dt.as_secs_f64(),
+            if captured { ", graph-captured" } else { ", eager" }
+        );
+    }
     rt.write_input("cu_seqlens_q", &le_bytes_i32(&[0, 1]))?;
 
     let env = BTreeMap::from([("tokens".to_string(), 1u64)]);
@@ -204,7 +248,6 @@ fn main() -> Result<()> {
         );
     }
     let mut generated: Vec<i64> = Vec::new();
-    let mut pos: i64 = 0;
     let mut decode_ns: u128 = 0;
     let mut decode_steps = 0u32;
 

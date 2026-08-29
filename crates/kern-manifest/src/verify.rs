@@ -368,6 +368,7 @@ pub fn verify(m: &Manifest) -> Result<(), Vec<String>> {
         .filter(|(_, b)| matches!(b.class, BufferClass::Input | BufferClass::Weight))
         .map(|(n, _)| n.clone())
         .collect();
+    let mut output_writers: BTreeSet<String> = BTreeSet::new();
 
     for (pname, prog) in &m.programs {
         let mut written = initially_written.clone();
@@ -472,6 +473,28 @@ pub fn verify(m: &Manifest) -> Result<(), Vec<String>> {
                             },
                         }
                     }
+                    (Arg::Expr { expr }, ParamType::Scalar(st)) => {
+                        check_expr(expr, m, &mut used_syms, &mut errs, &actx);
+                        if *st == ScalarType::F32 {
+                            errs.push(format!(
+                                "{actx}: an expression cannot bind to an f32 param"
+                            ));
+                        } else if let Ok(v) = expr.eval(&env_max) {
+                            let fits = match st {
+                                ScalarType::I32 => v <= i32::MAX as u64,
+                                ScalarType::U32 => v <= u32::MAX as u64,
+                                ScalarType::I64 => v <= i64::MAX as u64,
+                                ScalarType::U8 => v <= u8::MAX as u64,
+                                ScalarType::F32 => unreachable!(),
+                            };
+                            if !fits {
+                                errs.push(format!(
+                                    "{actx}: expression reaches {v} at symbol upper \
+                                     bounds, exceeding {st} range"
+                                ));
+                            }
+                        }
+                    }
                     (Arg::I32 { .. }, ParamType::Scalar(ScalarType::I32))
                     | (Arg::U32 { .. }, ParamType::Scalar(ScalarType::U32))
                     | (Arg::I64 { .. }, ParamType::Scalar(ScalarType::I64))
@@ -483,10 +506,15 @@ pub fn verify(m: &Manifest) -> Result<(), Vec<String>> {
                 }
             }
         }
-        for (bname, b) in &m.buffers {
-            if b.class == BufferClass::Output && !written.contains(bname) {
-                errs.push(format!("program `{pname}`: output buffer `{bname}` is never written"));
-            }
+        output_writers.extend(
+            written.iter().filter(|b| m.buffers.get(*b).is_some_and(|d| d.class == BufferClass::Output)).cloned(),
+        );
+    }
+    // Outputs must be produced by *some* program — a prefill-style program
+    // whose only effect is state mutation legitimately writes none.
+    for (bname, b) in &m.buffers {
+        if b.class == BufferClass::Output && !output_writers.contains(bname) {
+            errs.push(format!("output buffer `{bname}` is never written by any program"));
         }
     }
 

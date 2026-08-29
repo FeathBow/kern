@@ -10,14 +10,18 @@ out="$repo/kernels"
 mkdir -p "$out"
 rm -f "$out"/module_*.cubin
 
-# manifest 里的全部 cubin 符号（extern: 前缀是 runtime 特判，跳过）
-mapfile -t syms < <(python3 - "$repo/examples/qwen3-4b-decode.json" <<'PY'
+# manifest 里的全部 cubin 符号（extern: 是 runtime 特判、kern_ 是自编核，跳过）
+mapfile -t syms < <(python3 - "$repo/examples/qwen3-4b.json" <<'PY'
 import json, sys
 m = json.load(open(sys.argv[1]))
+seen = set()
 for k in m["kernels"].values():
-    s = k["symbol"]
-    if not s.startswith("extern:") and not s.startswith("kern_"):
-        print(s)
+    for st in k["impl"]["steps"]:
+        s = st["symbol"]
+        if not s.startswith("extern:") and not s.startswith("kern_"):
+            seen.add(s)
+for s in sorted(seen):
+    print(s)
 PY
 )
 
