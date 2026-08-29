@@ -131,6 +131,10 @@ pub enum BufferClass {
     Weight,
     /// Planned and owned by the runtime; contents dead across program runs.
     Workspace,
+    /// Written by one program, read by another; contents persist across
+    /// program runs. Which program runs first is the caller's contract —
+    /// the verifier only requires that *some* program writes it.
+    Carry,
 }
 
 impl fmt::Display for BufferClass {
@@ -140,6 +144,7 @@ impl fmt::Display for BufferClass {
             BufferClass::Output => "output",
             BufferClass::Weight => "weight",
             BufferClass::Workspace => "workspace",
+            BufferClass::Carry => "carry",
         })
     }
 }

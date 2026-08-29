@@ -41,7 +41,7 @@ pub struct DeviceBuf {
 
 enum StepImpl {
     Cubin { func: sys::CUfunction, module: String },
-    GemmBf16Tn,
+    GemmBf16Tn { beta: f32 },
 }
 
 /// A kernel implementation, resolved: one entry per step, plus the private
@@ -196,7 +196,8 @@ impl Runtime {
             for (si, st) in k.imp.steps.iter().enumerate() {
                 if let Some(ext) = st.symbol.strip_prefix("extern:") {
                     match ext {
-                        "cublaslt_bf16_tn" => steps.push(StepImpl::GemmBf16Tn),
+                        "cublaslt_bf16_tn" => steps.push(StepImpl::GemmBf16Tn { beta: 0.0 }),
+                        "cublaslt_bf16_tn_acc" => steps.push(StepImpl::GemmBf16Tn { beta: 1.0 }),
                         _ => bail!("kernel `{name}` step #{si}: unsupported extern op `{ext}`"),
                     }
                     continue;
@@ -354,7 +355,7 @@ impl Runtime {
                     .iter()
                     .map(|s| match s {
                         StepImpl::Cubin { module, .. } => module.clone(),
-                        StepImpl::GemmBf16Tn => "runtime built-in (cublasLt)".into(),
+                        StepImpl::GemmBf16Tn { .. } => "runtime built-in (cublasLt)".into(),
                     })
                     .collect();
                 (n.clone(), mods)
@@ -573,7 +574,8 @@ impl Runtime {
                 slots.push(rv);
             }
             let StepImpl::Cubin { func, .. } = imp else {
-                self.gemm_bf16_tn(&slots).map_err(|e| format!("step #{si}: {e}"))?;
+                let StepImpl::GemmBf16Tn { beta } = imp else { unreachable!() };
+                self.gemm_bf16_tn(&slots, *beta).map_err(|e| format!("step #{si}: {e}"))?;
                 continue;
             };
             let grid = [ev(&st.grid[0], env)?, ev(&st.grid[1], env)?, ev(&st.grid[2], env)?];
@@ -605,7 +607,8 @@ impl Runtime {
     /// resolved args `[a, w, c, m, n, k]`. Column-major mapping: compute
     /// `C_cm[n,m] = W_cm^T[n,k] x A_cm[k,m]` -> transa=T on W (lda=k),
     /// transb=N on A (ldb=k), m'=n, n'=m, ldc=n.
-    fn gemm_bf16_tn(&self, args: &[RVal]) -> Result<()> {
+    /// `extern:cublaslt_bf16_tn_acc` is the same with beta=1: `C += A @ W^T`.
+    fn gemm_bf16_tn(&self, args: &[RVal], beta: f32) -> Result<()> {
         let [a, w, c, m, n, k] = args else {
             bail!("gemm expects 6 args, got {}", args.len());
         };
@@ -622,7 +625,7 @@ impl Runtime {
             n: m,
             k,
             alpha: 1.0,
-            beta: 0.0,
+            beta,
             lda: k as i64,
             ldb: k as i64,
             ldc: n as i64,

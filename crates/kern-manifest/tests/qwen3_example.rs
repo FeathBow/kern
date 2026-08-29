@@ -25,3 +25,34 @@ fn qwen3_decode_mined_verifies() {
     let again = Manifest::from_json(&m.to_json()).expect("reparse");
     assert_eq!(m.to_json(), again.to_json());
 }
+
+const QWEN3_DSPARK: &str = include_str!("../../../examples/qwen3-4b-dspark.json");
+
+#[test]
+fn qwen3_dspark_mined_verifies() {
+    let m = Manifest::from_json(QWEN3_DSPARK).expect("parse");
+    if let Err(errs) = verify(&m) {
+        panic!("dspark manifest failed verification:\n{}", errs.join("\n"));
+    }
+    // draft: embed + l0 norm + 5 layers x 12 (incl. final norm) + lm_head +
+    // 7 unrolled markov steps x (embed, bias-accumulate, argmax).
+    assert_eq!(m.programs["draft"].dispatches.len(), 2 + 5 * 12 + 1 + 7 * 3);
+    // verify: prefill body + final norm + 5 fc taps + 8-row lm_head + argmax.
+    assert_eq!(m.programs["verify"].dispatches.len(), 2 + 36 * 12 + 5 + 2);
+    // precompute: hidden_norm + fused KV GEMM + 5 x (k_norm, rope, cache).
+    assert_eq!(m.programs["draft_precompute"].dispatches.len(), 2 + 5 * 3);
+    // spec-ready prefill carries the 5 fc taps; decode stays clean.
+    assert_eq!(m.programs["prefill"].dispatches.len(), 2 + 36 * 12 - 1 + 5);
+    assert_eq!(m.programs["decode"].dispatches.len(), 2 + 36 * 12 + 2);
+    assert_eq!(m.states["draft_kv"].bytes_per_token, 5 * 2 * 1024 * 2);
+    // Both 28-param unified instances are ABI-identical; the manifest must
+    // pin each to its own cubin or resolution would be ambiguous.
+    for k in ["attn_prefill", "attn_draft"] {
+        let st = &m.kernels[k].imp.steps[0];
+        assert!(st.cubin.is_some() && st.sha256.is_some(), "{k} not pinned");
+    }
+    assert_ne!(
+        m.kernels["attn_prefill"].imp.steps[0].sha256,
+        m.kernels["attn_draft"].imp.steps[0].sha256
+    );
+}

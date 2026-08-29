@@ -3252,7 +3252,9 @@
         "arg": 27
        }
       ],
-      "shared_mem": 21760
+      "shared_mem": 21760,
+      "cubin": "module_73.cubin",
+      "sha256": "c6960716503ae634c36ecddb1239b16e3b0856eb04ed3f011249cb6234bb7163"
      }
     ]
    }
@@ -3500,14 +3502,14 @@
      "pmax": {
       "dtype": "f32",
       "shape": [
-       1,
+       "tokens",
        64
       ]
      },
      "pidx": {
       "dtype": "i32",
       "shape": [
-       1,
+       "tokens",
        64
       ]
      }
@@ -3527,7 +3529,9 @@
        1
       ],
       "grid": [
-       1,
+       {
+        "sym": "tokens"
+       },
        64,
        1
       ],
@@ -3561,7 +3565,9 @@
        1
       ],
       "grid": [
-       1,
+       {
+        "sym": "tokens"
+       },
        1,
        1
       ],

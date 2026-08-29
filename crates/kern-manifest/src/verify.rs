@@ -365,10 +365,15 @@ pub fn verify(m: &Manifest) -> Result<(), Vec<String>> {
     let initially_written: BTreeSet<String> = m
         .buffers
         .iter()
-        .filter(|(_, b)| matches!(b.class, BufferClass::Input | BufferClass::Weight))
+        .filter(|(_, b)| {
+            // Carry buffers hold another program's output; whether that
+            // program ran first is the caller's sequencing contract, so
+            // per-program dataflow treats them as initially written.
+            matches!(b.class, BufferClass::Input | BufferClass::Weight | BufferClass::Carry)
+        })
         .map(|(n, _)| n.clone())
         .collect();
-    let mut output_writers: BTreeSet<String> = BTreeSet::new();
+    let mut actually_written: BTreeSet<String> = BTreeSet::new();
 
     for (pname, prog) in &m.programs {
         let mut written = initially_written.clone();
@@ -434,6 +439,7 @@ pub fn verify(m: &Manifest) -> Result<(), Vec<String>> {
                                 ));
                             }
                             written.insert(buf.clone());
+                            actually_written.insert(buf.clone());
                         }
                     }
                     (Arg::State { state, .. }, ParamType::Ptr { .. }) => {
@@ -506,15 +512,15 @@ pub fn verify(m: &Manifest) -> Result<(), Vec<String>> {
                 }
             }
         }
-        output_writers.extend(
-            written.iter().filter(|b| m.buffers.get(*b).is_some_and(|d| d.class == BufferClass::Output)).cloned(),
-        );
     }
-    // Outputs must be produced by *some* program — a prefill-style program
-    // whose only effect is state mutation legitimately writes none.
+    // Outputs and carries must be produced by *some* program — a
+    // prefill-style program whose only effect is state mutation legitimately
+    // writes none itself.
     for (bname, b) in &m.buffers {
-        if b.class == BufferClass::Output && !output_writers.contains(bname) {
-            errs.push(format!("output buffer `{bname}` is never written by any program"));
+        if matches!(b.class, BufferClass::Output | BufferClass::Carry)
+            && !actually_written.contains(bname)
+        {
+            errs.push(format!("{} buffer `{bname}` is never written by any program", b.class));
         }
     }
 

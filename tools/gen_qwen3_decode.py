@@ -24,12 +24,40 @@ packed struct / TMA descriptor，不可 rebind）：
   KV 池与 scale 指针、unified 与 reduce 共享 segm 缓冲——连线是手写的，
   挖矿数据负责证伪它。
 
-跑法：python3 tools/gen_qwen3_decode.py [dumped-kernels/pid<N>/launches.jsonl]
+另外发射 examples/qwen3-4b-dspark.json：同一 manifest 里带上 DSpark 投机解码
+（deepseek-ai/dspark_qwen3_4b_block7 draft）。要点：
+
+- draft 与 target 几何完全同构（hidden/heads/FFN/head_dim 全同），5 层 forward
+  直接复用全部既有 kernel 条目——grid 是 tokens 的表达式，draft 以 env
+  tokens=7、verify 以 tokens=8 跑同一批核。新增 kernel 条目全是布线/常量差异
+  （gemm_acc、argmax_row、embedding_row、attn_draft），手写核数量为零。
+- 两个 28 参 unified 实例（causal=prefill/verify、non-causal=draft）symbol、
+  参数布局、block、smem 全部相同，ABI 无法消歧——从 launch 的 num_regs 区分
+  （primary dump 只有 causal；spec dump 里 grid=[2,8,1] 的 draft 实例是另一个
+  reg 数），再用 cuobjdump 定位 module 文件，强制 per-step cubin 钉定 + sha256。
+- draft 的 context KV 不来自 draft forward，而是 target 隐状态投影：5 个 tap
+  点（layer 0/8/16/24/32 的 next_input_norm 之后，residual 恰是 hidden+residual
+  的 aux）各做一个 β=1 累加 GEMM（fc 权重按列切 5 块），免 concat 免拷贝；
+  fc_out 是新 buffer class `carry`（verify/prefill 写、draft_precompute 读，
+  跨 program 交接，顺序是 caller 契约）。
+- draft_precompute：hidden_norm → 融合 KV GEMM [n,10240] → 逐层 k_norm（打包
+  写进 k_n）→ K-only rope（num_kv=0 跳过 key，等效 vLLM 的 key=NULL）→
+  reshape_and_cache 进 draft_kv（5 层交织 state）。
+- markov 头展开成 7 步链：embedding_row(markov_w1[prev]) → gemm_acc 把
+  markov_w2 偏置累进该行 base logits → argmax_row 出 draft token。
+- 无损 oracle：greedy 投机解码逐 token 等于普通 decode，输出 byte-match 即
+  全链路正确；接错 tap/头只会掉接受率。
+
+跑法：python3 tools/gen_qwen3_decode.py \
+    [primary launches.jsonl] [spec dump dir]
 """
 
+import hashlib
 import json
 import pathlib
+import shutil
 import struct
+import subprocess
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -51,12 +79,22 @@ NUM_SEGMENTS = 16             # unified 3D 实例的 NUM_SEGMENTS_PER_SEQ（grid
 CHUNK_MAX = 2048              # prefill 单 chunk 上限（tokens symbol 的 max）
 BLOCK_Q = 4                   # unified 2D 实例每 block 的 query 行数（拟合证实）
 
+# DSpark draft（dspark_qwen3_4b_block7）：几何与 target 同构，只有 5 层
+DRAFT_LAYERS = 5
+BLOCK_TOKENS = 7              # draft 每轮 query 数 = num_speculative_tokens
+VERIFY_TOKENS = BLOCK_TOKENS + 1   # verify = anchor + 7 drafts
+MARKOV_RANK = 256
+TAPS = {0: 0, 8: 1, 16: 2, 24: 3, 32: 4}  # target_layer_ids [1,9,17,25,33]-1
+DRAFT_KV_DIM = DRAFT_LAYERS * 2 * KV_DIM  # 融合 KV GEMM 输出行宽 10240
+
 # 层交织 KV 布局（vLLM 逐层池 -> 我们的单 state）：
 # 一个 block(16 token) 在一层里占 16*8*2*128 = 32768 elems；层间连续。
 BLOCK_ELEMS_PER_LAYER = 16 * KV_HEADS * 2 * HEAD_DIM
 BLOCK_STRIDE = LAYERS * BLOCK_ELEMS_PER_LAYER          # 传给 kernel 的 elems
 LAYER_KV_BYTES = BLOCK_ELEMS_PER_LAYER * BF16          # state offset 步长
 KV_BYTES_PER_TOKEN = LAYERS * 2 * KV_DIM * BF16        # 147456
+DRAFT_BLOCK_STRIDE = DRAFT_LAYERS * BLOCK_ELEMS_PER_LAYER
+DRAFT_KV_BYTES_PER_TOKEN = DRAFT_LAYERS * 2 * KV_DIM * BF16  # 20480
 V_BYTE_OFF = 2 * HEAD_DIM                              # 挖矿实测 k/v 相距 256B
 MAX_BLOCKS = MAX_POS // 16                             # block_table_stride=256 实测吻合
 
@@ -189,6 +227,99 @@ def check_prefill(prefills, by_dec):
     return ref["symbol"], ref["block"], ref["dynamic_shared_mem_bytes"]
 
 
+def unified_regs(recs, want):
+    """28 参 unified launch 的 num_regs 集合，按 grid 谓词过滤。"""
+    regs = {r["attributes"]["num_regs"] for r in recs
+            if "kernel_unified_attention" in r["symbol"]
+            and isinstance(r.get("params"), list) and len(r["params"]) == 28
+            and want(r["grid"])}
+    return regs
+
+
+def check_spec(spec_dir, primary_jsonl, pf):
+    """spec capture 证伪 dspark 布线，并消歧两个同 ABI 的 unified 实例。
+
+    28 参 2D unified 有两份编译（causal / non-causal），symbol、参数布局、
+    block、smem 逐位相同——静态 ABI 无法区分，唯一可见差异是 num_regs。
+    primary dump（无投机）只含 causal；spec dump 里 grid=[2,8,1]（7 query）
+    的 draft launch 是 non-causal。返回 (causal_regs, draft_regs)。"""
+    _, pf_block, pf_smem = pf
+    recs = mc.load(str(pathlib.Path(spec_dir) / "launches.jsonl"))
+    causal = unified_regs(mc.load(primary_jsonl), lambda g: True)
+    assert len(causal) == 1, f"primary dump 的 2D 实例 regs 不唯一: {causal}"
+    causal_regs = causal.pop()
+
+    # 一轮投机窗口内（rejection kernel 之间）：grid=[2,8,1]（ceil(7/4)）是
+    # draft 的 5 层，grid=[3,8,1] 是 verify 的 36 层——短 prompt 的 prefill
+    # 也会出 grid 2，必须限定在轮内看
+    marks0 = [i for i, r in enumerate(recs) if r["symbol"] == "_rejection_kernel"]
+    assert len(marks0) >= 2, "spec dump 里投机轮数不足"
+    rnd0 = recs[marks0[-2] + 1:marks0[-1] + 1]
+    draft = unified_regs(rnd0, lambda g: g[0] == 2)
+    assert len(draft) == 1 and causal_regs not in draft, \
+        f"draft 实例 regs 与 causal 未分离: causal={causal_regs} draft={draft}"
+    draft_regs = draft.pop()
+    # verify（8 token，vLLM grid [3,8,1] 是超配 padding）走的是 causal 实例——
+    # 这是 verify 复用 attn_prefill 的实证
+    vregs = unified_regs(rnd0, lambda g: g[0] == 3)
+    assert vregs == {causal_regs}, f"verify 实例不是 causal: {vregs}"
+    for r in recs:
+        if "kernel_unified_attention" in r["symbol"] \
+                and isinstance(r.get("params"), list) and len(r["params"]) == 28:
+            assert r["block"] == pf_block \
+                and r["dynamic_shared_mem_bytes"] == pf_smem, \
+                "两实例 block/smem 与 prefill 不一致——ABI 消歧假设被推翻"
+
+    # 一轮投机（最后两个 _rejection_kernel 之间）的 precompute 结构：
+    # 融合 KV GEMM 之后逐层 5 次 reshape_and_cache；rope 的 key 指针为 NULL
+    # （证实 K-only rope；我们用 num_kv=0 达成同一语义）；grouped k_norm 的
+    # [3]=KV_DIM 打包行距、[8]=HEAD_DIM 逐层权重步长（证实逐层权重选择）
+    marks = [i for i, r in enumerate(recs) if r["symbol"] == "_rejection_kernel"]
+    assert len(marks) >= 2, "spec dump 里投机轮数不足"
+    rnd = recs[marks[-2] + 1:marks[-1] + 1]
+    caches = [r for r in rnd if "reshape_and_cache" in r["symbol"]
+              and isinstance(r.get("params"), list)]
+    # 一轮 = draft forward 5 层各一次 + verify 36 层各一次 + precompute 5 次
+    assert len(caches) == DRAFT_LAYERS + LAYERS + DRAFT_LAYERS, len(caches)
+    ropes = [r for r in rnd if "rotary_embedding" in r["symbol"]
+             and isinstance(r.get("params"), list)]
+    null_key = [r for r in ropes if pv(r, 2) == 0]
+    assert len(null_key) == 1, "precompute 的 K-only rope（key=NULL）没找到"
+    assert pv(null_key[0], 9) == KV_HEADS and pv(null_key[0], 6) == 0
+    knorms = [r for r in rnd if "rms_norm_kernel" in r["symbol"]
+              and isinstance(r.get("params"), list) and len(r["params"]) == 12
+              and pv(r, 3) == KV_DIM]
+    assert len(knorms) == 1, "grouped k_norm（打包 [L,n,8,128] 布局）没找到"
+    assert pv(knorms[0], 8) == HEAD_DIM, "k_norm 逐层权重步长不是 head_dim"
+    return causal_regs, draft_regs
+
+
+def find_unified_module(dump_dir, want_regs):
+    """在 dump 的 module cubin 里找 kernel_unified_attention REG==want_regs
+    的唯一文件，返回 (basename, sha256)。"""
+    cuobjdump = pathlib.Path(
+        __import__("os").environ.get("CUDA_HOME", "/usr/local/cuda")) \
+        / "bin" / "cuobjdump"
+    hits = []
+    for mod in sorted(pathlib.Path(dump_dir).glob("module_*.cubin")):
+        out = subprocess.run([str(cuobjdump), "-res-usage", str(mod)],
+                             capture_output=True, text=True).stdout
+        take = False
+        for line in out.splitlines():
+            if line.strip().startswith("Function "):
+                take = line.split()[1].rstrip(":") == "kernel_unified_attention"
+            elif take and "REG:" in line:
+                if int(line.split("REG:")[1].split()[0]) == want_regs:
+                    hits.append(mod)
+                take = False
+    # 同一 module 可能被记录多次（重复 load）——按内容去重
+    shas = {hashlib.sha256(m.read_bytes()).hexdigest(): m for m in hits}
+    assert len(shas) == 1, \
+        f"{dump_dir} 里 REG={want_regs} 的 unified module 内容不唯一: {hits}"
+    sha, mod = next(iter(shas.items()))
+    return mod.name, sha, mod
+
+
 def sym(s):
     return {"sym": s}
 
@@ -241,26 +372,31 @@ def scr(name, off=0):
     return {"scratch": name, "offset": off} if off else {"scratch": name}
 
 
-def step(symbol, params, block, grid, args, shared_mem=None, cubin=None):
+def step(symbol, params, block, grid, args, shared_mem=None, cubin=None,
+         sha256=None):
     s = {"symbol": symbol, "params": params, "block": block, "grid": grid,
          "args": args}
     if shared_mem is not None:
         s["shared_mem"] = shared_mem
     if cubin is not None:
         s["cubin"] = cubin
+    if sha256 is not None:
+        s["sha256"] = sha256
     return s
 
 
-def single(symbol, params, block, grid, shared_mem=None, cubin=None):
+def single(symbol, params, block, grid, shared_mem=None, cubin=None,
+           sha256=None):
     """单步实现，恒等布线：接口即该核的 launch ABI。"""
     return {"params": params,
             "impl": {"steps": [step(symbol, params, block, grid,
                                     [a(i) for i in range(len(params))],
-                                    shared_mem, cubin)]}}
+                                    shared_mem, cubin, sha256)]}}
 
 
-def build(by, eps, scale, pf):
+def build(by, eps, scale, pf, pins, spec=False):
     pf_sym, pf_block, pf_smem = pf
+    causal_cubin, causal_sha = pins["causal"]
     buffers = {
         "token_ids": {"dtype": "i64", "shape": ["tokens"], "class": "input"},
         "positions": {"dtype": "i64", "shape": ["tokens"], "class": "input"},
@@ -306,6 +442,45 @@ def build(by, eps, scale, pf):
         weight(p + "self_attn.o_proj.weight", [HIDDEN, Q_DIM])
         weight(p + "mlp.gate_up_proj.weight", [2 * FFN, HIDDEN])
         weight(p + "mlp.down_proj.weight", [HIDDEN, FFN])
+
+    if spec:
+        # DSpark：draft 与 target 几何同构，激活 buffer 全部复用；只加投机
+        # 专属的交换面。fc_out 是 carry：verify/prefill/decode_spec 的 tap 写，
+        # draft_precompute 读——跨 program 的交接棒，顺序是 caller 契约。
+        buffers["anchor_token"] = {"dtype": "i64", "shape": [1],
+                                   "class": "input"}
+        buffers["draft_tokens"] = {"dtype": "i64", "shape": [BLOCK_TOKENS],
+                                   "class": "output"}
+        buffers["verify_tokens"] = {"dtype": "i64", "shape": [VERIFY_TOKENS],
+                                    "class": "output"}
+        buffers["logits_blk"] = {"dtype": "bf16",
+                                 "shape": [VERIFY_TOKENS, VOCAB],
+                                 "class": "workspace"}
+        buffers["fc_out"] = {"dtype": "bf16", "shape": ["tokens", HIDDEN],
+                             "class": "carry"}
+        buffers["kv_flat"] = {"dtype": "bf16", "shape": ["tokens", DRAFT_KV_DIM],
+                              "class": "workspace"}
+        buffers["membed"] = {"dtype": "bf16", "shape": [1, MARKOV_RANK],
+                             "class": "workspace"}
+        weight("draft.embed_tokens.weight", [VOCAB, HIDDEN])
+        weight("draft.lm_head.weight", [VOCAB, HIDDEN])
+        weight("draft.norm.weight", [HIDDEN])
+        weight("draft.hidden_norm.weight", [HIDDEN])
+        weight("draft.fused_kv.weight", [DRAFT_KV_DIM, HIDDEN])
+        weight("draft.markov_w1", [VOCAB, MARKOV_RANK])
+        weight("draft.markov_w2.weight", [VOCAB, MARKOV_RANK])
+        weight("draft.kv_scales", [2 * DRAFT_LAYERS], "f32")
+        for j in range(DRAFT_LAYERS):
+            weight(f"draft.fc.{j}.weight", [HIDDEN, HIDDEN])
+            p = f"draft.layers.{j}."
+            weight(p + "input_layernorm.weight", [HIDDEN])
+            weight(p + "post_attention_layernorm.weight", [HIDDEN])
+            weight(p + "self_attn.qkv_proj.weight", [QKV_DIM, HIDDEN])
+            weight(p + "self_attn.q_norm.weight", [HEAD_DIM])
+            weight(p + "self_attn.k_norm.weight", [HEAD_DIM])
+            weight(p + "self_attn.o_proj.weight", [HIDDEN, Q_DIM])
+            weight(p + "mlp.gate_up_proj.weight", [2 * FFN, HIDDEN])
+            weight(p + "mlp.down_proj.weight", [HIDDEN, FFN])
 
     def blk(tag):
         return by[tag][0]["block"]
@@ -386,10 +561,13 @@ def build(by, eps, scale, pf):
             },
         },
         # prefill attention：同一接口的另一份实现——2D 实例单步无 scratch
-        # （28 参 launch ABI 恰好就是接口本身，这是接口切分正确的实证）
+        # （28 参 launch ABI 恰好就是接口本身，这是接口切分正确的实证）。
+        # cubin 必须钉定：non-causal 的 draft 实例与它 symbol/ABI/block/smem
+        # 逐位相同，仅 num_regs 可分——按参数布局解析会二义
         "attn_prefill": single(pf_sym, ATTN_IFACE, pf_block,
                                [cdiv(T, BLOCK_Q), KV_HEADS, 1],
-                               shared_mem=pf_smem),
+                               shared_mem=pf_smem, cubin=causal_cubin,
+                               sha256=causal_sha),
         "silu_mul": single(
             by["silu"][0]["symbol"],
             ["out buffer<bf16>", "in buffer<bf16>", "i32", "i32", "f32", "i32"],
@@ -411,8 +589,44 @@ def build(by, eps, scale, pf):
              "i32", "i32", "i32"],
             [1, 1, 1], [1, 1, 1]),
         # greedy 采样下沉：手写两段式（tools/kernels-src/argmax.cu）。分部
-        # 缓冲与两次 launch 全在 impl 内，接口只有 (logits, next_token, n)
+        # 缓冲与两次 launch 全在 impl 内，接口只有 (logits, tokens_out, n)。
+        # 行数 = tokens（核天然多行：grid.x 是行号）：decode 以 env 1 跑一行，
+        # verify 以 env 8 一次出 8 行
         "argmax": {
+            "params": ["in buffer<bf16>", "out buffer<i64>", "i32"],
+            "impl": {
+                "scratch": {
+                    "pmax": {"dtype": "f32", "shape": ["tokens", 64]},
+                    "pidx": {"dtype": "i32", "shape": ["tokens", 64]},
+                },
+                "steps": [
+                    step("kern_argmax_partial_bf16",
+                         ["in buffer<bf16>", "out buffer<f32>",
+                          "out buffer<i32>", "i32"],
+                         [1024, 1, 1], [T, 64, 1],
+                         [a(0), scr("pmax"), scr("pidx"), a(2)],
+                         cubin="argmax.cubin"),
+                    step("kern_argmax_final_i64",
+                         ["in buffer<f32>", "in buffer<i32>",
+                          "out buffer<i64>", "i32"],
+                         [64, 1, 1], [T, 1, 1],
+                         [scr("pmax"), scr("pidx"), a(1), i32(64)],
+                         cubin="argmax.cubin"),
+                ],
+            },
+        },
+    }
+
+    if spec:
+        draft_cubin, draft_sha = pins["draft"]
+        # draft attention：又一份同接口实现——non-causal 编译（DFlash 的
+        # 7 个 query 全员互见），钉定到自己的 cubin
+        kernels["attn_draft"] = single(
+            pf_sym, ATTN_IFACE, pf_block, [cdiv(T, BLOCK_Q), KV_HEADS, 1],
+            shared_mem=pf_smem, cubin=draft_cubin, sha256=draft_sha)
+        # markov 链是逐行的：单行 argmax / 单 token gather，配 buffer 字节
+        # 偏移使用（行号烘焙在 offset 里，不吃 tokens symbol）
+        kernels["argmax_row"] = {
             "params": ["in buffer<bf16>", "out buffer<i64>", "i32"],
             "impl": {
                 "scratch": {
@@ -434,8 +648,18 @@ def build(by, eps, scale, pf):
                          cubin="argmax.cubin"),
                 ],
             },
-        },
-    }
+        }
+        kernels["embedding_row"] = single(
+            "kern_embedding_i64_bf16",
+            ["in buffer<i64>", "in buffer<bf16>", "out buffer<bf16>",
+             "i32", "i32"],
+            [256, 1, 1], [1, 1, 1], cubin="embedding.cubin")
+        # c[m,n] += a[m,k] @ w[n,k]^T：β=1 累加版，喂 fc 分块和 markov 偏置
+        kernels["gemm_acc"] = single(
+            "extern:cublaslt_bf16_tn_acc",
+            ["in buffer<bf16>", "in buffer<bf16>", "inout buffer<bf16>",
+             "i32", "i32", "i32"],
+            [1, 1, 1], [1, 1, 1])
 
     def gemm(label, ab, w, c, m, n, k):
         return d(label, "gemm", [buf(ab), buf(w), buf(c), m, i32(n), i32(k)])
@@ -455,26 +679,31 @@ def build(by, eps, scale, pf):
                  [buf(x), i64(HIDDEN), buf("residual"), buf(w), f32(eps), T,
                   i32(HIDDEN), i64(HIDDEN)])
 
-    def forward(attn_kernel, with_head):
-        """embed + 36 层的直线 dispatch 表。prefill 与 decode 共享全部连线，
-        只差 attention 实现（同一接口的两份 impl）和收尾（final_norm +
-        lm_head + argmax 只在 decode——最后一个 prompt token 走 decode 出
-        首个 logits，prefill 只落 KV）。"""
+    def forward(attn_kernel, tail, mp="model.", layers=LAYERS, kv_state="kv",
+                block_stride=BLOCK_STRIDE, scales="kv_scales", taps=False,
+                lm_head_w="lm_head.weight", final_norm_w="model.norm.weight"):
+        """embed + 逐层的直线 dispatch 表，target/draft 共用（几何同构，
+        激活 buffer 全部复用；差异全在权重名、层数、attention 实现、KV
+        state 与收尾 tail）。tail: None=只落 KV（prefill）；"decode"=1 行
+        logits+argmax；"verify"=8 行 logits+argmax；"draft"=7 行 logits +
+        markov 链展开。taps=True 时在 layer 0/8/16/24/32 的 next_input_norm
+        之后各放一个 fc 分块 GEMM（首块 β=0 初始化 fc_out，其余 β=1 累加）
+        ——residual 此刻恰是 DSpark 要的 aux（hidden+residual）。"""
         ds = [
             d("embed", "embedding",
-              [buf("token_ids"), buf("model.embed_tokens.weight"),
+              [buf("token_ids"), buf(mp + "embed_tokens.weight"),
                buf("residual"), T, i32(HIDDEN)]),
             d("l0.input_norm", "rms_norm",
               [buf("x"), buf("residual"), i64(HIDDEN), i64(0), i64(0), i64(0),
-               i64(0), buf("model.layers.0.input_layernorm.weight"), i64(0),
+               i64(0), buf(mp + "layers.0.input_layernorm.weight"), i64(0),
                f32(eps), T, i32(HIDDEN)]),
         ]
-        for i in range(LAYERS):
-            p = f"model.layers.{i}."
+        for i in range(layers):
+            p = f"{mp}layers.{i}."
             l = f"l{i}."
             koff = i * LAYER_KV_BYTES
-            ks, vs = buf("kv_scales", i * 8), buf("kv_scales", i * 8 + 4)
-            last = i + 1 == LAYERS
+            ks, vs = buf(scales, i * 8), buf(scales, i * 8 + 4)
+            last = i + 1 == layers
             ds += [
                 gemm(l + "qkv_proj", "x", p + "self_attn.qkv_proj.weight",
                      "qkv", T, QKV_DIM, HIDDEN),
@@ -491,21 +720,21 @@ def build(by, eps, scale, pf):
                   # [8]=value 行距=QKV_DIM（v 视图在融合 qkv 里；decode
                   # capture 的 1024 同样是 tokens=1 下的假常量）
                   [buf("k_n"), buf("qkv", (Q_DIM + KV_DIM) * BF16),
-                   state("kv", koff), state("kv", koff + V_BYTE_OFF),
+                   state(kv_state, koff), state(kv_state, koff + V_BYTE_OFF),
                    buf("slot_mapping"), ks, vs,
-                   i64(KV_DIM), i64(QKV_DIM), i64(BLOCK_STRIDE),
+                   i64(KV_DIM), i64(QKV_DIM), i64(block_stride),
                    i64(2 * HEAD_DIM), i64(0), i64(0),
                    i64(KV_HEADS * 2 * HEAD_DIM), i64(0), i64(0)]),
                 d(l + "attn", attn_kernel,
                   [buf("attn_out"), buf("q_n"),
-                   state("kv", koff), state("kv", koff + V_BYTE_OFF),
+                   state(kv_state, koff), state(kv_state, koff + V_BYTE_OFF),
                    buf("block_table"), buf("seq_lens"), f32(scale), ks, vs,
                    f32(1.0), f32(0.0),
                    i64(MAX_BLOCKS), i64(Q_DIM), i64(HEAD_DIM), i64(Q_DIM),
                    i64(HEAD_DIM), i64(0), buf("seq_lens"),
-                   i64(BLOCK_STRIDE), i64(KV_HEADS * 2 * HEAD_DIM),
+                   i64(block_stride), i64(KV_HEADS * 2 * HEAD_DIM),
                    i64(2 * HEAD_DIM),
-                   i64(BLOCK_STRIDE), i64(KV_HEADS * 2 * HEAD_DIM),
+                   i64(block_stride), i64(KV_HEADS * 2 * HEAD_DIM),
                    i64(2 * HEAD_DIM),
                    buf("cu_seqlens_q"), i32(1),
                    i64(0), i64(0)]),
@@ -521,50 +750,163 @@ def build(by, eps, scale, pf):
                 gemm(l + "down_proj", "ffn_act", p + "mlp.down_proj.weight",
                      "x", T, HIDDEN, FFN),
             ]
-            if last and not with_head:
+            if last and tail is None:
                 continue  # prefill：final_norm 喂 lm_head，没有 lm_head 就不需要
             ds.append(fused(l + ("final_norm" if last else "next_input_norm"),
                             "x",
-                            f"model.layers.{i + 1}.input_layernorm.weight"
-                            if not last else "model.norm.weight"))
-        if with_head:
+                            f"{mp}layers.{i + 1}.input_layernorm.weight"
+                            if not last else final_norm_w))
+            if taps and i in TAPS:
+                j = TAPS[i]
+                ds.append(d(l + "fc_tap", "gemm" if j == 0 else "gemm_acc",
+                            [buf("residual"), buf(f"draft.fc.{j}.weight"),
+                             buf("fc_out"), T, i32(HIDDEN), i32(HIDDEN)]))
+        if tail == "decode":
             # decode 恒 tokens=1：只算 x 第 0 行的 logits，m=1 字面量
-            ds.append(gemm("lm_head", "x", "lm_head.weight", "logits",
+            ds.append(gemm("lm_head", "x", lm_head_w, "logits",
                            i32(1), VOCAB, HIDDEN))
             ds.append(d("sample", "argmax",
                         [buf("logits"), buf("next_token"), i32(VOCAB)]))
+        elif tail == "verify":
+            # 8 行 logits + 8 行 argmax（argmax 行数 = env tokens = 8）
+            ds.append(gemm("lm_head", "x", lm_head_w, "logits_blk",
+                           i32(VERIFY_TOKENS), VOCAB, HIDDEN))
+            ds.append(d("sample", "argmax",
+                        [buf("logits_blk"), buf("verify_tokens"), i32(VOCAB)]))
+        elif tail == "draft":
+            # 7 行 base logits（m=T，env tokens=7），然后 markov 链展开：
+            # embedding_row 取 markov_w1[prev] → gemm_acc 把 markov_w2 偏置
+            # 累进该行 → argmax_row 出 draft token，喂下一步的 prev
+            ds.append(gemm("lm_head", "x", lm_head_w, "logits_blk",
+                           T, VOCAB, HIDDEN))
+            for t in range(BLOCK_TOKENS):
+                prev = buf("anchor_token") if t == 0 \
+                    else buf("draft_tokens", (t - 1) * 8)
+                ds += [
+                    d(f"markov{t}.embed", "embedding_row",
+                      [prev, buf("draft.markov_w1"), buf("membed"),
+                       i32(1), i32(MARKOV_RANK)]),
+                    d(f"markov{t}.bias", "gemm_acc",
+                      [buf("membed"), buf("draft.markov_w2.weight"),
+                       buf("logits_blk", t * VOCAB * BF16),
+                       i32(1), i32(VOCAB), i32(MARKOV_RANK)]),
+                    d(f"markov{t}.sample", "argmax_row",
+                      [buf("logits_blk", t * VOCAB * BF16),
+                       buf("draft_tokens", t * 8), i32(VOCAB)]),
+                ]
         return ds
 
+    def draft_precompute():
+        """target 隐状态投影成 draft 的 context KV（DSpark 的关键结构）：
+        hidden_norm(fc_out) → 融合 KV GEMM [n,10240] → 逐层：k_norm（打包
+        写进 k_n）→ K-only rope（num_kv=0 跳过 key——vLLM 用 key=NULL，
+        schema 无空指针，同一语义）→ reshape_and_cache 进 draft_kv。
+        跑在 env tokens=n（fc_out 的有效行数）；positions/slot_mapping 沿用
+        产生这批 fc_out 的那次 forward 的输入，caller 无需重写。"""
+        ds = [
+            d("hidden_norm", "rms_norm",
+              [buf("x"), buf("fc_out"), i64(HIDDEN), i64(0), i64(0), i64(0),
+               i64(0), buf("draft.hidden_norm.weight"), i64(0), f32(eps), T,
+               i32(HIDDEN)]),
+            gemm("fused_kv", "x", "draft.fused_kv.weight", "kv_flat",
+                 T, DRAFT_KV_DIM, HIDDEN),
+        ]
+        for j in range(DRAFT_LAYERS):
+            koff = j * LAYER_KV_BYTES
+            ks = buf("draft.kv_scales", j * 8)
+            vs = buf("draft.kv_scales", j * 8 + 4)
+            ds += [
+                # kv_flat 行内布局 [k0 v0 k1 v1 ...]（融合权重按层 cat [k;v]）：
+                # 层 j 的 K 在列 j*2048、V 在列 j*2048+1024，行距 10240
+                d(f"ctx{j}.k_norm", "rms_norm_khead",
+                  [buf("k_n"), buf("kv_flat", j * 2 * KV_DIM * BF16),
+                   i64(HEAD_DIM), i64(DRAFT_KV_DIM), i64(0), i64(KV_HEADS),
+                   i64(0), buf(f"draft.layers.{j}.self_attn.k_norm.weight"),
+                   i64(0), f32(eps), expr(mul(T, KV_HEADS)), i32(HEAD_DIM)]),
+                d(f"ctx{j}.rope", "rotary_embedding",
+                  [buf("positions"), buf("k_n"), buf("k_n"),
+                   buf("rope.cos_sin_cache"), i32(HEAD_DIM), i64(KV_DIM),
+                   i64(0), i64(HEAD_DIM), i32(KV_HEADS), i32(0),
+                   i32(HEAD_DIM), i64(0), u8(0)]),
+                d(f"ctx{j}.kv_write", "reshape_and_cache",
+                  [buf("k_n"), buf("kv_flat", (j * 2 * KV_DIM + KV_DIM) * BF16),
+                   state("draft_kv", koff), state("draft_kv", koff + V_BYTE_OFF),
+                   buf("slot_mapping"), ks, vs,
+                   i64(KV_DIM), i64(DRAFT_KV_DIM), i64(DRAFT_BLOCK_STRIDE),
+                   i64(2 * HEAD_DIM), i64(0), i64(0),
+                   i64(KV_HEADS * 2 * HEAD_DIM), i64(0), i64(0)]),
+            ]
+        return ds
+
+    states = {"kv": {"bytes_per_token": KV_BYTES_PER_TOKEN}}
+    programs = {
+        "prefill": {"dispatches": forward("attn_prefill", None, taps=spec)},
+        "decode": {"dispatches": forward("attn", "decode")},
+    }
+    if spec:
+        states["draft_kv"] = {"bytes_per_token": DRAFT_KV_BYTES_PER_TOKEN}
+        # decode_spec = decode + tap（最后一个 prompt token/anchor 也要出 aux）；
+        # decode 保持无 tap，非投机路径不多付 5 个 GEMV
+        programs["decode_spec"] = {
+            "dispatches": forward("attn", "decode", taps=True)}
+        programs["verify"] = {
+            "dispatches": forward("attn_prefill", "verify", taps=True)}
+        programs["draft"] = {
+            "dispatches": forward(
+                "attn_draft", "draft", mp="draft.", layers=DRAFT_LAYERS,
+                kv_state="draft_kv", block_stride=DRAFT_BLOCK_STRIDE,
+                scales="draft.kv_scales", lm_head_w="draft.lm_head.weight",
+                final_norm_w="draft.norm.weight")}
+        programs["draft_precompute"] = {"dispatches": draft_precompute()}
     return {
-        "meta": {"version": 2, "model": "qwen3-4b"},
-        # bs=1；prefill 按 chunk 调用（tokens ≤ CHUNK_MAX），decode 恒 tokens=1
+        "meta": {"version": 2,
+                 "model": "qwen3-4b-dspark" if spec else "qwen3-4b"},
+        # bs=1；prefill 按 chunk 调用（tokens ≤ CHUNK_MAX），decode 恒 tokens=1；
+        # spec 附加契约：draft 以 tokens=7、verify 以 tokens=8、
+        # draft_precompute 以 tokens=有效行数 调用
         "symbols": {"tokens": {"max": CHUNK_MAX}},
-        "states": {"kv": {"bytes_per_token": KV_BYTES_PER_TOKEN}},
+        "states": states,
         "buffers": buffers,
         "kernels": kernels,
-        "programs": {
-            "prefill": {"dispatches": forward("attn_prefill", with_head=False)},
-            "decode": {"dispatches": forward("attn", with_head=True)},
-        },
+        "programs": programs,
     }
 
 
 def main():
+    repo = pathlib.Path(__file__).resolve().parent.parent
     jsonl = sys.argv[1] if len(sys.argv) > 1 else str(
-        pathlib.Path(__file__).resolve().parent.parent
-        / "dumped-kernels" / "pid3977275" / "launches.jsonl")
+        repo / "dumped-kernels" / "pid3977275" / "launches.jsonl")
+    spec_dir = sys.argv[2] if len(sys.argv) > 2 else str(
+        repo / "dumped-kernels" / "pid2633632")
     fwd, prefills = pick_forwards(jsonl)
     by = extract(fwd)
     eps, scale = check_topology(by)
     pf = check_prefill(prefills, by)
-    manifest = build(by, eps, scale, pf)
-    out = pathlib.Path(__file__).resolve().parent.parent / "examples" / "qwen3-4b.json"
-    out.write_text(json.dumps(manifest, indent=1) + "\n")
-    counts = {p: len(v["dispatches"]) for p, v in manifest["programs"].items()}
+
+    # unified 实例消歧 + cubin 钉定：spec dump 证伪 draft/verify 假设，
+    # cuobjdump 按 num_regs 定位两个同 ABI 实例各自的 module 文件
+    causal_regs, draft_regs = check_spec(spec_dir, jsonl, pf)
+    cfile, csha, _ = find_unified_module(pathlib.Path(jsonl).parent, causal_regs)
+    dfile, dsha, dpath = find_unified_module(spec_dir, draft_regs)
+    # non-causal module 来自 spec dump，主 dump 的 extract 不会带上它——
+    # 以稳定名放进 kernels/（extract 只清理 module_*.cubin，它能存活）
+    dst = repo / "kernels" / "unified_noncausal.cubin"
+    dst.parent.mkdir(exist_ok=True)
+    if not dst.exists() or hashlib.sha256(dst.read_bytes()).hexdigest() != dsha:
+        shutil.copy(dpath, dst)
+    pins = {"causal": (cfile, csha), "draft": ("unified_noncausal.cubin", dsha)}
+
+    for spec, name in [(False, "qwen3-4b.json"), (True, "qwen3-4b-dspark.json")]:
+        manifest = build(by, eps, scale, pf, pins, spec=spec)
+        out = repo / "examples" / name
+        out.write_text(json.dumps(manifest, indent=1) + "\n")
+        counts = {p: len(v["dispatches"]) for p, v in manifest["programs"].items()}
+        print(f"wrote {out} ({out.stat().st_size // 1024} KiB, "
+              f"{len(manifest['buffers'])} buffers, dispatches {counts})")
     print(f"topology checks passed (eps={eps!r}, attn scale={scale!r}, "
-          f"prefill fwds={[t for t, _ in prefills]})")
-    print(f"wrote {out} ({out.stat().st_size // 1024} KiB, "
-          f"{len(manifest['buffers'])} buffers, dispatches {counts})")
+          f"prefill fwds={[t for t, _ in prefills]}; unified pins: "
+          f"causal={cfile} regs={causal_regs}, "
+          f"draft=unified_noncausal.cubin regs={draft_regs})")
 
 
 if __name__ == "__main__":
