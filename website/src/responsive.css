@@ -83,6 +83,16 @@
     gap: 40px 32px;
   }
 
+  .ev-ticks {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 24px 16px;
+  }
+
+  .ev-tick-total {
+    border-left: 0;
+    padding-left: 0;
+  }
+
 }
 
 @media (max-width: 760px) {
@@ -277,6 +287,19 @@
 
   .evidence-verdict strong {
     font-size: clamp(72px, 22vw, 110px);
+  }
+
+  .evidence-hero {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .evidence-time {
+    font-size: clamp(110px, 34vw, 160px);
+  }
+
+  .ev-ticks {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
 }

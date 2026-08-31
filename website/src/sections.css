@@ -1268,11 +1268,121 @@ footer h2 {
   margin: 6vh 0 7vh;
 }
 
-.evidence-header h2 {
-  font-size: clamp(56px, 6.6vw, 104px);
+.evidence-hero {
+  display: flex;
+  align-items: flex-end;
+  gap: clamp(20px, 2.5vw, 40px);
 }
 
-.evidence-header h2 span {
+.evidence-header h2 {
+  font-size: clamp(48px, 5.4vw, 84px);
+}
+
+.evidence-time {
+  display: block;
+  padding: 0.02em 0.12em 0.08em;
+  font-size: clamp(120px, 15vw, 260px);
+  font-weight: 900;
+  letter-spacing: -0.1em;
+  line-height: 0.74;
+  background: var(--green);
+  transform: rotate(-2deg);
+}
+
+.evidence-time i {
+  font-style: normal;
+  font-size: 0.42em;
+  letter-spacing: -0.04em;
+  margin-left: 0.06em;
+}
+
+.ev-timeline {
+  margin-top: 2vh;
+}
+
+.ev-bar {
+  display: flex;
+  height: 44px;
+  border: 2px solid var(--ink);
+  background: #fff;
+}
+
+.ev-seg {
+  display: block;
+  min-width: 3px;
+  border-right: 2px solid var(--ink);
+}
+
+.ev-seg:last-child {
+  border-right: 0;
+}
+
+.ev-seg-muted {
+  background: repeating-linear-gradient(-45deg, #fff 0 6px, var(--line) 6px 8px);
+}
+
+.ev-seg-blue {
+  background: var(--blue);
+}
+
+.ev-seg-faint {
+  background: #fff;
+}
+
+.ev-ticks {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 16px;
+  margin-top: 14px;
+  font-family: "DM Mono", monospace;
+}
+
+.ev-tick b {
+  display: block;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+}
+
+.ev-tick-blue b {
+  color: var(--blue);
+}
+
+.ev-tick span {
+  display: block;
+  margin-top: 6px;
+  font-family: "Inter", sans-serif;
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: -0.06em;
+  line-height: 1;
+}
+
+.ev-tick small {
+  display: block;
+  margin-top: 6px;
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.ev-tick-total {
+  border-left: 2px solid var(--ink);
+  padding-left: 16px;
+}
+
+.ev-tick-total b {
+  color: var(--ink);
+}
+
+.ev-timeline-why {
+  max-width: 62ch;
+  margin: 26px 0 8vh;
+  font-size: 17px;
+  line-height: 1.5;
+}
+
+.ev-timeline-why b {
   color: var(--blue);
 }
 

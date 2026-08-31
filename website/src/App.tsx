@@ -298,7 +298,7 @@ function TheLoop() {
             </i>
             <em>→</em>
             <i>
-              byte-diff <b>s</b>
+              attest <b>7 s</b>
             </i>
           </div>
           <strong className="lane-cost cost-green">SHIPPED</strong>
@@ -407,29 +407,78 @@ function EvidenceDiagram() {
   );
 }
 
+const timeline = [
+  { name: "LOAD A+B", ms: 2400, tone: "muted", note: "weights, once" },
+  { name: "TAP", ms: 130, tone: "blue", note: "the only full run" },
+  { name: "NOISE", ms: 16, tone: "blue", note: "72 cuts" },
+  { name: "FUZZ", ms: 1200, tone: "blue", note: "72 cuts × 6" },
+  { name: "PERF", ms: 1800, tone: "blue", note: "eager + graph + sweep" },
+  { name: "", ms: 1450, tone: "faint", note: "tokenizer, report" },
+];
+const TOTAL_MS = 7000;
+
+function Timeline() {
+  return (
+    <div className="ev-timeline" role="img" aria-label="Seven seconds from swap to verdict: 2.4 s loading both programs, 130 ms tapping one prompt, 16 ms noise floor, 1.2 s fuzz, 1.8 s timing">
+      <div className="ev-bar">
+        {timeline.map((t, i) => (
+          <i key={i} className={`ev-seg ev-seg-${t.tone}`} style={{ flexGrow: t.ms }} />
+        ))}
+      </div>
+      <div className="ev-ticks">
+        {timeline.filter((t) => t.name).map((t) => (
+          <div key={t.name} className={`ev-tick ev-tick-${t.tone}`}>
+            <b>{t.name}</b>
+            <span>{t.ms >= 1000 ? `${(t.ms / 1000).toFixed(1)} s` : `${t.ms} ms`}</span>
+            <small>{t.note}</small>
+          </div>
+        ))}
+        <div className="ev-tick ev-tick-total">
+          <b>SWAP → VERDICT</b>
+          <span>{(TOTAL_MS / 1000).toFixed(1)} s</span>
+          <small>one GB300</small>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Evidence() {
   return (
     <section className="section evidence-section" id="evidence">
       <div className="section-number">03 / THE EVIDENCE</div>
       <div className="evidence-header">
-        <h2>
-          ONE COMMAND.
-          <br />
-          <span>ONE VERDICT.</span>
-        </h2>
+        <div className="evidence-hero">
+          <h2>
+            SWAP VERIFIED
+            <br />
+            IN
+          </h2>
+          <strong className="evidence-time">7<i>s</i></strong>
+        </div>
         <div className="evidence-header-side">
           <pre className="evidence-cmd">
             <b>$</b> kern-attest --a qwen3-4b.json{"\n"}
             {"             "}--b qwen3-4b-silu-mined.json
           </pre>
-          <p>The old program is the oracle. No thresholds anywhere.</p>
+          <p>
+            Diff, noise floor, bit-compare, six fuzz distributions, timing.
+            <br />
+            The old program is the oracle. No thresholds anywhere.
+          </p>
         </div>
       </div>
+
+      <Timeline />
+      <p className="ev-timeline-why">
+        The model runs <b>once</b>. Every check after the tap replays only the swapped cut —
+        cost follows the cut, not the model.
+      </p>
 
       <div className="evidence-stage">
         <EvidenceDiagram />
         <div className="evidence-verdict">
-          <span className="verdict-kicker">VERDICT · 7.0 s</span>
+          <span className="verdict-kicker">VERDICT</span>
           <strong>PASS</strong>
           <p>value-identical at every cut</p>
           <small>only signed zeros differ · exit 0</small>
@@ -444,18 +493,18 @@ function Evidence() {
       <div className="evidence-metrics">
         <div>
           <strong>72</strong>
-          <span>CUTS TAPPED</span>
+          <span>CUTS CHECKED</span>
           <small>36 prefill + 36 decode</small>
         </div>
         <div>
-          <strong>−24%</strong>
-          <span>Σ CUTS PER STEP</span>
-          <small>305.9 → 231.9 µs</small>
+          <strong>130<i>ms</i></strong>
+          <span>OF REAL MODEL TIME</span>
+          <small>one prompt, tapped once</small>
         </div>
         <div>
-          <strong>2.532<i>ms</i></strong>
-          <span>TPOT · DERIVED FROM THE CUT</span>
-          <small>measured 2.549 ms · 17 µs apart</small>
+          <strong>6</strong>
+          <span>FUZZ DISTRIBUTIONS</span>
+          <small>uniform · normal · laplace · outliers · edge · special</small>
         </div>
         <div>
           <strong>0</strong>
