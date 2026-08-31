@@ -117,7 +117,7 @@ impl Runtime {
     /// Verify the manifest, load every `*.cubin` under `kernels_dir`, resolve
     /// kernels, allocate all buffers and states, and lower every program.
     /// `state_capacity_tokens` scales each declared state by its
-    /// `bytes_per_token`.
+    /// `bytes_per_token` (a `bytes_fixed` state is allocated as declared).
     pub fn load(
         manifest_json: &str,
         kernels_dir: &std::path::Path,
@@ -156,6 +156,7 @@ impl Runtime {
             let bytes = s
                 .bytes_per_token
                 .checked_mul(state_capacity_tokens)
+                .and_then(|b| b.checked_add(s.bytes_fixed))
                 .ok_or_else(|| Error::Manifest(format!("state `{name}`: size overflow")))?;
             states.insert(name.clone(), alloc(&stream, bytes)?);
         }

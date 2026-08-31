@@ -5,7 +5,7 @@
 //! Checks:
 //!   1. meta: format version
 //!   2. symbols: bounds sane
-//!   3. states: non-zero size, power-of-two alignment
+//!   3. states: non-zero size (per-token xor fixed), power-of-two alignment
 //!   4. buffers: shapes resolve, byte sizes don't overflow at symbol upper
 //!      bounds; a declared domain is well-formed (bound kinds vs dtype,
 //!      `index_into` resolves, min <= max at the symbol corners)
@@ -142,8 +142,14 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
 
     // 3. states
     for (name, st) in &m.states {
-        if st.bytes_per_token == 0 {
-            errs.push(format!("state `{name}`: bytes_per_token must be > 0"));
+        match (st.bytes_per_token, st.bytes_fixed) {
+            (0, 0) => errs.push(format!(
+                "state `{name}`: one of bytes_per_token / bytes_fixed must be > 0"
+            )),
+            (t, f) if t > 0 && f > 0 => errs.push(format!(
+                "state `{name}`: bytes_per_token and bytes_fixed are exclusive"
+            )),
+            _ => {}
         }
         if !st.align.is_power_of_two() {
             errs.push(format!("state `{name}`: align {} is not a power of two", st.align));

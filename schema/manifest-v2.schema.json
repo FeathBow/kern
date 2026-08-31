@@ -467,7 +467,7 @@
     },
     "State": {
       "additionalProperties": false,
-      "description": "Opaque persistent state. The runtime knows only how many bytes to\nprovision per token; the internal layout belongs to the provider's\nkernels, which receive the base pointer as an untyped `ptr` param.",
+      "description": "Opaque persistent state. The runtime knows only how many bytes to\nprovision — per token slot (`bytes_per_token`, scaled by the capacity:\npaged KV) or as one fixed block regardless of capacity (`bytes_fixed`:\nper-sequence recurrent state such as a Mamba/GDN conv + SSM state).\nExactly one of the two is non-zero. The internal layout belongs to the\nprovider's kernels, which receive the base pointer as an untyped `ptr`\nparam.",
       "properties": {
         "align": {
           "default": 256,
@@ -475,15 +475,19 @@
           "minimum": 0,
           "type": "integer"
         },
+        "bytes_fixed": {
+          "default": 0,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
         "bytes_per_token": {
+          "default": 0,
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
         }
       },
-      "required": [
-        "bytes_per_token"
-      ],
       "type": "object"
     },
     "Step": {

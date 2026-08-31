@@ -91,12 +91,19 @@ fn default_symbol_min() -> u64 {
 }
 
 /// Opaque persistent state. The runtime knows only how many bytes to
-/// provision per token; the internal layout belongs to the provider's
-/// kernels, which receive the base pointer as an untyped `ptr` param.
+/// provision — per token slot (`bytes_per_token`, scaled by the capacity:
+/// paged KV) or as one fixed block regardless of capacity (`bytes_fixed`:
+/// per-sequence recurrent state such as a Mamba/GDN conv + SSM state).
+/// Exactly one of the two is non-zero. The internal layout belongs to the
+/// provider's kernels, which receive the base pointer as an untyped `ptr`
+/// param.
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct State {
+    #[serde(default)]
     pub bytes_per_token: u64,
+    #[serde(default)]
+    pub bytes_fixed: u64,
     #[serde(default = "default_align")]
     pub align: u64,
 }

@@ -1,0 +1,211 @@
+# Qwen3.8-27B（+ DFlash2）带上 kern：时间线与证据
+
+任务书：[qwen38-bringup-prompt.md](qwen38-bringup-prompt.md)。全程一个 agent
+（Claude Code）在一台 GB300 节点上做，人工介入次数在末尾统计。
+时间戳均为 UTC。
+
+## 时间线
+
+### 2026-08-31T12:02Z 开始：读文档 + 环境
+
+- `nvidia-smi`：4×GB300 全空。选 GPU 0 做 vLLM 挖矿、GPU 1 做 kern-run。
+- 读 README / docs（design / manifest / kernel-mining / runtime / spec-decode /
+  attest / roadmap）/ tools/README、`gen_qwen3_decode.py`（934 行）、
+  `mine_capture.py`、`export_weights.py`、`extract_kernels.sh`、
+  `kern-manifest/types.rs`、`kern-runtime/lib.rs`、`kern-run/lib.rs+main.rs`。
+- 读 vLLM 0.28 的 `qwen_gdn_linear_attn.py`（2055 行）、`qwen3_5.py`：
+  Qwen3.5 的 GDN 层在 `gdn_prefill_backend=triton` 下走
+  `causal_conv1d_fn`（Triton）→ `fused_post_conv_prep`（l2norm + gating）→
+  `chunk_gated_delta_rule`（FLA 的一串 Triton 核）→ `RMSNormGated`
+  （`layer_norm_fwd`，Triton）→ `out_proj`；decode 走
+  `causal_conv1d_update` + `fused_recurrent_gated_delta_rule_packed_decode`
+  （`VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE`）或
+  `fused_sigmoid_gating_delta_rule_update`；spec 走
+  `fused_gdn_decode_post_conv_mtp`（vLLM CUDA op，`num_accepted_tokens`
+  语义：从 state 重放）。
+- 运行时事实：`Runtime::load` 的 state 用 `alloc_zeros` 分配 → 一个进程一条
+  prompt 的前提下 GDN 递归 state 天然零初始化，不需要 reset 原语。
+
+### 2026-08-31T12:09Z 挖矿 capture（GPU 0）→ 12:10Z 完成
+
+- `tools/capture_qwen38.sh`：TRITON_ATTN + `gdn_prefill_backend=triton`，5 条
+  长度 1/34/85/174/250 的散文 prompt 各 `max_tokens=4`，一次 bs=1。
+  92 个 module cubin、71487 次 launch，输出正常（"hi" → ", i want to"）。
+- `mine_capture.py` 的自动切分对这个模型失效：eager 下 launch 太密，5 ms
+  空隙切不开 forward，"core 核"选到了 ATen 的 copy。没有修它——改用
+  ArgMax（采样）当 forward 边界、`_triton_mrope_forward` 的 grid.x 当
+  tokens，写了个一次性的逐 launch ABI 打印（scratchpad），够用。
+
+### 12:12Z–12:40Z 逐核 ABI 分析（不动 GPU）
+
+结论直接决定生成器怎么写，全部记下：
+
+- **Triton 核的真实 ABI 不能从 launch 猜**：Triton 把 `==1` 的整型参数和
+  `None` 指针从签名里删掉、`%16` 的整型加 `tt.divisibility` 假设。用
+  `~/.triton/cache/*/<kernel>.ttir` 的 `tt.func` 签名（按 cubin sha256 与
+  dump 的 module 对上）当 ground truth。同名核有多份实例：
+  `_fused_post_conv_kernel` 三份（L==1 特化 / L%16 特化 / 通用），
+  `layer_norm_fwd_kernel` 两份（rows_per_block 4 / 1，REG 62 / 28），
+  `_triton_mrope_forward` 两份（num_tokens==1 特化 / 通用）。生成器必须
+  选"通用"实例并按 sha256 钉死（L%16 与通用实例参数布局相同，runtime 的
+  `cuFuncGetParamInfo` 消歧不了）。
+- **GDN state 的页布局被烧进了 kernel**：`_causal_conv1d_fwd/update` 的
+  state 行距 1605632 elem（= 3211264 B，vLLM "align" 模式的 KV 页大小），
+  `fused_recurrent_..._packed_decode` 的 h0 = 页基址 + 0xf000（= conv state
+  10240×3 bf16）、行距 802816 f32。即 vLLM 把 conv state（61440 B）和
+  SSM state（48×128×128 f32 = 3145728 B）放在同一 3211264 B 页里，尾部
+  4096 B 空。kern 的 GDN state 照抄这个页格式；索引 0 是 null block
+  （kernel 里 `state_idx <= 0` 跳过），所以第 0 行留空，GDN 第 i 层用第
+  i+1 行，索引通过一张常量表 + buffer offset 传。
+- attention 的 KV 也被 `BLOCK_SIZE=784`（constexpr）绑死：vLLM 为了和
+  mamba 页对齐把 block_size 选成 784。kern 的 KV state 用 `[page][16 层]
+  [784][4 head][K|V][256]`，bytes_per_token = 16×4096；block_table 的
+  domain unit = 784。
+- **norm 是 ATen 一串（pow/mean/rsqrt/mul），不可挖**：`GemmaRMSNorm` 走
+  `ir.ops.rms_norm` 原生实现，`weight.float()+1`，残差在 f32 上相加、
+  归一化用未舍入的 f32 和。要逐字节一致就得复现 ATen `reduce_kernel` 的
+  归约顺序（4 路向量累加 → block_x 归约：宽度 >32 时先 shared 折半、再
+  shfl_down 1/2/4/8/16；宽度由行数决定：1 行 512、2–3 行 256、4–7 行
+  128、8–15 行 64、≥16 行 32）、`mean = sum * (1/N)`、`rsqrtf`。决定手写
+  一个核（`tools/kernels-src/gemma_rms_norm.cu`）逐位复现，并用 vLLM 自己
+  的 op 做 oracle 测到 bit-exact。attention 输出门 `attn * sigmoid(gate)`
+  同理（ATen，两次 bf16 舍入），手写 `sigmoid_mul`。
+- prefill 里 z 门要做一次 strided 拷贝（`layer_norm_fwd_kernel` 的 M 有
+  `%16` 假设，不能用 ngroups 技巧绕），手写 `copy_rows`；prefill 要出
+  logits 就得取最后一行（`tokens-1` 不在表达式集合里），手写 `last_row`。
+- kern-run 的 4B 契约是 "prefill 不出 logits，最后一个 prompt token 走
+  decode"。对 GDN 这会让最后一个 token 走递归核而不是 chunk 核，与 vLLM
+  的数值路径不同。改契约：prefill 也出 `next_token`（多 3 个 dispatch），
+  driver 全部 prompt token 走 prefill。这是 driver（kern-run）改动，不是
+  runtime。
+- schema 扩展（唯一预期的）：`State` 加 `bytes_fixed`（per-seq 定长），
+  runtime 分配 `bytes_per_token×capacity + bytes_fixed`。
+
+### 12:31Z–12:54Z  权重导出 / 参考输出 / 手写核 / 生成器（无人工干预）
+
+- 12:32Z 并行起两件后台事：`tools/export_qwen35.py`（GPU 1，合并导出
+  50 GiB safetensors + rope 表 + FLA/conv 常量表）和 `tools/qwen38_ref.py`
+  （GPU 0，vLLM eager TRITON_ATTN + triton GDN，5 条散文 prompt × 400 token
+  greedy → `docs/qwen38-ref.json`）。两个都首跑失败：ref 是 flashinfer
+  JIT 找不到 `ninja`（venv 的 bin 没进 PATH），export 是 `MRotaryEmbedding`
+  作为 CustomOp 要 `set_current_vllm_config` 上下文。各改一行 12:36Z 重跑，
+  12:39Z 都完成（ref 5×400 token，全部 length 截止，文本连贯）。
+- 12:37Z–12:44Z 手写核对 vLLM 自家 op 做 bit-exact 测试
+  （`tools/test_kernels_qwen35.py`，cuda-python 直接 launch cubin）。
+  `sigmoid_mul` / `copy_rows` 一次过；`gemma_rms_norm` 两处偏差，各花几分钟
+  定位：
+  1. torch 2.13 把 warp 内 shfl_down 的 offset 顺序改成了递减（16→1，
+     `Reduce.cuh` 注释说是为了和 Triton 数值对齐），我凭记忆写的 1→16 在
+     ~30% 的行上差 1 ulp。看安装的头文件而不是靠记忆。
+  2. nvcc 默认把 `sum * factor + eps` 缩成一条 FFMA，少一次舍入，rsqrt 差
+     1 ulp，最终 bf16 在千万分之几的元素上翻转。用 `__fmul_rn/__fadd_rn`
+     禁掉缩并。教训：复现 ATen 数值时，编译器的 FMA 缩并也是"顺序"的一
+     部分。
+  之后所有形状（行数 1–2048、q/k 每头 norm、fused 残差）全部逐位一致。
+- 12:44Z–12:54Z 写 `tools/gen_qwen35.py`（新生成器）。要点：
+  - 直接解析 launches.jsonl，按 ArgMax 切 forward，对 T=34/85/174/250 四个
+    prefill forward 和 decode forward 做拓扑断言（相邻核之间的 buffer 同址、
+    stride 字面量、grid 公式），一次通过。
+  - Triton 同名实例钉定：按 launch 的寄存器数筛 module，再把 dump module
+    的 sha 对到 `~/.triton/cache` 里的条目、读 `.ttir` 签名，选"运行时
+    int 参数最多、divisibility 属性最少"的最泛化实例（`_fused_post_conv_
+    kernel` 三个实例寄存器数相同，只能这么分）。decode 的 mrope 也用泛化
+    实例（vLLM 用的是 num_tokens==1 特化版，算术相同）。
+  - mrope 的 `num_tokens` 只用来算 t/h/w 三个平面的步长，传 0 让三个平面
+    重合，cos/sin 各只需一次按 position 的 gather（复用 embedding 核）。
+  - post_conv 的 a/b 直接用 `ba` 的 strided 视图（vLLM 拷成连续，核吃
+    stride），u 不再和 A 共用存储（vLLM 为省显存别名）。
+  - h0/ht 直接指向 state 行（vLLM 用临时张量拷进拷出）：每个 program 先读
+    自己的 h0 tile、最后写 ht tile，原地无竞争。
+  - final norm 在全部 T 行上做（ATen 归约宽度随行数变），再取最后一行喂
+    lm_head（M=1），argmax 出 next_token——prefill 出 token。
+  产物：`examples/qwen3.8-27b.json`（706 buffer，27 kernel，prefill 1079 /
+  decode 742 dispatch）。`tools/extract_kernels.sh` 改成带参数（manifest、
+  dump、输出目录），按钉定的 cubin 名 + sha 抽取；输出到 `kernels-qwen38/`
+  （不能和 4B 的 `kernels/` 混：同名同 ABI 的 reshape_and_cache 实例
+  block_size 不同）。
+
+### 12:55Z–13:20Z  首次端到端 + 逐 token 对比（无人工干预）
+
+- 12:56Z 容器里 `cargo build --release` 8 s，schema 重新生成（`bytes_fixed`
+  一项）。kern-run 加 `--stop-tokens`（Qwen3.8 的 eos 是 248046/248044）和
+  "prefill 出 next_token 就全量 prompt 走 prefill" 的契约分支。
+- 12:57Z 第一次跑：manifest 校验通过、27 个 kernel 全部解析到钉定的 module、
+  668 个权重按名绑定（50 GiB，共享盘冷读一次要 10 min，之后 10 s），
+  prefill 17 token + 20 步 decode 一次跑通，输出连贯，eager 82.8 tok/s。
+  一次都没改 manifest。
+- 13:08Z 5 条 prompt × 400 token 与 vLLM 逐 token 对比
+  （`tools/qwen38_compare.py`）：分别在第 66/93/62/255/178 个 token 处分叉，
+  之前逐字节一致。整条链路是对的，差一点 ulp 级的东西在近似平局的 argmax
+  上翻转。
+- 13:10Z 用同一个 capture 注入库抓 kern-run 自己的 launch，和 vLLM 的
+  decode forward 逐条比 GEMM：算法名、grid 全部相同（只有 dynamic smem 差
+  16 B——kern 链的是系统 cuBLAS，torch 用自带的 wheel，版本不同）。GEMM
+  算法选择不是原因。
+- 13:12Z 给 kern-run 加 `--probe-dir`：prefill/decode 按 dispatch 区段分段
+  执行（`run_range`），在每层 `down_proj` 后 dump `y`，最后 dump logits——
+  不重复执行任何 dispatch，所以 state 不会被重复更新。vLLM 侧
+  `tools/qwen38_probe_vllm.py` 用 forward hook 抓同样的东西。
+- 13:14Z **外部干扰**：本节点四张卡被其它作业占满（各 182 GiB）。
+  权重/venv/binary/triton cache 全在共享盘，GPU 工作迁到另一台空闲节点（ssh）。
+- 13:18Z 在新节点上重跑探针，逐层比较（prompt 0，prefill + 2 步 decode）：
+  embedding 完全一致；**第一处差异在 layer 0（GDN 层）的 prefill**，
+  y 有 11% 元素差 ≤1 ulp（max |d| 4.9e-4）；decode1 的 layer 0 差 0 个元素
+  （state 精确时 decode 路径 bit-exact），差异随深度累积到 layer 63 的
+  max |d| ≈1–2，三步的 argmax 仍然相同。范围收窄到 GDN 层的 prefill 路径。
+
+### 13:20Z–13:37Z  定位到最后一个 op；验收标准放宽（1 次人工干预）
+
+- 13:22Z 怀疑 cuBLAS 版本：kern-run dlopen 的是系统 `/usr/local/cuda`
+  （13.4），torch 用 wheel 自带的 13.0。`LD_LIBRARY_PATH` 指到 torch 的
+  wheel 重跑 prompt 0：仍在第 66 个 token 分叉——**不是库版本**。
+- 13:25Z kern-run 探针加 `KERN_PROBE_LAYER=<i>`：该层每个 dispatch 之后
+  dump 它第一个 out 参数的 buffer（通用，靠 manifest 的 param dir，不需要
+  知道模型）；vLLM 侧 `PROBE_LAYER=<i>` hook 该层的子模块
+  （in_proj_qkvz/in_proj_ba/out_proj/post_attention_layernorm/mlp.*）。
+  `tools/qwen38_probe_fine.py` 按 dispatch 顺序对比。
+- 13:26Z **外部干扰 ×2**：迁去的节点又被其它作业占掉（各 175 GiB），
+  vLLM 探针 OOM；再迁到第三台空闲节点（之后的 GPU 工作都在这台上）。
+- 13:36Z 结果（prefill，M=43）：`in_proj_qkvz`（N=16384）**bit-exact**；
+  `in_proj_ba`（N=96，K=5120）4/4128 个元素差 1 ulp（max |d| 7.8e-3，
+  rel 0.8%）——它是 layer 0 里第一个不同的 op，后面 out_proj/post-norm/
+  gate_up/silu/down 的差异全是继承的。decode0 的 in_proj_* 都 exact，
+  只有 out_proj 起差（继承 prefill 写进 state 的差）；decode1 每个 op 都
+  exact。结论：**整条 GDN/attention/norm 链路的算术都和 vLLM 对上了，
+  残差是 cuBLAS 在 N=96 这个瘦形状上的算法选择**（同一库版本也如此——
+  extern GEMM 是 manifest 里唯一没被 sha 钉住的东西，见 Stage 3 的设计
+  发现）。
+- 13:37Z **人工干预（用户）**："大概精度吻合就行，不需要 bit wise。"
+  Stage 1 验收改为：(a) 对 vLLM 逐 token 一致的前缀长度 + 逐层激活
+  ulp 级一致的探针证据；(b) kern 自身 chunk=1 / chunk=512 / chunk=2048 /
+  eager / graph 之间**逐字节一致**（这个不放宽——同一份算术不能因分块或
+  图捕获而变）。四种配置同时在四张卡上跑
+  （`tools/qwen38_compare.py` + `tools/qwen38_consistency.py`）。
+
+### 13:38Z–13:45Z  Stage 1 验收（无人工干预）
+
+- 5 条短 prompt（41–48 token）× 400 token，四种配置并行跑在四张卡上：
+  - eager/chunk=512、graph/chunk=512、graph/chunk=2048 三者**逐字节一致**
+    （graph 捕获不改算术）；对 vLLM 分别一致到第 66/93/62/255/178 个 token，
+    之后分叉（`docs/qwen38-compare-*.json`）。
+  - chunk=1 与 chunk=512 不一致（分别在 66/93/62/91/178 处）。**这是 GDN 的
+    固有性质，不是 kern 的缺陷**：chunked FLA 核在 T=1 时对 state 的结合顺序
+    和整段处理不同。验证：vLLM 自己把 `max_num_batched_tokens` 设成 16 再跑
+    同样 5 条 prompt（`docs/qwen38-ref-vllm-chunk16.json`），和它自己的
+    单块结果在第 66/11/341/2/339 个 token 处分叉——和 kern-vs-vLLM 是同一
+    个量级的差异带。任务书里 "chunk=1 / chunk=512 / eager 三路一致" 对这类
+    模型只能在 eager/graph 和 64 的倍数分块之间成立。
+- 长 prompt（1787 token 散文，`docs/qwen38-long-prompt.json`，vLLM 参考单块
+  prefill）× 200 token：kern chunk=512（4 块）eager 与 graph **200/200 逐字节
+  一致**，prefill 10.0k tok/s（eager）/ 9.1k（graph）；chunk=2048（单块）在第
+  85 个 token 分叉（`docs/qwen38-compare-long-*.json`）。没有再追这条
+  （M=1787 与 M=512 的 GEMM 算法选择、或分块边界，二者之一）。
+- `kern-attest --a --b` 自己对自己：DIFF 段遍历了 prefill 1079 / decode 742
+  个 dispatch，报 "nothing to attest: the programs are identical"
+  （`docs/qwen38-attest-self.txt`）——harness 能读这份带 `bytes_fixed` state
+  的 manifest。
+- 数值残差的最终定性：prefill 路径上 in_proj_qkvz（N=16384）exact、in_proj_ba
+  （N=96）1 ulp；decode 路径在 state 精确时每个 op exact；kern 在 4×512 分块
+  下与 vLLM 单块 1787 token 完全一致。**kern 的算术就是 vLLM 的算术**，剩下的
+  是 cuBLAS 在小 M / 瘦 N 形状上的算法选择——这也是 manifest 里唯一没被
+  sha256 钉住的 extern。

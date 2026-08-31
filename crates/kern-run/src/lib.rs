@@ -8,11 +8,25 @@
 use std::collections::BTreeMap;
 
 use anyhow::{bail, Result};
-use kern_manifest::types::Dim;
+use kern_manifest::types::{Arg, Dim, Manifest};
 use kern_runtime::Runtime;
 
-/// Qwen3 stop tokens for raw (template-free) completion.
-pub const STOP_TOKENS: [i64; 2] = [151643, 151645]; // <|endoftext|>, <|im_end|>
+/// Default stop tokens (Qwen3 <|endoftext|>, <|im_end|>) for raw
+/// (template-free) completion; `kern-run --stop-tokens` overrides.
+pub const STOP_TOKENS: [i64; 2] = [151643, 151645];
+
+/// Whether `prefill` produces `next_token` itself. A manifest whose prefill
+/// arithmetic differs from decode's (hybrid GDN models: chunked FLA kernels
+/// vs the recurrent kernel) must run the last prompt token through prefill
+/// to match the reference; the driver then prefills every prompt token and
+/// takes the first generated token from the prefill call.
+pub fn prefill_emits_next_token(m: &Manifest) -> bool {
+    m.programs.get("prefill").is_some_and(|p| {
+        p.dispatches.iter().any(|d| {
+            d.args.iter().any(|a| matches!(a, Arg::Buf { buf, .. } if buf == "next_token"))
+        })
+    })
+}
 
 /// Programs this driver knows how to stage. A manifest may declare others;
 /// the driver can't produce a workload for them.
@@ -95,8 +109,10 @@ impl Caller {
     }
 
     /// Chunked prefill of `ids` (eager or graph-captured full chunks),
-    /// advancing the cursor past them. KV writes only — call `decode` on the
-    /// following token for logits.
+    /// advancing the cursor past them. State writes only — call `decode` on
+    /// the following token for logits — unless the manifest's prefill emits
+    /// `next_token` (see [`prefill_emits_next_token`]), in which case the
+    /// last chunk's output is the first generated token.
     pub fn prefill(&mut self, ids: &[i64], chunk: u64, eager: bool) -> Result<bool> {
         let chunk = chunk.min(self.rt.manifest.symbols["tokens"].max).max(1);
         let mut captured = false;

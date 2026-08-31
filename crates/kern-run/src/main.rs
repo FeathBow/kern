@@ -14,7 +14,9 @@ use std::time::Instant;
 
 use anyhow::{bail, ensure, Context, Result};
 use clap::Parser;
-use kern_run::{env, i64_from_le, le_bytes_i32, le_bytes_i64, Caller, STOP_TOKENS};
+use kern_run::{
+    env, i64_from_le, le_bytes_i32, le_bytes_i64, prefill_emits_next_token, Caller, STOP_TOKENS,
+};
 use kern_runtime::Runtime;
 use tracing::info;
 
@@ -70,6 +72,17 @@ struct Opts {
     /// DSpark speculative decoding (needs the dspark manifest programs)
     #[arg(long)]
     spec: bool,
+
+    /// Token ids that end generation (comma-separated; default Qwen3's)
+    #[arg(long, value_delimiter = ',', default_values_t = STOP_TOKENS)]
+    stop_tokens: Vec<i64>,
+
+    /// Debug: dump per-layer activations (`y` after every `*.down_proj`,
+    /// embedding, logits) of the first prefill chunk and two decode steps
+    /// into this directory, then exit. Programs run dispatch-range by
+    /// dispatch-range so nothing executes twice.
+    #[arg(long)]
+    probe_dir: Option<PathBuf>,
 }
 
 fn human(bytes: u64) -> String {
@@ -119,11 +132,15 @@ fn main() -> Result<()> {
         info!("  symbol   {name} ∈ [{}, {}] (runtime-provided per step)", s.min, s.max);
     }
     for (name, per_tok, alloc) in rt.state_sizes() {
-        info!(
-            "  state    {name}: opaque, {per_tok} B/token × capacity {} = {}",
-            o.capacity,
-            human(alloc)
-        );
+        if per_tok > 0 {
+            info!(
+                "  state    {name}: opaque, {per_tok} B/token × capacity {} = {}",
+                o.capacity,
+                human(alloc)
+            );
+        } else {
+            info!("  state    {name}: opaque, fixed {} (per-sequence)", human(alloc));
+        }
     }
     let mut by_class: BTreeMap<&str, (usize, u64)> = BTreeMap::new();
     for (_, class, bytes) in rt.buffer_sizes() {
@@ -202,21 +219,34 @@ fn main() -> Result<()> {
 
     let mut caller = Caller::new(rt)?;
 
-    // Chunked prefill over the first n-1 prompt tokens: repeated `prefill`
-    // calls (KV writes only, no logits). The final prompt token goes through
-    // `decode`, which produces the first logits — decode doubles as
-    // "prefill of the last token".
+    if let Some(dir) = &o.probe_dir {
+        return probe(&mut caller, &prompt_ids, dir, o.chunk);
+    }
+
+    // Chunked prefill: repeated `prefill` calls. Two caller contracts:
+    // - prefill writes state only (qwen3-4b): the first n-1 prompt tokens go
+    //   through it and the final prompt token through `decode`, which
+    //   produces the first logits — decode doubles as "prefill of the last
+    //   token";
+    // - prefill emits `next_token` (qwen3.8): every prompt token goes through
+    //   it and the last chunk yields the first generated token. Hybrid GDN
+    //   models need this — their chunked prefill kernels are a different
+    //   arithmetic from the decode kernel, and the reference runs the last
+    //   prompt token through the former.
     let chunk = o.chunk.min(caller.rt.manifest.symbols["tokens"].max).max(1);
     let n_prompt = prompt_ids.len();
-    if n_prompt > 1 {
+    let prefill_all = prefill_emits_next_token(&caller.rt.manifest);
+    let n_pre = if prefill_all { n_prompt } else { n_prompt - 1 };
+    let mut generated: Vec<i64> = Vec::new();
+    if n_pre > 0 {
         let t = Instant::now();
         let captured = if o.spec {
             // Each chunk's fc taps must be projected into the draft's context
             // KV while positions/slot_mapping still hold this chunk's rows.
             let mut captured = false;
             let mut i = 0;
-            while i < n_prompt - 1 {
-                let c = (n_prompt - 1 - i).min(chunk as usize);
+            while i < n_pre {
+                let c = (n_pre - i).min(chunk as usize);
                 let e = caller.stage_prefill(&prompt_ids[i..i + c])?;
                 if !o.eager && c == chunk as usize {
                     if !captured {
@@ -233,17 +263,27 @@ fn main() -> Result<()> {
             }
             captured
         } else {
-            caller.prefill(&prompt_ids[..n_prompt - 1], chunk, o.eager)?
+            caller.prefill(&prompt_ids[..n_pre], chunk, o.eager)?
         };
         let dt = t.elapsed();
         let pos = caller.pos;
         let n_chunks = (pos as u64).div_ceil(chunk);
         info!(
             "prefill: {pos} tokens in {n_chunks} chunk(s) of <= {chunk} \
-             ({dt:?}, {:.0} tok/s{})",
+             ({dt:?}, {:.0} tok/s{}{})",
             pos as f64 / dt.as_secs_f64(),
-            if captured { ", graph-captured" } else { ", eager" }
+            if captured { ", graph-captured" } else { ", eager" },
+            if prefill_all { ", emits next_token" } else { "" }
         );
+        if prefill_all {
+            let first = caller.next_token()?;
+            if o.stop_tokens.contains(&first) {
+                info!("stop token {first} at pos {pos}");
+                println!("{}", o.prompt);
+                return Ok(());
+            }
+            generated.push(first);
+        }
     }
     if o.spec {
         let pos = caller.pos;
@@ -264,11 +304,10 @@ fn main() -> Result<()> {
             t.elapsed()
         );
     }
-    let mut generated: Vec<i64> = Vec::new();
     let mut decode_ns: u128 = 0;
     let mut decode_steps = 0u32;
 
-    loop {
+    while generated.len() < o.steps {
         let pos = caller.pos as usize;
         let tok = if pos < prompt_ids.len() { prompt_ids[pos] } else { *generated.last().unwrap() };
         caller.stage_decode(tok)?;
@@ -288,18 +327,19 @@ fn main() -> Result<()> {
         let next = caller.next_token()?;
         decode_ns += t.elapsed().as_nanos();
         decode_steps += 1;
-        if STOP_TOKENS.contains(&next) {
+        if o.stop_tokens.contains(&next) {
             info!("stop token {next} at pos {pos}");
             break;
         }
         generated.push(next);
-        if generated.len() >= o.steps || pos as u64 + 1 >= o.capacity {
+        if pos as u64 + 1 >= o.capacity {
             break;
         }
     }
 
     let gen_u32: Vec<u32> = generated.iter().map(|&t| t as u32).collect();
     let text = tokenizer.decode(&gen_u32, false).map_err(|e| anyhow::anyhow!("decode: {e}"))?;
+    info!("generated ids: {generated:?}");
     info!(
         "{} tokens generated, {:.1} ms/step ({:.1} tok/s)",
         generated.len(),
@@ -307,6 +347,95 @@ fn main() -> Result<()> {
         decode_steps as f64 * 1e9 / decode_ns.max(1) as f64,
     );
     println!("{}{}", o.prompt, text);
+    Ok(())
+}
+
+/// Activation probe for reference comparison (`--probe-dir`): the first
+/// prefill chunk and two decode steps, each run as consecutive dispatch
+/// ranges cut after `embed` and every `l<i>.down_proj`, dumping `residual`
+/// / `y` (live `tokens` rows) and the final logits as raw little-endian
+/// files `<tag>.<point>.bin`.
+fn probe(caller: &mut Caller, prompt_ids: &[i64], dir: &std::path::Path, chunk: u64) -> Result<()> {
+    use kern_manifest::types::Dim;
+    std::fs::create_dir_all(dir)?;
+    match caller.rt.manifest.buffers["y"].shape.as_slice() {
+        [Dim::Sym(_), Dim::Const(_)] => {}
+        s => bail!("unexpected `y` shape {s:?}"),
+    }
+    // KERN_PROBE_LAYER=<i>: additionally dump, after every dispatch of layer
+    // `l<i>.`, the buffer its first `out` param writes (live `tokens` rows).
+    let fine: Option<String> = std::env::var("KERN_PROBE_LAYER").ok().map(|l| format!("l{l}."));
+    let row_bytes = |rt: &Runtime, name: &str| -> usize {
+        let b = &rt.manifest.buffers[name];
+        b.shape[1..]
+            .iter()
+            .map(|d| match d {
+                Dim::Const(c) => *c as usize,
+                _ => 1,
+            })
+            .product::<usize>()
+            * b.dtype.bytes() as usize
+    };
+    let run_probed = |rt: &Runtime, program: &str, env: &BTreeMap<String, u64>, tokens: usize, tag: &str| -> Result<()> {
+        let prog = &rt.manifest.programs[program];
+        let labels: Vec<String> = prog.dispatches.iter().map(|d| d.label.clone().unwrap_or_default()).collect();
+        let mut lo = 0;
+        for (i, l) in labels.iter().enumerate() {
+            let mut dumps: Vec<(String, String)> = Vec::new();
+            if l == "embed" {
+                dumps.push(("embed".into(), "residual".into()));
+            } else if let Some(layer) = l.strip_suffix(".down_proj") {
+                dumps.push((layer.to_string(), "y".into()));
+            }
+            if fine.as_deref().is_some_and(|p| l.starts_with(p)) {
+                let d = &prog.dispatches[i];
+                let k = &rt.manifest.kernels[&d.kernel];
+                for (arg, p) in d.args.iter().zip(&k.params) {
+                    if let (kern_manifest::types::Arg::Buf { buf, .. }, kern_manifest::types::ParamType::Buf { dir, .. }) = (arg, p) {
+                        if matches!(dir, kern_manifest::types::Dir::Out | kern_manifest::types::Dir::InOut) {
+                            dumps.push((format!("{l}.{buf}"), buf.clone()));
+                            break;
+                        }
+                    }
+                }
+            }
+            if dumps.is_empty() {
+                continue;
+            }
+            rt.run_range(program, env, lo, i + 1)?;
+            lo = i + 1;
+            for (point, bufname) in dumps {
+                let rows = match rt.manifest.buffers[&bufname].shape[0] {
+                    Dim::Const(c) => c as usize,
+                    _ => tokens,
+                };
+                let data = rt.read_buffer_prefix(&bufname, rows * row_bytes(rt, &bufname))?;
+                std::fs::write(dir.join(format!("{tag}.{point}.bin")), data)?;
+            }
+        }
+        rt.run_range(program, env, lo, labels.len())?;
+        std::fs::write(dir.join(format!("{tag}.logits.bin")), rt.read_buffer("logits")?)?;
+        std::fs::write(dir.join(format!("{tag}.next_token.bin")), rt.read_output("next_token")?)?;
+        Ok(())
+    };
+    let chunk = chunk.min(caller.rt.manifest.symbols["tokens"].max).max(1) as usize;
+    let prefill_all = prefill_emits_next_token(&caller.rt.manifest);
+    let n_pre = if prefill_all { prompt_ids.len() } else { prompt_ids.len() - 1 };
+    let c = n_pre.min(chunk);
+    let e = caller.stage_prefill(&prompt_ids[..c])?;
+    run_probed(&caller.rt, "prefill", &e, c, "prefill")?;
+    caller.advance(c as u64);
+    if c < n_pre {
+        caller.prefill(&prompt_ids[c..n_pre], chunk as u64, true)?;
+    }
+    let mut tok = if prefill_all { caller.next_token()? } else { prompt_ids[n_pre] };
+    for s in 0..2 {
+        let e = caller.stage_decode(tok)?;
+        run_probed(&caller.rt, "decode", &e, 1, &format!("decode{s}"))?;
+        caller.advance(1);
+        tok = caller.next_token()?;
+    }
+    info!("probe: wrote activations to {}", dir.display());
     Ok(())
 }
 
@@ -342,7 +471,7 @@ fn spec_decode(
     rt.run("draft_precompute", &env(1))?;
     pos += 1;
     let first = i64::from_le_bytes(rt.read_output("next_token")?.try_into().unwrap());
-    if STOP_TOKENS.contains(&first) {
+    if o.stop_tokens.contains(&first) {
         info!("stop token {first} at pos {pos}");
         return Ok(Vec::new());
     }
@@ -410,7 +539,7 @@ fn spec_decode(
         rounds += 1;
         accepted += a;
         for &tok in &vt[..=a] {
-            if STOP_TOKENS.contains(&tok) {
+            if o.stop_tokens.contains(&tok) {
                 info!("stop token {tok} at pos {pos}");
                 break 'rounds;
             }
