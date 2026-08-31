@@ -143,62 +143,115 @@ function TheSwap() {
   return (
     <section className="section swap-section" id="swap">
       <div className="section-number">01 / THE SWAP</div>
-      <div className="swap-layout">
-        <div className="swap-copy">
-          <h2>
-            SWAP THE
-            <br />
-            KERNEL.
-          </h2>
-          <p className="large-note">Nothing else changes.</p>
+      <div className="swap-header">
+        <h2>
+          SWAP THE
+          <br />
+          KERNEL.
+        </h2>
+        <div className="swap-header-side">
+          <p className="swap-note">Nothing else changes.</p>
           <p className="swap-story">
-            Point one line of the manifest at a kernel on the Hugging&nbsp;Face
-            hub. The runtime fetches it, verifies it, runs it — and the output
-            doesn't change, byte for byte.
+            Three diff lines point one dispatch at a kernel from the
+            Hugging&nbsp;Face hub. The old symbol is erased, the new impl is
+            verified into its slot — the rest of the program never moves.
           </p>
           <a className="swap-schema-link" href="/schema/">
             REGISTRY REFS IN THE SCHEMA →
           </a>
         </div>
+      </div>
 
-        <div className="swap-visual">
-          <div className="diff-window swap-diff">
-            <div className="swap-diff-title">examples/qwen3-4b.json</div>
-            <div className="diff-line context">
-              <b> </b>
-              <code>"silu_mul": {"{"} "impl": {"{"} "steps": [{"{"}</code>
-            </div>
-            <div className="diff-line removed">
-              <b>-</b>
-              <code>"symbol": "_ZN4vllm18act_and_mul_kernel…"</code>
-            </div>
-            <div className="diff-line added">
-              <b>+</b>
-              <code>"cubin": "hf:kernels-community/activation</code>
-            </div>
-            <div className="diff-line added">
-              <b>+</b>
-              <code>          /…/_activation_320b408.abi3.so",</code>
-            </div>
-            <div className="diff-line added">
-              <b>+</b>
-              <code>"sha256": "73748b54…b1fe49aa",</code>
-            </div>
-            <div className="diff-line context">
-              <b> </b>
-              <code>"params": ["out buffer&lt;bf16&gt;", "in buffer&lt;bf16&gt;", "i32"]</code>
-            </div>
-            <div className="diff-line reused">
-              <b>=</b>
-              <code>dispatches touched: 0</code>
-            </div>
+      <div
+        className="swap-stage"
+        aria-label="A three-line JSON diff swaps one implementation: the old engine symbol is erased from the silu_mul slot of the dispatch pipeline, a verified Hugging Face kernel drops in, and no other dispatch is touched"
+      >
+        <div className="diff-window swap-diff">
+          <div className="swap-diff-title">examples/qwen3-4b.json</div>
+          <div className="diff-line context">
+            <b> </b>
+            <code>"silu_mul": {"{"} "impl": {"{"} "steps": [{"{"}</code>
           </div>
-          <div className="swap-stamps">
-            <span className="swap-stamp">NO TORCH</span>
-            <span className="swap-stamp">NO PYTHON</span>
-            <span className="swap-stamp stamp-green">BYTE-IDENTICAL</span>
+          <div className="diff-line removed">
+            <b>-</b>
+            <code>"symbol": "_ZN4vllm18act_and_mul_kernel…"</code>
+          </div>
+          <div className="diff-line added">
+            <b>+</b>
+            <code>"cubin": "hf:kernels-community/activation</code>
+          </div>
+          <div className="diff-line added">
+            <b>+</b>
+            <code>          /…/_activation_320b408.abi3.so",</code>
+          </div>
+          <div className="diff-line added">
+            <b>+</b>
+            <code>"sha256": "73748b54…b1fe49aa",</code>
+          </div>
+          <div className="diff-line context">
+            <b> </b>
+            <code>"params": ["out buffer&lt;bf16&gt;", "in buffer&lt;bf16&gt;", "i32"]</code>
           </div>
         </div>
+
+        <div className="swap-flight" aria-hidden="true">
+          <svg className="flight-paths" viewBox="0 0 250 400">
+            <path className="flight-erase" d="M5 127 C12 260, 70 345, 226 278" />
+            <path className="flight-erase" d="M212 292 L228 277 L208 268" />
+            <path className="flight-ship" d="M202 200 C226 208, 240 226, 246 246" />
+            <path className="flight-ship" d="M248 228 L246 247 L233 235" />
+          </svg>
+          <div className="flight-block">
+            <span className="flight-kicker">NEW IMPL</span>
+            <strong>hf:kernels-community/activation</strong>
+            <small>sha256 · 73748b54…b1fe49aa</small>
+            <i className="flight-verified">✓ VERIFIED</i>
+          </div>
+          <span className="flight-label label-erase">ERASED</span>
+          <span className="flight-label label-ship">SWAPS IN</span>
+        </div>
+
+        <div className="swap-pipeline">
+          <span className="pipeline-title">FORWARD PROGRAM · DISPATCH ORDER</span>
+          <div className="pipe-block">
+            <code>rms_norm</code>
+            <i>=</i>
+          </div>
+          <div className="pipe-block">
+            <code>qkv_proj</code>
+            <i>=</i>
+          </div>
+          <div className="pipe-block">
+            <code>attention</code>
+            <i>=</i>
+          </div>
+          <div className="pipe-block swap-slot">
+            <code>silu_mul</code>
+            <span className="old-impl">_ZN4vllm18act_and_mul_kernelI…</span>
+            <div className="eraser" />
+            <span className="shaving shaving-a" />
+            <span className="shaving shaving-b" />
+            <span className="shaving shaving-c" />
+          </div>
+          <div className="pipe-block">
+            <code>down_proj</code>
+            <i>=</i>
+          </div>
+          <div className="pipeline-foot">
+            <b>0</b>
+            <span>
+              OTHER DISPATCHES
+              <br />
+              TOUCHED
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div className="swap-stamps">
+        <span className="swap-stamp">NO TORCH</span>
+        <span className="swap-stamp">NO PYTHON</span>
+        <span className="swap-stamp stamp-green">BYTE-IDENTICAL</span>
       </div>
     </section>
   );

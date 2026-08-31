@@ -805,23 +805,38 @@ footer h2 {
   background: var(--soft);
 }
 
-.swap-layout {
-  display: grid;
-  grid-template-columns: minmax(310px, 0.85fr) minmax(480px, 1.15fr);
-  align-items: center;
-  gap: 7vw;
-  min-height: calc(100vh - 130px);
+.swap-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 48px;
+  margin: 6vh 0 8vh;
 }
 
-.swap-copy h2,
+.swap-header h2 {
+  font-size: clamp(56px, 6.6vw, 104px);
+}
+
 .loop-header h2 {
   font-size: clamp(64px, 8vw, 126px);
 }
 
+.swap-header-side {
+  max-width: 420px;
+  padding-bottom: 8px;
+}
+
+.swap-note {
+  margin: 0 0 14px;
+  font-size: 22px;
+  letter-spacing: -0.04em;
+  font-weight: 700;
+}
+
 .swap-story {
   max-width: 46ch;
-  margin: 0 0 34px;
-  font-size: 15.5px;
+  margin: 0 0 22px;
+  font-size: 14.5px;
   line-height: 1.65;
   color: var(--muted);
 }
@@ -834,6 +849,14 @@ footer h2 {
   padding-bottom: 5px;
 }
 
+/* diff → flight zone → pipeline */
+
+.swap-stage {
+  display: grid;
+  grid-template-columns: minmax(380px, 1fr) 250px minmax(300px, 0.85fr);
+  align-items: start;
+}
+
 .swap-diff {
   font-size: 13px;
 }
@@ -841,6 +864,234 @@ footer h2 {
 .swap-diff .diff-line {
   font-size: 12.5px;
   min-height: 30px;
+}
+
+.swap-flight {
+  position: relative;
+  height: 400px;
+}
+
+.flight-paths {
+  position: absolute;
+  inset: 0;
+  width: 250px;
+  height: 400px;
+  overflow: visible;
+}
+
+.flight-paths path {
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.flight-erase {
+  stroke: var(--red);
+  stroke-dasharray: 7 6;
+}
+
+.flight-ship {
+  stroke: var(--blue);
+  stroke-width: 2.5;
+  stroke-dasharray: none;
+}
+
+.flight-block {
+  position: absolute;
+  left: -34px;
+  top: 138px;
+  width: 242px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 15px 17px;
+  border: 2px solid var(--ink);
+  background: var(--green);
+  transform: rotate(-2deg);
+  box-shadow: 7px 7px 0 var(--ink);
+}
+
+.flight-kicker {
+  font-family: "DM Mono", monospace;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+}
+
+.flight-block strong {
+  font-family: "DM Mono", monospace;
+  font-size: 10.5px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.flight-block small {
+  font-family: "DM Mono", monospace;
+  font-size: 9px;
+  color: rgba(8, 10, 13, 0.6);
+}
+
+.flight-verified {
+  position: absolute;
+  top: -14px;
+  right: -12px;
+  padding: 5px 9px;
+  border: 2px solid var(--ink);
+  background: #fff;
+  font-family: "DM Mono", monospace;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 500;
+  transform: rotate(3deg);
+}
+
+.flight-label {
+  position: absolute;
+  font-family: "DM Mono", monospace;
+  font-size: 9px;
+  letter-spacing: 0.1em;
+}
+
+.label-erase {
+  left: 74px;
+  top: 330px;
+  color: var(--red);
+  transform: rotate(-9deg);
+}
+
+.label-ship {
+  left: 138px;
+  top: 246px;
+  color: var(--blue);
+  transform: rotate(6deg);
+}
+
+.swap-pipeline {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pipeline-title {
+  margin-bottom: 2px;
+  font-family: "DM Mono", monospace;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.pipe-block {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 54px;
+  padding: 0 18px;
+  border: 2px solid var(--ink);
+  background: #fff;
+  font-family: "DM Mono", monospace;
+  font-size: 12.5px;
+}
+
+.pipe-block > i {
+  font-style: normal;
+  color: var(--muted);
+  opacity: 0.55;
+}
+
+.swap-slot {
+  position: relative;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 6px;
+  min-height: 66px;
+  border-color: var(--blue);
+  border-width: 2.5px;
+}
+
+.swap-slot > code {
+  font-weight: 500;
+}
+
+.old-impl {
+  font-family: "DM Mono", monospace;
+  font-size: 10.5px;
+  color: var(--red);
+  text-decoration: line-through;
+  text-decoration-color: rgba(255, 59, 48, 0.6);
+  mask-image: linear-gradient(90deg, #000 30%, rgba(0, 0, 0, 0.25) 65%, transparent 92%);
+  -webkit-mask-image: linear-gradient(90deg, #000 30%, rgba(0, 0, 0, 0.25) 65%, transparent 92%);
+}
+
+.eraser {
+  position: absolute;
+  left: 152px;
+  top: 18px;
+  width: 86px;
+  height: 30px;
+  border: 2px solid var(--ink);
+  background: #fff;
+  transform: rotate(-18deg);
+}
+
+.eraser::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 28px;
+  background: var(--blue);
+  border-right: 2px solid var(--ink);
+}
+
+.shaving {
+  position: absolute;
+  width: 9px;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(8, 10, 13, 0.35);
+}
+
+.shaving-a {
+  left: 168px;
+  top: 55px;
+  transform: rotate(24deg);
+}
+
+.shaving-b {
+  left: 198px;
+  top: 59px;
+  transform: rotate(-32deg);
+}
+
+.shaving-c {
+  left: 142px;
+  top: 60px;
+  transform: rotate(64deg);
+}
+
+.pipeline-foot {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 8px;
+  padding-top: 14px;
+  border-top: 2px solid var(--ink);
+}
+
+.pipeline-foot b {
+  font-size: 44px;
+  font-weight: 900;
+  letter-spacing: -0.06em;
+  line-height: 0.8;
+  color: var(--blue);
+}
+
+.pipeline-foot span {
+  font-family: "DM Mono", monospace;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  line-height: 1.5;
 }
 
 .swap-diff-title {
