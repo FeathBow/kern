@@ -1,5 +1,10 @@
 # kern
 
+**Models ship as verified GPU programs.**
+
+[Website](https://kern-baa.pages.dev/) · [Design](design.md) ·
+[Manifest example](examples/qwen3-4b.json)
+
 Model-agnostic GPU executable runtime（背景见 [design.md](design.md)）。
 
 Model provider 交付 `manifest.json + kernels.cubin + weights`，runtime 负责：
