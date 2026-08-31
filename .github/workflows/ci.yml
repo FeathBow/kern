@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  manifest:
+    runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Test kern-manifest
+        run: cargo test -p kern-manifest
+
+      - name: Schema golden check
+        run: |
+          cargo run -q -p kern-manifest --example gen_schema > /tmp/manifest-v2.schema.json
+          if ! diff -u schema/manifest-v2.schema.json /tmp/manifest-v2.schema.json; then
+            echo "::error::schema/manifest-v2.schema.json is stale — regenerate with: cargo run -p kern-manifest --example gen_schema > schema/manifest-v2.schema.json"
+            exit 1
+          fi

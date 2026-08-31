@@ -62,6 +62,11 @@ torch 扩展 .so）：runtime 剖开 ELF 取 `.nv_fatbin` 里的设备代码逐�
 `hf:kernels-community/activation`（PyTorch 生态在用的原装包），输出与
 挖矿基线逐字节一致。
 
+**Wire format 的 ground truth 是 `kern-manifest` 的 Rust 类型**（parser
+即法律）；`schema/manifest-v2.schema.json` 是它生成的可发布投影
+（`cargo run -p kern-manifest --example gen_schema`，CI golden 检查防
+漂移），给生成器/agent 当形状契约用。
+
 Manifest 是**生成产物**（类比 `Cargo.lock`）：provider 手写的是生成器，
 不是 manifest。样例见 `tools/gen_qwen3_decode.py` →
 `examples/qwen3-4b.json`（Qwen3-4B，两个 program：`prefill` 433 dispatch

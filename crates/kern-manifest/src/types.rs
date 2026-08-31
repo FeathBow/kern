@@ -40,7 +40,7 @@ where
     deserializer.deserialize_map(UniqueMap(PhantomData))
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub meta: Meta,
@@ -66,7 +66,7 @@ impl Manifest {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Meta {
     /// Manifest format version. Only 2 is accepted.
@@ -78,7 +78,7 @@ pub struct Meta {
 /// A runtime-provided scalar (e.g. token count this step). The declared
 /// bounds are what verification is performed against; the runtime rejects
 /// out-of-bounds values at dispatch time.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Symbol {
     pub max: u64,
@@ -93,7 +93,7 @@ fn default_symbol_min() -> u64 {
 /// Opaque persistent state. The runtime knows only how many bytes to
 /// provision per token; the internal layout belongs to the provider's
 /// kernels, which receive the base pointer as an untyped `ptr` param.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct State {
     pub bytes_per_token: u64,
@@ -105,7 +105,7 @@ fn default_align() -> u64 {
     256
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Buffer {
     pub dtype: DType,
@@ -113,14 +113,14 @@ pub struct Buffer {
     pub class: BufferClass,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum Dim {
     Const(u64),
     Sym(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum BufferClass {
     /// Written by the runtime before program execution.
@@ -206,6 +206,20 @@ impl FromStr for DType {
 impl fmt::Display for DType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+impl schemars::JsonSchema for DType {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "DType".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "description": "Element type of a buffer or scratch declaration.",
+            "type": "string",
+            "enum": ["bf16", "f16", "f32", "fp8e4m3", "i32", "u32", "i64", "u8"],
+        })
     }
 }
 
@@ -328,6 +342,23 @@ impl fmt::Display for ParamType {
     }
 }
 
+impl schemars::JsonSchema for ParamType {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ParamType".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "description": "One kernel parameter: a by-value scalar (`\"i32\"`, \
+                `\"u32\"`, `\"i64\"`, `\"f32\"`, `\"u8\"`) or a directional \
+                pointer — `\"in\"`/`\"out\"`/`\"inout\"` followed by `\"ptr\"` \
+                (untyped, e.g. opaque state) or `\"buffer<dtype>\"`.",
+            "type": "string",
+            "pattern": "^(i32|u32|i64|f32|u8|(in|out|inout) (ptr|buffer<(bf16|f16|f32|fp8e4m3|i32|u32|i64|u8)>))$",
+        })
+    }
+}
+
 impl Serialize for ParamType {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(&self.to_string())
@@ -345,7 +376,7 @@ impl<'de> Deserialize<'de> for ParamType {
 /// are lowered onto actual launches. Swapping the implementation — a faster
 /// kernel from elsewhere with the same interface — touches only `impl`;
 /// every dispatch stays untouched.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Kernel {
     /// The interface: typed, directional params. Call-site semantics
@@ -360,7 +391,7 @@ pub struct Kernel {
 /// expressions over the interface's symbols, provisioned by the runtime,
 /// dead outside one dispatch) and one or more launch steps. Launch geometry
 /// lives here, not at the call site — it belongs to the implementation.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Impl {
     #[serde(
@@ -374,7 +405,7 @@ pub struct Impl {
 
 /// One scratch buffer declaration: like a workspace buffer, but private to
 /// the implementation.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Scratch {
     pub dtype: DType,
@@ -382,7 +413,7 @@ pub struct Scratch {
 }
 
 /// One launch inside an implementation.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Step {
     /// Cubin file (relative to the kernel artifact dir) this step's symbol
@@ -411,7 +442,7 @@ pub struct Step {
 /// `{"scratch": "pmax"}` passes a private scratch pointer (optional byte
 /// `offset`); scalar literals are implementation constants the interface
 /// never sees (e.g. a partial-count baked into a two-stage reduction).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum StepArg {
     Arg {
@@ -494,7 +525,7 @@ impl RegistryRef {
 /// The closed scalar-expression set. This is deliberately not a language:
 /// grid geometry and dynamic shared memory are the only runtime-dependent
 /// numbers a provider may compute, and only with these forms.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum Expr {
     Const(u64),
@@ -535,7 +566,7 @@ impl Expr {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Program {
     pub dispatches: Vec<Dispatch>,
@@ -543,7 +574,7 @@ pub struct Program {
 
 /// A call site: which kernel interface, with which args. No geometry —
 /// grid/block belong to the kernel's implementation.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Dispatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -561,7 +592,7 @@ pub struct Dispatch {
 /// inside a fused buffer (q/k/v slices of a merged qkv projection) or a
 /// per-layer region inside an opaque state — the offset is a literal from
 /// the provider's own layout arithmetic, the runtime just adds it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum Arg {
     Buf {
