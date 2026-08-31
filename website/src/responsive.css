@@ -264,3 +264,38 @@
     transition: none !important;
   }
 }
+
+@media (max-width: 1100px) {
+  .swap-layout {
+    grid-template-columns: 1fr;
+    gap: 48px;
+  }
+
+  .lane {
+    grid-template-columns: 1fr;
+    gap: 18px;
+  }
+}
+
+@media (max-width: 760px) {
+  .swap-stamps {
+    flex-wrap: wrap;
+    gap: 14px;
+  }
+
+  .swap-diff .diff-line {
+    font-size: 10.5px;
+  }
+
+  .agent-node {
+    padding: 11px 13px;
+  }
+
+  .loop-return-label {
+    display: none;
+  }
+
+  .lane-cost {
+    font-size: 34px;
+  }
+}

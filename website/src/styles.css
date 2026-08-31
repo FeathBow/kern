@@ -511,3 +511,110 @@ footer h2 {
   color: var(--ink);
   background: var(--green);
 }
+
+/* ---- hero: the loop (agent → manifest → verify → runtime) ---- */
+
+.agent-node {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 15px 19px;
+  border: 2px solid var(--ink);
+  background: var(--ink);
+  color: #fff;
+  font-family: "DM Mono", monospace;
+  transform: rotate(-2deg);
+  z-index: 2;
+}
+
+.agent-node strong {
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+}
+
+.agent-node small {
+  font-size: 9px;
+  color: rgba(255, 255, 255, 0.62);
+}
+
+.hero-arrow-zero {
+  position: absolute;
+  left: 30%;
+  top: 8%;
+  width: 66px;
+  transform: rotate(36deg);
+  color: var(--ink);
+}
+
+.hero-diagram .artifact-stack {
+  top: 21%;
+}
+
+.hero-diagram .hero-arrow-one {
+  top: 38%;
+  transform: rotate(-9deg);
+}
+
+.reject-tag {
+  position: absolute;
+  right: 1%;
+  top: 45%;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 13px;
+  border: 2px dashed var(--red);
+  color: var(--red);
+  background: #fff;
+  font-family: "DM Mono", monospace;
+  font-size: 12px;
+  font-weight: 500;
+  transform: rotate(4deg);
+}
+
+.reject-tag small {
+  font-size: 8.5px;
+  letter-spacing: 0.06em;
+}
+
+.hero-diagram .hero-arrow-two {
+  right: 32%;
+  top: 47%;
+  transform: rotate(118deg);
+  width: 96px;
+}
+
+.hero-diagram .runtime-chip {
+  right: 26%;
+  bottom: 7%;
+}
+
+.loop-return {
+  position: absolute;
+  left: -4%;
+  bottom: -1%;
+  width: 52%;
+  overflow: visible;
+}
+
+.loop-return path {
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 1.6;
+  stroke-dasharray: 6 6;
+  stroke-linecap: round;
+}
+
+.loop-return-label {
+  position: absolute;
+  left: 3%;
+  bottom: 14%;
+  font-family: "DM Mono", monospace;
+  font-size: 10px;
+  letter-spacing: 0.07em;
+  color: var(--muted);
+}

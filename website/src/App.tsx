@@ -1,6 +1,5 @@
 import { useState } from "react";
 
-type AttentionMode = "prefill" | "decode";
 type VerifyMode = "type" | "dataflow" | "abi";
 
 const verifyExamples: Record<
@@ -43,7 +42,8 @@ function Header() {
         KERN<span className="wordmark-dot">■</span>
       </a>
       <nav aria-label="Primary navigation">
-        <a href="#artifact">ARTIFACT</a>
+        <a href="#swap">SWAP</a>
+        <a href="#loop">LOOP</a>
         <a href="#proof">PROOF</a>
         <a href="/schema/">SCHEMA</a>
         <a
@@ -61,15 +61,23 @@ function Header() {
 
 function HeroDiagram() {
   return (
-    <div className="hero-diagram" aria-label="Kern artifact flows through verification into a thin runtime">
+    <div
+      className="hero-diagram"
+      aria-label="An agent writes a kernel implementation; kern verifies it and ships it into the runtime; bad implementations are refused before the first launch"
+    >
+      <div className="agent-node">
+        <strong>✎ AGENT</strong>
+        <small>writes an impl · 03:14 AM</small>
+      </div>
+      <Arrow className="hero-arrow-zero" />
       <div className="artifact-stack">
         <div className="file-sheet file-sheet-back">WEIGHTS</div>
         <div className="file-sheet file-sheet-mid">KERNELS</div>
         <div className="file-sheet file-sheet-front">
           <span>MANIFEST</span>
-          <span className="file-code">program decode</span>
-          <span className="file-code">kernel attn</span>
-          <span className="file-code">state kv</span>
+          <span className="file-code">kernel silu_mul</span>
+          <span className="file-code">impl · hf:…/activation</span>
+          <span className="file-code">sha256 · 73748b54…</span>
         </div>
       </div>
       <Arrow className="hero-arrow-one" />
@@ -77,12 +85,21 @@ function HeroDiagram() {
         <span className="verify-check">✓</span>
         <span>VERIFIED</span>
       </div>
+      <div className="reject-tag">
+        ✗ BAD IMPL
+        <small>REFUSED · NO LAUNCH</small>
+      </div>
       <Arrow className="hero-arrow-two" />
       <div className="runtime-chip">
         <span>THIN</span>
         <strong>RUNTIME</strong>
         <div className="chip-pins" aria-hidden="true" />
       </div>
+      <svg className="loop-return" viewBox="0 0 340 90" aria-hidden="true">
+        <path d="M330 14 C260 88, 90 88, 12 30" />
+        <path d="M22 44 L10 28 L28 24" />
+      </svg>
+      <span className="loop-return-label">the loop runs unattended</span>
     </div>
   );
 }
@@ -92,15 +109,19 @@ function Hero() {
     <section className="hero" id="top">
       <Header />
       <div className="hero-copy">
-        <p className="eyebrow">MODEL-AGNOSTIC GPU EXECUTION</p>
+        <p className="eyebrow">VERIFIED GPU PROGRAMS · MODEL-AGNOSTIC RUNTIME</p>
         <h1>
-          MODELS SHIP AS
-          <span>VERIFIED GPU</span>
-          PROGRAMS.
+          MACHINES WRITE
+          <span>KERNELS</span>
+          NOW.
         </h1>
         <div className="hero-bottomline">
-          <p>Manifest. Kernels. Weights.</p>
-          <a href="#artifact">SEE THE PROGRAM ↓</a>
+          <p>
+            Shipping one still takes a human review cycle.
+            <br />
+            kern closes the loop.
+          </p>
+          <a href="#swap">SEE ONE SHIP ↓</a>
         </div>
       </div>
       <HeroDiagram />
@@ -118,121 +139,129 @@ function Hero() {
   );
 }
 
-function Artifact() {
+function TheSwap() {
   return (
-    <section className="section artifact-section" id="artifact">
-      <div className="section-number">01 / ARTIFACT</div>
-      <div className="artifact-title">
-        <h2>A MODEL IS<br />A PROGRAM.</h2>
-        <p>Everything the runtime needs.<br />Nothing about the model architecture.</p>
-      </div>
-      <div className="program-blueprint">
-        <div className="blueprint-node source-node">
-          <span className="node-kicker">PROVIDER</span>
-          <strong>manifest.json</strong>
-          <strong>kernels/*.cubin</strong>
-          <strong>weights</strong>
+    <section className="section swap-section" id="swap">
+      <div className="section-number">01 / THE SWAP</div>
+      <div className="swap-layout">
+        <div className="swap-copy">
+          <h2>
+            SWAP THE
+            <br />
+            KERNEL.
+          </h2>
+          <p className="large-note">Nothing else changes.</p>
+          <p className="swap-story">
+            This diff replaced a kernel mined out of a live vLLM process with the
+            stock torch-extension package the PyTorch ecosystem uses — pulled
+            straight off the Hugging&nbsp;Face kernel hub. The runtime cracked the
+            .so, took the device code, checked the ABI parameter by parameter, and
+            reproduced the old kernel's output byte for byte. The torch half of
+            the file is dead weight. It never ran.
+          </p>
+          <a className="swap-schema-link" href="/schema/">
+            REGISTRY REFS IN THE SCHEMA →
+          </a>
         </div>
-        <Arrow />
-        <div className="manifest-window">
-          <div className="manifest-rail">
-            <span>V2</span>
-            <span>QWEN3-4B</span>
+
+        <div className="swap-visual">
+          <div className="diff-window swap-diff">
+            <div className="swap-diff-title">examples/qwen3-4b.json</div>
+            <div className="diff-line context">
+              <b> </b>
+              <code>"silu_mul": {"{"} "impl": {"{"} "steps": [{"{"}</code>
+            </div>
+            <div className="diff-line removed">
+              <b>-</b>
+              <code>"symbol": "_ZN4vllm18act_and_mul_kernel…"</code>
+            </div>
+            <div className="diff-line added">
+              <b>+</b>
+              <code>"cubin": "hf:kernels-community/activation</code>
+            </div>
+            <div className="diff-line added">
+              <b>+</b>
+              <code>          /…/_activation_320b408.abi3.so",</code>
+            </div>
+            <div className="diff-line added">
+              <b>+</b>
+              <code>"sha256": "73748b54…b1fe49aa",</code>
+            </div>
+            <div className="diff-line context">
+              <b> </b>
+              <code>"params": ["out buffer&lt;bf16&gt;", "in buffer&lt;bf16&gt;", "i32"]</code>
+            </div>
+            <div className="diff-line reused">
+              <b>=</b>
+              <code>dispatches touched: 0</code>
+            </div>
           </div>
-          <div className="manifest-body">
-            <div><b>1</b><span>symbol</span></div>
-            <div><b>1</b><span>opaque state</span></div>
-            <div><b>310</b><span>buffers</span></div>
-            <div><b>12</b><span>kernel interfaces</span></div>
-            <div className="manifest-programs"><b>2</b><span>programs</span></div>
+          <div className="swap-stamps">
+            <span className="swap-stamp">NO TORCH</span>
+            <span className="swap-stamp">NO PYTHON</span>
+            <span className="swap-stamp stamp-green">BYTE-IDENTICAL</span>
           </div>
-        </div>
-        <Arrow />
-        <div className="blueprint-node executor-node">
-          <span className="node-kicker">RUNTIME KNOWS</span>
-          <strong>buffers</strong>
-          <strong>state bytes</strong>
-          <strong>dispatches</strong>
-          <span className="executor-no">NO MODEL BRANCHES</span>
         </div>
       </div>
     </section>
   );
 }
 
-function ReplaceableImplementation() {
-  const [mode, setMode] = useState<AttentionMode>("decode");
-  const decode = mode === "decode";
-
+function TheLoop() {
   return (
-    <section className="section implementation-section">
-      <div className="section-number">02 / REPLACEABLE IMPLEMENTATION</div>
-      <div className="implementation-layout">
-        <div className="implementation-copy">
-          <h2>ONE<br />INTERFACE.</h2>
-          <p className="large-note">The call site stays still.</p>
-          <div className="mode-switch" role="group" aria-label="Attention implementation">
-            <button
-              className={!decode ? "active" : ""}
-              onClick={() => setMode("prefill")}
-              aria-pressed={!decode}
-            >
-              PREFILL
-            </button>
-            <button
-              className={decode ? "active" : ""}
-              onClick={() => setMode("decode")}
-              aria-pressed={decode}
-            >
-              DECODE
-            </button>
-          </div>
-        </div>
+    <section className="section loop-section" id="loop">
+      <div className="section-number">02 / THE LOOP</div>
+      <div className="loop-header">
+        <h2>
+          A KERNEL CHANGE IS
+          <br />
+          AN ENGINE CHANGE.
+          <br />
+          <span>NOT HERE.</span>
+        </h2>
+      </div>
 
-        <div className="implementation-visual">
-          <div className="interface-block">
-            <span>KERNEL INTERFACE</span>
-            <strong>attn</strong>
-            <code>28 typed parameters</code>
-            <div className="type-row">
-              <i>IN</i> buffer&lt;bf16&gt;
-              <i>INOUT</i> ptr
-              <i>OUT</i> buffer&lt;bf16&gt;
-            </div>
+      <div className="lanes">
+        <div className="lane lane-elsewhere">
+          <span className="lane-label">MONOLITHIC ENGINE</span>
+          <div className="lane-steps">
+            <i>patch the engine</i>
+            <em>→</em>
+            <i>open a PR</i>
+            <em>→</em>
+            <i>prove accuracy</i>
+            <em>→</em>
+            <i>CI every model</i>
+            <em>→</em>
+            <i>wait for review</i>
           </div>
-          <Arrow className="vertical-arrow" />
-          <div className={`micro-program ${decode ? "decode" : "prefill"}`}>
-            <div className="micro-header">
-              <span>{decode ? "DECODE IMPL" : "PREFILL IMPL"}</span>
-              <b>{decode ? "2 LAUNCHES" : "1 LAUNCH"}</b>
-            </div>
-            <div className="launch-flow">
-              <div className="launch-box">
-                <span>01</span>
-                <strong>unified_attention</strong>
-              </div>
-              {decode && (
-                <>
-                  <div className="scratch-bus">
-                    <span>PRIVATE SCRATCH × 3</span>
-                    <svg viewBox="0 0 150 48" aria-hidden="true">
-                      <path d="M2 27 C35 2, 97 46, 147 17" />
-                    </svg>
-                  </div>
-                  <div className="launch-box accent-launch">
-                    <span>02</span>
-                    <strong>reduce_segments</strong>
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
-          <p className="visual-caption">
-            {decode
-              ? "Multi-launch details remain private to the implementation."
-              : "The same interface resolves to a single 2D attention launch."}
-          </p>
+          <strong className="lane-cost">WEEKS</strong>
         </div>
+        <div className="lane lane-kern">
+          <span className="lane-label">KERN</span>
+          <div className="lane-steps">
+            <i>swap the impl</i>
+            <em>→</em>
+            <i>
+              verify <b>ms</b>
+            </i>
+            <em>→</em>
+            <i>
+              byte-diff <b>s</b>
+            </i>
+          </div>
+          <strong className="lane-cost cost-green">SHIPPED</strong>
+        </div>
+      </div>
+
+      <div className="loop-thesis">
+        <p>
+          Agents can generate a thousand kernels a night. The scarce thing is a
+          loop that can verify one and ship it with <b>no human in it</b> — a
+          typed interface, a millisecond verifier, a byte-level oracle, a
+          content-addressed registry.
+        </p>
+        <p className="loop-punch">The engine goes back to being an engine.</p>
       </div>
     </section>
   );
@@ -247,7 +276,7 @@ function Verifier() {
       <div className="section-number">03 / CRASH EARLY</div>
       <div className="verifier-header">
         <h2>BAD DECLARATIONS<br /><span>STOP HERE.</span></h2>
-        <p>Before the first GPU launch.</p>
+        <p>Why the loop runs unattended.</p>
       </div>
       <div className="verifier-console">
         <div className="verify-tabs" role="group" aria-label="Verifier failure example">
@@ -292,125 +321,43 @@ function Verifier() {
   );
 }
 
-function ProgramGraph({ speculative }: { speculative: boolean }) {
+function Artifact() {
   return (
-    <div className={`program-graph ${speculative ? "speculative" : "standard"}`}>
-      <svg className="graph-lines" viewBox="0 0 760 360" preserveAspectRatio="none" aria-hidden="true">
-        <defs>
-          <marker
-            id="graph-arrow"
-            viewBox="0 0 12 12"
-            refX="10"
-            refY="6"
-            markerWidth="12"
-            markerHeight="12"
-            markerUnits="userSpaceOnUse"
-            orient="auto-start-reverse"
-          >
-            <path className="graph-arrow-head" d="M1 1 L10 6 L1 11" />
-          </marker>
-        </defs>
-        {speculative ? (
-          <>
-            <path markerEnd="url(#graph-arrow)" d="M118 75 C188 73, 229 76, 275 75" />
-            <path markerEnd="url(#graph-arrow)" d="M382 75 C485 73, 553 64, 650 65" />
-            <path markerEnd="url(#graph-arrow)" d="M675 96 C675 159, 568 153, 496 214" />
-            <path markerEnd="url(#graph-arrow)" d="M395 237 C352 260, 327 294, 267 306" />
-            <path markerEnd="url(#graph-arrow)" d="M220 304 C218 255, 124 252, 116 214" />
-            <path markerEnd="url(#graph-arrow)" d="M153 178 C211 177, 245 129, 278 100" />
-          </>
-        ) : (
-          <path markerEnd="url(#graph-arrow)" d="M205 180 C304 135, 453 225, 550 180" />
-        )}
-      </svg>
-      {speculative ? (
-        <>
-          <div className="graph-node n-prefill">prefill</div>
-          <div className="graph-node n-decode-spec">decode_spec</div>
-          <div className="graph-node n-draft">draft</div>
-          <div className="graph-node n-verify">verify</div>
-          <div className="graph-node n-precompute">draft_precompute</div>
-          <div className="graph-node n-decode">decode</div>
-        </>
-      ) : (
-        <>
-          <div className="graph-node n-standard-prefill">prefill</div>
-          <div className="graph-node n-standard-decode">decode</div>
-        </>
-      )}
-    </div>
-  );
-}
-
-function SchemaDiff() {
-  return (
-    <div className="schema-diff" aria-label="Manifest v2 schema diff from standard decoding to DSpark">
-      <div className="schema-contract">
-        <span>UNCHANGED CONTRACT</span>
-        <strong>manifest.v2</strong>
-        <code>meta · symbols · states · buffers · kernels · programs</code>
+    <section className="section artifact-section" id="artifact">
+      <div className="section-number">04 / THE ARTIFACT</div>
+      <div className="artifact-title">
+        <h2>A MODEL IS<br />A PROGRAM.</h2>
+        <p>Everything the runtime needs.<br />Nothing about the model architecture.</p>
       </div>
-      <div className="diff-window">
-        <div className="diff-header">
-          <span>STANDARD</span>
-          <svg viewBox="0 0 80 20" aria-hidden="true">
-            <path d="M2 10 C25 7, 49 13, 73 10 M67 4 L75 10 L67 16" />
-          </svg>
-          <span>+ DSPARK</span>
+      <div className="program-blueprint">
+        <div className="blueprint-node source-node">
+          <span className="node-kicker">PROVIDER</span>
+          <strong>manifest.json</strong>
+          <strong>kernels/*.cubin</strong>
+          <strong>weights</strong>
         </div>
-        <div className="diff-line context"><b> </b><code>"meta": {'{'} "version": 2 {'}'}</code></div>
-        <div className="diff-line context"><b> </b><code>"states": {'{'} "kv": …</code></div>
-        <div className="diff-line added"><b>+</b><code>"draft_kv": …</code></div>
-        <div className="diff-line context"><b> </b><code>"buffers": {'{'} …</code></div>
-        <div className="diff-line added"><b>+</b><code>"fc_out": {'{'} "class": "carry" {'}'}</code></div>
-        <div className="diff-line reused"><b>=</b><code>"kernels": same cubin primitives</code></div>
-        <div className="diff-line context"><b> </b><code>"programs": {'{'} "prefill": …, "decode": …</code></div>
-        <div className="diff-line added"><b>+</b><code>"decode_spec" · "draft" · "verify" · "draft_precompute"</code></div>
-      </div>
-      <div className="schema-payoff">
-        <span>SAME PARSER</span><i>→</i><span>SAME VERIFIER</span><i>→</i><span>SAME RUNTIME</span>
-        <strong>0 NEW KERNEL CODE</strong>
-      </div>
-    </div>
-  );
-}
-
-function Composition() {
-  const [speculative, setSpeculative] = useState(true);
-
-  return (
-    <section className="section composition-section" id="composition">
-      <div className="section-number">04 / PROGRAM COMPOSITION</div>
-      <div className="composition-title">
-        <div>
-          <span className="giant-count">{speculative ? "06" : "02"}</span>
-          <p>PROGRAMS</p>
+        <Arrow />
+        <div className="manifest-window">
+          <div className="manifest-rail">
+            <span>V2</span>
+            <span>QWEN3-4B</span>
+          </div>
+          <div className="manifest-body">
+            <div><b>1</b><span>symbol</span></div>
+            <div><b>1</b><span>opaque state</span></div>
+            <div><b>310</b><span>buffers</span></div>
+            <div><b>12</b><span>kernel interfaces</span></div>
+            <div className="manifest-programs"><b>2</b><span>programs</span></div>
+          </div>
         </div>
-        <h2>NEW BEHAVIOR.<br />SAME SCHEMA.</h2>
-      </div>
-      <div className="composition-switch" role="group" aria-label="Program composition example">
-        <button
-          className={!speculative ? "active" : ""}
-          onClick={() => setSpeculative(false)}
-          aria-pressed={!speculative}
-        >
-          STANDARD
-        </button>
-        <button
-          className={speculative ? "active" : ""}
-          onClick={() => setSpeculative(true)}
-          aria-pressed={speculative}
-        >
-          + DSPARK
-        </button>
-      </div>
-      <ProgramGraph speculative={speculative} />
-      <SchemaDiff />
-      <div className="composition-facts">
-        <div><strong>V2</strong><span>schema</span></div>
-        <div><strong>{speculative ? "02" : "01"}</strong><span>states</span></div>
-        <div><strong>{speculative ? "01" : "00"}</strong><span>carry buffers</span></div>
-        <div className="green-fact"><strong>0</strong><span>new handwritten kernels</span></div>
+        <Arrow />
+        <div className="blueprint-node executor-node">
+          <span className="node-kicker">RUNTIME KNOWS</span>
+          <strong>buffers</strong>
+          <strong>state bytes</strong>
+          <strong>dispatches</strong>
+          <span className="executor-no">NO MODEL BRANCHES</span>
+        </div>
       </div>
     </section>
   );
@@ -450,45 +397,16 @@ function Proof() {
           <p><b>948</b> vs 388 tok/s</p>
           <small>32-token prompt · byte-equal greedy output in this run</small>
         </div>
+        <div className="proof-stat kernels-stat">
+          <span>NEW KERNELS IT TOOK</span>
+          <strong>0</strong>
+          <p><b>6</b> programs, same schema</p>
+          <small>DSpark speculative decoding composed from existing kernels</small>
+        </div>
       </div>
       <p className="benchmark-footnote">
         Repository measurements · Qwen3-4B · batch 1 · single GB300. Each comparison uses its stated control.
       </p>
-    </section>
-  );
-}
-
-function Lifecycle() {
-  return (
-    <section className="section lifecycle-section">
-      <div className="section-number">06 / LIFECYCLE</div>
-      <div className="lifecycle-heading">
-        <h2>AUTHOR.<br />PACKAGE.<br /><span>RUN.</span></h2>
-        <p>Keep model intelligence out of the serving runtime.</p>
-      </div>
-      <div className="lifecycle-flow">
-        <div className="lifecycle-stage author-stage">
-          <span>01</span>
-          <strong>AUTHOR + OPTIMIZE</strong>
-          <p>Agent-held compiler<br />reference + fast implementation</p>
-          <em>TileFoundry-inspired authoring layer</em>
-        </div>
-        <Arrow />
-        <div className="lifecycle-stage package-stage">
-          <span>02</span>
-          <strong>PACKAGE</strong>
-          <p>manifest<br />kernels<br />weights</p>
-          <em>kern artifact</em>
-        </div>
-        <Arrow />
-        <div className="lifecycle-stage run-stage">
-          <span>03</span>
-          <strong>VERIFY + RUN</strong>
-          <p>load-time checks<br />CUDA graph replay</p>
-          <em>kern runtime</em>
-        </div>
-      </div>
-      <p className="integration-note">Conceptual alignment · no direct TileFoundry → kern exporter today.</p>
     </section>
   );
 }
@@ -502,6 +420,7 @@ function Footer() {
       </div>
       <div className="footer-links">
         <a href="https://github.com/pegainfer-project/kern" target="_blank" rel="noreferrer">SOURCE ↗</a>
+        <a href="/schema/">SCHEMA →</a>
         <a href="#top">BACK TO TOP ↑</a>
       </div>
     </footer>
@@ -512,12 +431,11 @@ export default function App() {
   return (
     <main>
       <Hero />
-      <Artifact />
-      <ReplaceableImplementation />
+      <TheSwap />
+      <TheLoop />
       <Verifier />
-      <Composition />
+      <Artifact />
       <Proof />
-      <Lifecycle />
       <Footer />
     </main>
   );
