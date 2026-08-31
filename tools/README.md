@@ -16,4 +16,4 @@
 - `kernel-capture/`：CUPTI 注入库（vendored from pegainfer PR #982 + `t_ns` patch），`CUDA_INJECTION64_PATH` 挂进目标进程。
 - `kernels-src/`：仅有的两个自写核——`embedding.cu`（i64 gather）、`argmax.cu`（两段式 greedy 采样）。其余全部来自 vLLM dump。
 - `capture_abi_probe.sh`：诊断用。快速抓某个 attention backend 的 ABI（`ABI_PROBE_BACKEND=FLASH_ATTN` 等），当初用它实锤 FA4/trtllm-gen 不可 rebind。
-- `capture_sglang.sh` + `capture_sglang.py`：跨框架演示——同一注入库 dump SGLang（docker 镜像里跑）。实测 GB300 上 SGLang 几乎全员 struct ABI（trtllm-gen attention + nvjet GEMM + 单 struct 参数的自家 JIT 核），可挖性远差于 vLLM，见主 README。
+- `capture_sglang.sh` + `capture_sglang.py`：跨框架演示——同一注入库 dump SGLang（docker 镜像里跑）。实测 GB300 上 SGLang 几乎全员 struct ABI（trtllm-gen attention + nvjet GEMM + 单 struct 参数的自家 JIT 核），可挖性远差于 vLLM，见 ../docs/kernel-mining.md。

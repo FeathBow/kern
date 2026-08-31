@@ -11,4 +11,4 @@ pub mod types;
 pub mod verify;
 
 pub use types::Manifest;
-pub use verify::verify;
+pub use verify::{verify, VerifyErrors};

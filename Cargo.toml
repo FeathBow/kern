@@ -1,3 +1,23 @@
 [workspace]
-members = ["crates/kern-manifest", "crates/kern-runtime"]
+members = ["crates/kern-manifest", "crates/kern-runtime", "crates/kern-run"]
 resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+kern-manifest = { path = "crates/kern-manifest" }
+
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+cudarc = { version = "=0.19.7", features = ["cuda-version-from-build-system", "f16"] }
+half = "=2.7.1"
+safetensors = "=0.7.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokenizers = "=0.22.2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

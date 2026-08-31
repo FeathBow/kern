@@ -456,21 +456,14 @@ pub enum Expr {
     Mul { mul: (Box<Expr>, u64) },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EvalError {
+    #[error("unknown symbol `{0}`")]
     UnknownSymbol(String),
+    #[error("arithmetic overflow")]
     Overflow,
+    #[error("division by zero")]
     DivByZero,
-}
-
-impl fmt::Display for EvalError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            EvalError::UnknownSymbol(s) => write!(f, "unknown symbol `{s}`"),
-            EvalError::Overflow => f.write_str("arithmetic overflow"),
-            EvalError::DivByZero => f.write_str("division by zero"),
-        }
-    }
 }
 
 impl Expr {

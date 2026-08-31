@@ -13,7 +13,6 @@
 
 use std::collections::BTreeMap;
 use std::ffi::CString;
-use std::fmt::Write as _;
 use std::os::raw::c_void;
 use std::sync::Arc;
 
@@ -26,11 +25,76 @@ use half::bf16;
 use kern_manifest::types::{Arg, BufferClass, Dispatch, Expr, Manifest, ParamType, StepArg};
 use sha2::Digest;
 
-pub type Error = Box<dyn std::error::Error + Send + Sync>;
+/// Runtime errors, grouped by who has to act on them.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// The manifest JSON does not parse. Provider-side: fix the generator
+    /// output.
+    #[error("manifest parse: {0}")]
+    ManifestParse(#[from] serde_json::Error),
+
+    /// The manifest parsed but failed static verification (all diagnostics
+    /// collected). Provider-side: fix the generator.
+    #[error(transparent)]
+    ManifestVerify(#[from] kern_manifest::VerifyErrors),
+
+    /// A manifest inconsistency only detectable past static verification
+    /// (size overflow at symbol bounds, unsupported extern op, expression
+    /// evaluation, wiring arity). Provider-side bug the verifier missed.
+    #[error("manifest: {0}")]
+    Manifest(String),
+
+    /// The kernel artifacts don't satisfy the manifest: missing or
+    /// unreadable cubin, sha256 mismatch, or no loaded instance matching a
+    /// declared param layout. Re-extract the kernels or re-pin them.
+    #[error("kernel artifact: {0}")]
+    KernelArtifact(String),
+
+    /// The weight artifact doesn't satisfy the manifest: unparseable
+    /// safetensors, missing tensor, or byte-size mismatch. Re-export the
+    /// weights for this manifest.
+    #[error("weight artifact: {0}")]
+    WeightArtifact(String),
+
+    /// The caller broke the runtime API contract: unknown buffer/program
+    /// name, wrong buffer class, oversized input write, symbol value
+    /// outside declared bounds, or replaying a program that wasn't captured
+    /// (or captured with different symbol values). Caller-side bug.
+    #[error("caller contract: {0}")]
+    Api(String),
+
+    /// One dispatch of a program failed; `context` locates it in the
+    /// dispatch list, `source` is the underlying failure.
+    #[error("{context}: {source}")]
+    Dispatch {
+        context: String,
+        #[source]
+        source: Box<Error>,
+    },
+
+    /// A raw CUDA driver or cublasLt call failed at load or execution time.
+    #[error("cuda: {0}")]
+    Cuda(String),
+
+    /// A CUDA driver call through cudarc failed (allocation, memcpy,
+    /// synchronize, context/stream setup).
+    #[error(transparent)]
+    Driver(#[from] cudarc::driver::DriverError),
+
+    /// cublasLt handle creation failed.
+    #[error(transparent)]
+    Blas(#[from] cudarc::cublaslt::result::CublasError),
+
+    /// Filesystem access failed (kernels dir listing, cubin reads).
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// `bail!(Variant, "...")` for the message-carrying variants above.
 macro_rules! bail {
-    ($($t:tt)*) => { return Err(format!($($t)*).into()) };
+    ($variant:ident, $($t:tt)*) => { return Err(crate::Error::$variant(format!($($t)*))) };
 }
 
 pub struct DeviceBuf {
@@ -119,14 +183,22 @@ impl Drop for Runtime {
 }
 
 fn ev(e: &Expr, env: &BTreeMap<String, u64>) -> Result<u64> {
-    e.eval(env).map_err(|e| format!("expression eval: {e}").into())
+    e.eval(env).map_err(|e| Error::Manifest(format!("expression eval: {e}")))
 }
 
 fn cuda_check(r: sys::CUresult, what: &str) -> Result<()> {
     if r == sys::CUresult::CUDA_SUCCESS {
         Ok(())
     } else {
-        bail!("{what}: CUDA error {r:?}")
+        bail!(Cuda, "{what}: {r:?}")
+    }
+}
+
+/// Error context locating one entry of a program's dispatch list.
+fn dispatch_ctx(i: usize, d: &Dispatch) -> String {
+    match &d.label {
+        Some(l) => format!("dispatch #{i} `{l}` (kernel `{}`)", d.kernel),
+        None => format!("dispatch #{i} (kernel `{}`)", d.kernel),
     }
 }
 
@@ -155,13 +227,7 @@ impl Runtime {
         state_capacity_tokens: u64,
     ) -> Result<Runtime> {
         let manifest = Manifest::from_json(manifest_json)?;
-        if let Err(errs) = kern_manifest::verify(&manifest) {
-            let mut msg = String::from("manifest failed verification:\n");
-            for e in errs {
-                let _ = writeln!(msg, "  - {e}");
-            }
-            return Err(msg.into());
-        }
+        kern_manifest::verify(&manifest)?;
 
         let ctx = CudaContext::new(gpu)?;
         // A created (non-legacy) stream: the NULL stream cannot be captured
@@ -177,12 +243,14 @@ impl Runtime {
             .collect();
         cubins.sort();
         if cubins.is_empty() {
-            bail!("no .cubin files in {}", kernels_dir.display());
+            bail!(KernelArtifact, "no .cubin files in {}", kernels_dir.display());
         }
         let mut modules = Vec::new();
         for path in &cubins {
-            let cmod = cu::module::load(CString::new(path.to_str().unwrap())?)
-                .map_err(|e| format!("loading {}: {e:?}", path.display()))?;
+            let cpath = CString::new(path.to_str().unwrap())
+                .map_err(|e| Error::KernelArtifact(format!("cubin path {}: {e}", path.display())))?;
+            let cmod = cu::module::load(cpath)
+                .map_err(|e| Error::KernelArtifact(format!("loading {}: {e:?}", path.display())))?;
             let file = path.file_name().unwrap().to_string_lossy().into_owned();
             modules.push((file, cmod));
         }
@@ -198,7 +266,7 @@ impl Runtime {
                     match ext {
                         "cublaslt_bf16_tn" => steps.push(StepImpl::GemmBf16Tn { beta: 0.0 }),
                         "cublaslt_bf16_tn_acc" => steps.push(StepImpl::GemmBf16Tn { beta: 1.0 }),
-                        _ => bail!("kernel `{name}` step #{si}: unsupported extern op `{ext}`"),
+                        _ => bail!(Manifest, "kernel `{name}` step #{si}: unsupported extern op `{ext}`"),
                     }
                     continue;
                 }
@@ -206,11 +274,16 @@ impl Runtime {
                 // (the pluggable path), verify the file hash if declared.
                 if let (Some(cb), Some(sha)) = (&st.cubin, &st.sha256) {
                     let path = kernels_dir.join(cb);
-                    let data = std::fs::read(&path)
-                        .map_err(|e| format!("kernel `{name}` step #{si}: reading {}: {e}", path.display()))?;
+                    let data = std::fs::read(&path).map_err(|e| {
+                        Error::KernelArtifact(format!(
+                            "kernel `{name}` step #{si}: reading {}: {e}",
+                            path.display()
+                        ))
+                    })?;
                     let got = format!("{:x}", sha2::Sha256::digest(&data));
                     if got != sha.to_lowercase() {
                         bail!(
+                            KernelArtifact,
                             "kernel `{name}` step #{si}: cubin `{cb}` sha256 mismatch: \
                              manifest declares {sha}, file is {got}"
                         );
@@ -218,7 +291,8 @@ impl Runtime {
                 }
                 let want: Vec<usize> =
                     st.params.iter().map(|p| p.size_bytes() as usize).collect();
-                let sym = CString::new(st.symbol.as_str())?;
+                let sym = CString::new(st.symbol.as_str())
+                    .map_err(|e| Error::Manifest(format!("kernel `{name}` symbol: {e}")))?;
                 let mut resolved = None;
                 let mut seen = Vec::new();
                 for (file, cmod) in &modules {
@@ -240,6 +314,7 @@ impl Runtime {
                 }
                 let Some(r) = resolved else {
                     bail!(
+                        KernelArtifact,
                         "kernel `{name}` step #{si} ({}): no loaded instance matches declared \
                          param layout {want:?} (cubin filter {:?}); saw {seen:?}",
                         st.symbol,
@@ -248,8 +323,9 @@ impl Runtime {
                 };
                 // Opt in to >48KB dynamic shared memory where the step needs it.
                 if let (StepImpl::Cubin { func, .. }, Some(sm)) = (&r, &st.shared_mem) {
-                    let bytes =
-                        sm.eval(&max_env).map_err(|e| format!("kernel `{name}`: {e}"))?;
+                    let bytes = sm
+                        .eval(&max_env)
+                        .map_err(|e| Error::Manifest(format!("kernel `{name}`: {e}")))?;
                     if bytes > 48 * 1024 {
                         cuda_check(
                             unsafe {
@@ -273,7 +349,9 @@ impl Runtime {
                         kern_manifest::types::Dim::Const(c) => *c,
                         kern_manifest::types::Dim::Sym(s) => max_env[s],
                     };
-                    elems = elems.checked_mul(n).ok_or("scratch size overflow")?;
+                    elems = elems
+                        .checked_mul(n)
+                        .ok_or_else(|| Error::Manifest("scratch size overflow".into()))?;
                 }
                 scratch.insert(sname.clone(), alloc(&stream, elems * sd.dtype.bytes())?);
             }
@@ -289,7 +367,9 @@ impl Runtime {
                     kern_manifest::types::Dim::Const(c) => *c,
                     kern_manifest::types::Dim::Sym(s) => max_env[s],
                 };
-                elems = elems.checked_mul(n).ok_or("buffer size overflow")?;
+                elems = elems
+                    .checked_mul(n)
+                    .ok_or_else(|| Error::Manifest("buffer size overflow".into()))?;
             }
             let bytes = elems * b.dtype.bytes();
             buffers.insert(name.clone(), alloc(&stream, bytes)?);
@@ -365,17 +445,19 @@ impl Runtime {
 
     /// Bind every `weight` buffer by name from a safetensors blob.
     pub fn load_weights(&mut self, blob: &[u8]) -> Result<()> {
-        let st = safetensors::SafeTensors::deserialize(blob)?;
+        let st = safetensors::SafeTensors::deserialize(blob)
+            .map_err(|e| Error::WeightArtifact(format!("unparseable safetensors: {e}")))?;
         for (name, b) in &self.manifest.buffers {
             if b.class != BufferClass::Weight {
                 continue;
             }
-            let t = st
-                .tensor(name)
-                .map_err(|e| format!("weight `{name}` missing from artifact: {e}"))?;
+            let t = st.tensor(name).map_err(|e| {
+                Error::WeightArtifact(format!("weight `{name}` missing from artifact: {e}"))
+            })?;
             let dst = self.buffers.get_mut(name).unwrap();
             if t.data().len() as u64 != dst.bytes {
                 bail!(
+                    WeightArtifact,
                     "weight `{name}`: artifact has {} bytes, manifest declares {}",
                     t.data().len(),
                     dst.bytes
@@ -389,14 +471,14 @@ impl Runtime {
 
     pub fn write_input(&mut self, name: &str, data: &[u8]) -> Result<()> {
         let Some(b) = self.manifest.buffers.get(name) else {
-            bail!("no buffer `{name}`");
+            bail!(Api, "no buffer `{name}`");
         };
         if b.class != BufferClass::Input {
-            bail!("buffer `{name}` is {}, not input", b.class);
+            bail!(Api, "buffer `{name}` is {}, not input", b.class);
         }
         let dst = self.buffers.get_mut(name).unwrap();
         if data.len() as u64 > dst.bytes {
-            bail!("input `{name}`: got {} bytes, buffer is {}", data.len(), dst.bytes);
+            bail!(Api, "input `{name}`: got {} bytes, buffer is {}", data.len(), dst.bytes);
         }
         let pinned = self.staging.get_mut(name).unwrap();
         // Waits on the pinned slice's event: the previous step's DMA from
@@ -410,10 +492,10 @@ impl Runtime {
 
     pub fn read_output(&self, name: &str) -> Result<Vec<u8>> {
         let Some(b) = self.manifest.buffers.get(name) else {
-            bail!("no buffer `{name}`");
+            bail!(Api, "no buffer `{name}`");
         };
         if b.class != BufferClass::Output {
-            bail!("buffer `{name}` is {}, not output", b.class);
+            bail!(Api, "buffer `{name}` is {}, not output", b.class);
         }
         Ok(self.stream.clone_dtoh(&self.buffers[name].slice)?)
     }
@@ -421,10 +503,10 @@ impl Runtime {
     fn check_env(&self, env: &BTreeMap<String, u64>) -> Result<()> {
         for (sym, decl) in &self.manifest.symbols {
             let Some(v) = env.get(sym) else {
-                bail!("symbol `{sym}` not provided");
+                bail!(Api, "symbol `{sym}` not provided");
             };
             if *v < decl.min || *v > decl.max {
-                bail!("symbol `{sym}` = {v} outside declared [{}, {}]", decl.min, decl.max);
+                bail!(Api, "symbol `{sym}` = {v} outside declared [{}, {}]", decl.min, decl.max);
             }
         }
         Ok(())
@@ -433,14 +515,14 @@ impl Runtime {
     /// Execute one program with the given symbol values, then synchronize.
     pub fn run(&self, program: &str, env: &BTreeMap<String, u64>) -> Result<()> {
         let Some(prog) = self.manifest.programs.get(program) else {
-            bail!("no program `{program}`");
+            bail!(Api, "no program `{program}`");
         };
         self.check_env(env)?;
         self.ctx.bind_to_thread()?;
         for (i, d) in prog.dispatches.iter().enumerate() {
-            self.dispatch(d, env).map_err(|e| {
-                let label = d.label.as_deref().unwrap_or("");
-                format!("dispatch #{i} {label} (kernel `{}`): {e}", d.kernel)
+            self.dispatch(d, env).map_err(|e| Error::Dispatch {
+                context: dispatch_ctx(i, d),
+                source: Box::new(e),
             })?;
         }
         self.stream.synchronize()?;
@@ -454,7 +536,7 @@ impl Runtime {
     /// with one launch.
     pub fn capture(&mut self, program: &str, env: &BTreeMap<String, u64>) -> Result<()> {
         let Some(prog) = self.manifest.programs.get(program) else {
-            bail!("no program `{program}`");
+            bail!(Api, "no program `{program}`");
         };
         self.check_env(env)?;
         self.ctx.bind_to_thread()?;
@@ -470,8 +552,10 @@ impl Runtime {
         let mut failed = None;
         for (i, d) in prog.dispatches.iter().enumerate() {
             if let Err(e) = self.dispatch(d, env) {
-                let label = d.label.as_deref().unwrap_or("");
-                failed = Some(format!("dispatch #{i} {label} (kernel `{}`): {e}", d.kernel));
+                failed = Some(Error::Dispatch {
+                    context: dispatch_ctx(i, d),
+                    source: Box::new(e),
+                });
                 break;
             }
         }
@@ -483,7 +567,7 @@ impl Runtime {
             if !graph.is_null() {
                 unsafe { sys::cuGraphDestroy(graph) };
             }
-            return Err(e.into());
+            return Err(e);
         }
         cuda_check(end, "cuStreamEndCapture")?;
         let mut exec: sys::CUgraphExec = std::ptr::null_mut();
@@ -499,10 +583,10 @@ impl Runtime {
     /// Replay a previously captured program, then synchronize.
     pub fn run_captured(&self, program: &str, env: &BTreeMap<String, u64>) -> Result<()> {
         let Some((exec, captured)) = self.graphs.get(program) else {
-            bail!("program `{program}` has not been captured");
+            bail!(Api, "program `{program}` has not been captured");
         };
         if captured != env {
-            bail!("graph for `{program}` was captured with {captured:?}, called with {env:?}");
+            bail!(Api, "graph for `{program}` was captured with {captured:?}, called with {env:?}");
         }
         self.ctx.bind_to_thread()?;
         cuda_check(
@@ -523,7 +607,7 @@ impl Runtime {
                 let s = &self.states[state];
                 Ok((s.ptr + offset, s.bytes - offset))
             }
-            _ => bail!("expected buffer/state arg, got {arg}"),
+            _ => bail!(Manifest, "expected buffer/state arg, got {arg}"),
         }
     }
 
@@ -536,7 +620,7 @@ impl Runtime {
             Arg::I64 { i64: v } => *v as u64,
             Arg::U8 { u8: v } => *v as u64,
             Arg::F32 { f32: v } => v.to_bits() as u64,
-            _ => bail!("expected scalar arg, got {arg}"),
+            _ => bail!(Manifest, "expected scalar arg, got {arg}"),
         })
     }
 
@@ -575,7 +659,10 @@ impl Runtime {
             }
             let StepImpl::Cubin { func, .. } = imp else {
                 let StepImpl::GemmBf16Tn { beta } = imp else { unreachable!() };
-                self.gemm_bf16_tn(&slots, *beta).map_err(|e| format!("step #{si}: {e}"))?;
+                self.gemm_bf16_tn(&slots, *beta).map_err(|e| Error::Dispatch {
+                    context: format!("step #{si}"),
+                    source: Box::new(e),
+                })?;
                 continue;
             };
             let grid = [ev(&st.grid[0], env)?, ev(&st.grid[1], env)?, ev(&st.grid[2], env)?];
@@ -597,7 +684,7 @@ impl Runtime {
                     self.stream.cu_stream(),
                     &mut params,
                 )
-                .map_err(|e| format!("step #{si} ({}): {e:?}", st.symbol))?;
+                .map_err(|e| Error::Cuda(format!("step #{si} ({}): {e:?}", st.symbol)))?;
             }
         }
         Ok(())
@@ -610,7 +697,7 @@ impl Runtime {
     /// `extern:cublaslt_bf16_tn_acc` is the same with beta=1: `C += A @ W^T`.
     fn gemm_bf16_tn(&self, args: &[RVal], beta: f32) -> Result<()> {
         let [a, w, c, m, n, k] = args else {
-            bail!("gemm expects 6 args, got {}", args.len());
+            bail!(Manifest, "gemm expects 6 args, got {}", args.len());
         };
         let (a_ptr, a_bytes) = (a.val, a.bytes);
         let (w_ptr, w_bytes) = (w.val, w.bytes);
@@ -639,7 +726,7 @@ impl Runtime {
         unsafe {
             self.blt
                 .matmul(cfg, &view(w_ptr, w_bytes), &view(a_ptr, a_bytes), &mut out, None, None)
-                .map_err(|e| format!("cublasLt matmul (m={m} n={n} k={k}): {e:?}"))?;
+                .map_err(|e| Error::Cuda(format!("cublasLt matmul (m={m} n={n} k={k}): {e:?}")))?;
         }
         Ok(())
     }

@@ -4,12 +4,18 @@
 //! contract for the qwen3-4b-decode manifest: which input buffers exist and
 //! what to put in them each step (token_ids/positions/slot_mapping/seq_lens/
 //! cu_seqlens_q/block_table), prefill expressed as repeated tokens=1 decode.
+//!
+//! Logging goes to stderr via `tracing` (filter with `RUST_LOG`, default
+//! `info`); stdout carries only the generated text.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use kern_runtime::{Result, Runtime};
+use anyhow::{bail, ensure, Context, Result};
+use clap::Parser;
+use kern_runtime::Runtime;
+use tracing::info;
 
 // Qwen3 stop tokens for raw (template-free) completion.
 const STOP_TOKENS: [i64; 2] = [151643, 151645]; // <|endoftext|>, <|im_end|>
@@ -18,53 +24,53 @@ const MASK_TOKEN: i64 = 151669;
 // DSpark block size: 7 draft queries per round, verified as anchor + 7.
 const DRAFT_TOKENS: usize = 7;
 
+/// Greedy bs=1 decode over a kern manifest (qwen3-4b caller contract).
+#[derive(Parser)]
+#[command(version, about)]
 struct Opts {
+    /// Manifest JSON (must pass verification)
+    #[arg(long, default_value = "examples/qwen3-4b.json")]
     manifest: PathBuf,
-    kernels: PathBuf,
-    weights: PathBuf,
-    tokenizer: PathBuf,
-    prompt: String,
-    steps: usize,
-    gpu: usize,
-    capacity: u64,
-    chunk: u64,
-    eager: bool,
-    spec: bool,
-}
 
-fn parse_opts() -> Opts {
-    let mut o = Opts {
-        manifest: "examples/qwen3-4b.json".into(),
-        kernels: "kernels".into(),
-        weights: "weights/qwen3-4b-decode.safetensors".into(),
-        tokenizer: "weights/tokenizer.json".into(),
-        prompt: "The capital of France is".into(),
-        steps: 32,
-        gpu: 0,
-        capacity: 4096,
-        chunk: 512,
-        eager: false,
-        spec: false,
-    };
-    let mut args = std::env::args().skip(1);
-    while let Some(a) = args.next() {
-        let mut val = || args.next().unwrap_or_else(|| panic!("missing value for {a}"));
-        match a.as_str() {
-            "--manifest" => o.manifest = val().into(),
-            "--kernels" => o.kernels = val().into(),
-            "--weights" => o.weights = val().into(),
-            "--tokenizer" => o.tokenizer = val().into(),
-            "--prompt" => o.prompt = val(),
-            "--steps" => o.steps = val().parse().expect("--steps"),
-            "--gpu" => o.gpu = val().parse().expect("--gpu"),
-            "--capacity" => o.capacity = val().parse().expect("--capacity"),
-            "--chunk" => o.chunk = val().parse().expect("--chunk"),
-            "--eager" => o.eager = true,
-            "--spec" => o.spec = true,
-            _ => panic!("unknown flag {a}"),
-        }
-    }
-    o
+    /// Directory holding the .cubin modules
+    #[arg(long, default_value = "kernels")]
+    kernels: PathBuf,
+
+    /// Safetensors weight artifact, tensors bound by name
+    #[arg(long, default_value = "weights/qwen3-4b-decode.safetensors")]
+    weights: PathBuf,
+
+    /// HF tokenizer.json
+    #[arg(long, default_value = "weights/tokenizer.json")]
+    tokenizer: PathBuf,
+
+    /// Raw (template-free) prompt
+    #[arg(long, default_value = "The capital of France is")]
+    prompt: String,
+
+    /// Max new tokens to generate
+    #[arg(long, default_value_t = 32)]
+    steps: usize,
+
+    /// CUDA device ordinal
+    #[arg(long, default_value_t = 0)]
+    gpu: usize,
+
+    /// State capacity in tokens (KV pages etc.)
+    #[arg(long, default_value_t = 4096)]
+    capacity: u64,
+
+    /// Chunked-prefill chunk size (clamped to the manifest's tokens bound)
+    #[arg(long, default_value_t = 512)]
+    chunk: u64,
+
+    /// Skip CUDA graph capture, launch every dispatch eagerly
+    #[arg(long)]
+    eager: bool,
+
+    /// DSpark speculative decoding (needs the dspark manifest programs)
+    #[arg(long)]
+    spec: bool,
 }
 
 fn human(bytes: u64) -> String {
@@ -96,29 +102,38 @@ fn i64_from_le(b: &[u8]) -> Vec<i64> {
     b.chunks_exact(8).map(|c| i64::from_le_bytes(c.try_into().unwrap())).collect()
 }
 
-
 fn main() -> Result<()> {
-    let o = parse_opts();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(std::io::stderr)
+        .with_target(false)
+        .without_time()
+        .init();
+
+    let o = Opts::parse();
 
     let manifest_json = std::fs::read_to_string(&o.manifest)
-        .map_err(|e| format!("reading manifest {}: {e}", o.manifest.display()))?;
+        .with_context(|| format!("reading manifest {}", o.manifest.display()))?;
     let t0 = Instant::now();
     let mut rt = Runtime::load(&manifest_json, &o.kernels, o.gpu, o.capacity)?;
     let load_t = t0.elapsed();
 
     let m = &rt.manifest;
-    eprintln!(
-        "[kern-run] manifest `{}` (format v{}, {}): verified",
+    info!(
+        "manifest `{}` (format v{}, {}): verified",
         m.meta.model,
         m.meta.version,
         o.manifest.display()
     );
     for (name, s) in &m.symbols {
-        eprintln!("[kern-run]   symbol   {name} ∈ [{}, {}] (runtime-provided per step)", s.min, s.max);
+        info!("  symbol   {name} ∈ [{}, {}] (runtime-provided per step)", s.min, s.max);
     }
     for (name, per_tok, alloc) in rt.state_sizes() {
-        eprintln!(
-            "[kern-run]   state    {name}: opaque, {per_tok} B/token × capacity {} = {}",
+        info!(
+            "  state    {name}: opaque, {per_tok} B/token × capacity {} = {}",
             o.capacity,
             human(alloc)
         );
@@ -140,13 +155,13 @@ fn main() -> Result<()> {
         .filter_map(|c| by_class.get(c).map(|(n, b)| format!("{c} {n} ({})", human(*b))))
         .collect::<Vec<_>>()
         .join(" | ");
-    eprintln!("[kern-run]   buffers  {classes}");
+    info!("  buffers  {classes}");
     for (name, p) in &m.programs {
-        eprintln!("[kern-run]   program  `{name}`: {} dispatches", p.dispatches.len());
+        info!("  program  `{name}`: {} dispatches", p.dispatches.len());
     }
 
-    eprintln!(
-        "[kern-run] kernel resolution: {} cubin modules in {}, matched by cuFuncGetParamInfo \
+    info!(
+        "kernel resolution: {} cubin modules in {}, matched by cuFuncGetParamInfo \
          layout vs declared params ({:?}):",
         rt.module_count(),
         o.kernels.display(),
@@ -163,8 +178,8 @@ fn main() -> Result<()> {
                 ),
                 None => String::new(),
             };
-            eprintln!(
-                "[kern-run]   {label:<18} {:<44} {:>2} params, block {:?}{sm} <- {module}",
+            info!(
+                "  {label:<18} {:<44} {:>2} params, block {:?}{sm} <- {module}",
                 ellipsize(&st.symbol, 44),
                 st.params.len(),
                 st.block,
@@ -174,35 +189,35 @@ fn main() -> Result<()> {
 
     let t0 = Instant::now();
     let blob = std::fs::read(&o.weights)
-        .map_err(|e| format!("reading weights {}: {e}", o.weights.display()))?;
+        .with_context(|| format!("reading weights {}", o.weights.display()))?;
     let blob_len = blob.len();
     rt.load_weights(&blob)?;
     drop(blob);
     let n_weights = by_class.get("weight").map_or(0, |e| e.0);
-    eprintln!(
-        "[kern-run] weights: {n_weights} tensors bound by name from {} ({}) in {:?}",
+    info!(
+        "weights: {n_weights} tensors bound by name from {} ({}) in {:?}",
         o.weights.display(),
         human(blob_len as u64),
         t0.elapsed()
     );
 
     let tokenizer = tokenizers::Tokenizer::from_file(&o.tokenizer)
-        .map_err(|e| format!("tokenizer: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
     let prompt_ids: Vec<i64> = tokenizer
         .encode(o.prompt.as_str(), false)
-        .map_err(|e| format!("encode: {e}"))?
+        .map_err(|e| anyhow::anyhow!("encode: {e}"))?
         .get_ids()
         .iter()
         .map(|&u| u as i64)
         .collect();
-    assert!(!prompt_ids.is_empty(), "empty prompt");
-    eprintln!("[kern-run] prompt: {} tokens {prompt_ids:?}", prompt_ids.len());
+    ensure!(!prompt_ids.is_empty(), "empty prompt");
+    info!("prompt: {} tokens {prompt_ids:?}", prompt_ids.len());
 
     // One-time inputs: identity page table (pages allocated linearly by
     // position), single-sequence query bounds.
     let n_pages = match rt.manifest.buffers["block_table"].shape.as_slice() {
         [kern_manifest::types::Dim::Const(n)] => *n as i32,
-        s => panic!("unexpected block_table shape {s:?}"),
+        s => bail!("unexpected block_table shape {s:?}"),
     };
     rt.write_input("block_table", &le_bytes_i32(&(0..n_pages).collect::<Vec<_>>()))?;
 
@@ -245,8 +260,8 @@ fn main() -> Result<()> {
         }
         let dt = t.elapsed();
         let n_chunks = (pos as u64).div_ceil(chunk);
-        eprintln!(
-            "[kern-run] prefill: {pos} tokens in {n_chunks} chunk(s) of <= {chunk} \
+        info!(
+            "prefill: {pos} tokens in {n_chunks} chunk(s) of <= {chunk} \
              ({dt:?}, {:.0} tok/s{})",
             pos as f64 / dt.as_secs_f64(),
             if captured { ", graph-captured" } else { ", eager" }
@@ -255,7 +270,7 @@ fn main() -> Result<()> {
     if o.spec {
         let generated = spec_decode(&mut rt, &o, &prompt_ids, pos)?;
         let gen_u32: Vec<u32> = generated.iter().map(|&t| t as u32).collect();
-        let text = tokenizer.decode(&gen_u32, false).map_err(|e| format!("decode: {e}"))?;
+        let text = tokenizer.decode(&gen_u32, false).map_err(|e| anyhow::anyhow!("decode: {e}"))?;
         println!("{}{}", o.prompt, text);
         return Ok(());
     }
@@ -265,8 +280,8 @@ fn main() -> Result<()> {
     if !o.eager {
         let t = Instant::now();
         rt.capture("decode", &env)?;
-        eprintln!(
-            "[kern-run] CUDA graph: `decode` stream-captured at tokens=1, {} dispatches -> \
+        info!(
+            "CUDA graph: `decode` stream-captured at tokens=1, {} dispatches -> \
              1 graph launch/step ({:?})",
             rt.manifest.programs["decode"].dispatches.len(),
             t.elapsed()
@@ -302,7 +317,7 @@ fn main() -> Result<()> {
         decode_ns += t.elapsed().as_nanos();
         decode_steps += 1;
         if STOP_TOKENS.contains(&next) {
-            eprintln!("[kern-run] stop token {next} at pos {pos}");
+            info!("stop token {next} at pos {pos}");
             break;
         }
         generated.push(next);
@@ -312,9 +327,9 @@ fn main() -> Result<()> {
     }
 
     let gen_u32: Vec<u32> = generated.iter().map(|&t| t as u32).collect();
-    let text = tokenizer.decode(&gen_u32, false).map_err(|e| format!("decode: {e}"))?;
-    eprintln!(
-        "[kern-run] {} tokens generated, {:.1} ms/step ({:.1} tok/s)",
+    let text = tokenizer.decode(&gen_u32, false).map_err(|e| anyhow::anyhow!("decode: {e}"))?;
+    info!(
+        "{} tokens generated, {:.1} ms/step ({:.1} tok/s)",
         generated.len(),
         decode_ns as f64 / 1e6 / decode_steps.max(1) as f64,
         decode_steps as f64 * 1e9 / decode_ns.max(1) as f64,
@@ -339,7 +354,7 @@ fn spec_decode(
 ) -> Result<Vec<i64>> {
     for p in ["decode_spec", "verify", "draft", "draft_precompute"] {
         if !rt.manifest.programs.contains_key(p) {
-            return Err(format!("--spec needs program `{p}` (not in this manifest)").into());
+            bail!("--spec needs program `{p}` (not in this manifest)");
         }
     }
     let env = |t: u64| BTreeMap::from([("tokens".to_string(), t)]);
@@ -356,7 +371,7 @@ fn spec_decode(
     pos += 1;
     let first = i64::from_le_bytes(rt.read_output("next_token")?.try_into().unwrap());
     if STOP_TOKENS.contains(&first) {
-        eprintln!("[kern-run] stop token {first} at pos {pos}");
+        info!("stop token {first} at pos {pos}");
         return Ok(Vec::new());
     }
     let mut generated = vec![first];
@@ -365,8 +380,8 @@ fn spec_decode(
         let t = Instant::now();
         rt.capture("draft", &env(DRAFT_TOKENS as u64))?;
         rt.capture("verify", &env(verify_n as u64))?;
-        eprintln!(
-            "[kern-run] CUDA graphs: `draft` (tokens=7) + `verify` (tokens=8) captured ({:?})",
+        info!(
+            "CUDA graphs: `draft` (tokens=7) + `verify` (tokens=8) captured ({:?})",
             t.elapsed()
         );
     }
@@ -424,7 +439,7 @@ fn spec_decode(
         accepted += a;
         for &tok in &vt[..=a] {
             if STOP_TOKENS.contains(&tok) {
-                eprintln!("[kern-run] stop token {tok} at pos {pos}");
+                info!("stop token {tok} at pos {pos}");
                 break 'rounds;
             }
             generated.push(tok);
@@ -435,8 +450,8 @@ fn spec_decode(
     }
     let dt = t0.elapsed();
     let in_rounds = generated.len() - 1; // first token came from decode_spec
-    eprintln!(
-        "[kern-run] spec: {in_rounds} tokens in {rounds} rounds ({:.2} tokens/round, \
+    info!(
+        "spec: {in_rounds} tokens in {rounds} rounds ({:.2} tokens/round, \
          {:.1}% drafts accepted), {:.2} ms/round ({:.1} tok/s)",
         in_rounds as f64 / rounds.max(1) as f64,
         accepted as f64 * 100.0 / (rounds.max(1) as usize * DRAFT_TOKENS) as f64,

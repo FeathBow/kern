@@ -89,7 +89,31 @@ fn shaped_size(
     size
 }
 
-pub fn verify(m: &Manifest) -> Result<(), Vec<String>> {
+/// Every diagnostic [`verify`] collected, reported together rustc-style.
+/// Derefs to the individual messages.
+#[derive(Debug)]
+pub struct VerifyErrors(pub Vec<String>);
+
+impl std::fmt::Display for VerifyErrors {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("manifest failed verification:")?;
+        for e in &self.0 {
+            write!(f, "\n  - {e}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for VerifyErrors {}
+
+impl std::ops::Deref for VerifyErrors {
+    type Target = [String];
+    fn deref(&self) -> &[String] {
+        &self.0
+    }
+}
+
+pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
     let mut errs: Vec<String> = Vec::new();
     let mut used_syms: BTreeSet<String> = BTreeSet::new();
     let mut used_buffers: BTreeSet<String> = BTreeSet::new();
@@ -549,7 +573,7 @@ pub fn verify(m: &Manifest) -> Result<(), Vec<String>> {
     if errs.is_empty() {
         Ok(())
     } else {
-        Err(errs)
+        Err(VerifyErrors(errs))
     }
 }
 
@@ -663,8 +687,8 @@ mod tests {
         serde_json::from_str(BASE).unwrap()
     }
 
-    fn check(v: serde_json::Value) -> Result<(), Vec<String>> {
-        let m: Manifest = serde_json::from_value(v).map_err(|e| vec![e.to_string()])?;
+    fn check(v: serde_json::Value) -> Result<(), VerifyErrors> {
+        let m: Manifest = serde_json::from_value(v).map_err(|e| VerifyErrors(vec![e.to_string()]))?;
         verify(&m)
     }
 
