@@ -152,12 +152,9 @@ function TheSwap() {
           </h2>
           <p className="large-note">Nothing else changes.</p>
           <p className="swap-story">
-            This diff replaced a kernel mined out of a live vLLM process with the
-            stock torch-extension package the PyTorch ecosystem uses — pulled
-            straight off the Hugging&nbsp;Face kernel hub. The runtime cracked the
-            .so, took the device code, checked the ABI parameter by parameter, and
-            reproduced the old kernel's output byte for byte. The torch half of
-            the file is dead weight. It never ran.
+            Point one line of the manifest at a kernel on the Hugging&nbsp;Face
+            hub. The runtime fetches it, verifies it, runs it — and the output
+            doesn't change, byte for byte.
           </p>
           <a className="swap-schema-link" href="/schema/">
             REGISTRY REFS IN THE SCHEMA →
