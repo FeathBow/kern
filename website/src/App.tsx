@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 type VerifyMode = "type" | "dataflow" | "abi";
 
@@ -677,6 +677,17 @@ function Footer() {
 }
 
 export default function App() {
+  // The page is client-rendered: a deep link like /#evidence arrives before
+  // the sections exist, so the browser's own anchor jump finds nothing.
+  useEffect(() => {
+    const id = decodeURIComponent(window.location.hash.slice(1));
+    if (!id) return;
+    const frame = requestAnimationFrame(() => {
+      document.getElementById(id)?.scrollIntoView({ behavior: "instant", block: "start" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, []);
+
   return (
     <main>
       <Hero />
