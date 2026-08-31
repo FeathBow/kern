@@ -212,6 +212,16 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
             if step.cubin.as_deref() == Some("") {
                 errs.push(format!("{ctx}: empty cubin file name"));
             }
+            if let Some(reg) = step.cubin.as_deref().and_then(RegistryRef::parse) {
+                match reg {
+                    Err(e) => errs.push(format!("{ctx}: {e}")),
+                    Ok(_) if step.sha256.is_none() => errs.push(format!(
+                        "{ctx}: registry cubin requires a pinned sha256 \
+                         (the transport is untrusted)"
+                    )),
+                    Ok(_) => {}
+                }
+            }
 
             let threads: u64 = step.block.iter().map(|&x| x as u64).product();
             if step.block.contains(&0) || threads > MAX_BLOCK_THREADS {
@@ -703,6 +713,46 @@ mod tests {
     #[test]
     fn base_manifest_verifies() {
         check(base()).unwrap();
+    }
+
+    #[test]
+    fn registry_cubin_requires_sha256() {
+        let mut v = base();
+        v["kernels"]["embed"]["impl"]["steps"][0]["cubin"] =
+            "hf:org/repo/pkg/embed.cubin".into();
+        assert_err(v, "registry cubin requires a pinned sha256");
+    }
+
+    #[test]
+    fn registry_cubin_malformed_ref() {
+        let mut v = base();
+        v["kernels"]["embed"]["impl"]["steps"][0]["cubin"] = "hf:org/repo".into();
+        v["kernels"]["embed"]["impl"]["steps"][0]["sha256"] = "ab".repeat(32).into();
+        assert_err(v, "invalid registry ref `hf:org/repo`");
+    }
+
+    #[test]
+    fn registry_cubin_pinned_verifies() {
+        let mut v = base();
+        v["kernels"]["embed"]["impl"]["steps"][0]["cubin"] =
+            "hf:org/repo/pkg/embed.cubin@v1".into();
+        v["kernels"]["embed"]["impl"]["steps"][0]["sha256"] = "ab".repeat(32).into();
+        check(v).unwrap();
+    }
+
+    #[test]
+    fn registry_ref_parsing() {
+        use crate::types::RegistryRef;
+        assert!(RegistryRef::parse("embed.cubin").is_none());
+        let r = RegistryRef::parse("hf:org/repo/a/b.cubin").unwrap().unwrap();
+        assert_eq!((r.org.as_str(), r.repo.as_str()), ("org", "repo"));
+        assert_eq!((r.path.as_str(), r.revision.as_str()), ("a/b.cubin", "main"));
+        let r = RegistryRef::parse("hf:org/repo/a.cubin@abc123").unwrap().unwrap();
+        assert_eq!(r.revision, "abc123");
+        for bad in ["hf:org", "hf:org/repo", "hf:org/repo/", "hf:org//x", "hf:o/r/x@",
+                    "hf:o/r/../x", "hf:o/r/a//b"] {
+            assert!(RegistryRef::parse(bad).unwrap().is_err(), "{bad}");
+        }
     }
 
     #[test]

@@ -50,6 +50,18 @@ impl 与接口的自洽（方向、dtype、scratch 数据流），runtime 加载
 `cuFuncGetParamInfo` 比对每个 step 声明的 ABI，`sha256` 钉住工件。这
 就是"kernel 市场"的交换单元。
 
+**Registry ref**：step 的 `cubin` 除本地文件名外可写
+`hf:<org>/<repo>/<path>[@revision]`（revision 默认 `main`），此时
+`sha256` 必填——runtime 加载时把它物化进内容寻址缓存
+（`$KERN_CACHE_DIR` 或 `~/.cache/kern` 下 `blobs/<sha256>`，命中免网
+络），下载后先验哈希再落盘，**传输通道零信任**：名字只是 URL，身份是
+哈希。工件可以是裸 cubin，也可以是 host 共享库（如 HF kernel hub 的
+torch 扩展 .so）：runtime 剖开 ELF 取 `.nv_fatbin` 里的设备代码逐容器
+装载，torch/python 绑定整个丢弃，符号 + ABI 逐位核对照旧。实证：
+`examples/qwen3-4b.json` 的 `silu_mul` impl 直接指向
+`hf:kernels-community/activation`（PyTorch 生态在用的原装包），输出与
+挖矿基线逐字节一致。
+
 Manifest 是**生成产物**（类比 `Cargo.lock`）：provider 手写的是生成器，
 不是 manifest。样例见 `tools/gen_qwen3_decode.py` →
 `examples/qwen3-4b.json`（Qwen3-4B，两个 program：`prefill` 433 dispatch

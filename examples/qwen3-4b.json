@@ -3271,13 +3271,12 @@
    "impl": {
     "steps": [
      {
-      "symbol": "_ZN4vllm18act_and_mul_kernelIN3c108BFloat16E14__nv_bfloat162XadL_ZNS_11silu_kernelIS2_EET_RKS5_fEEXadL_ZNS_18packed_silu_kernelIS3_EES5_S7_fEELb1ELb1ELb0ELb0EEEvPS5_PS6_ifff",
+      "cubin": "hf:kernels-community/activation/build/torch29-cxx11-cu130-aarch64-linux/activation/_activation_320b408.abi3.so",
+      "sha256": "73748b54059552f5983322f7dedc36ed349b38ad6fb9318301bb4965b1fe49aa",
+      "symbol": "_ZN4vllm18act_and_mul_kernelIN3c108BFloat16EXadL_ZNS_11silu_kernelIS2_EET_RKS4_EELb1EEEvPS4_PS5_i",
       "params": [
        "out buffer<bf16>",
        "in buffer<bf16>",
-       "i32",
-       "i32",
-       "f32",
        "i32"
       ],
       "block": [
@@ -3301,15 +3300,6 @@
        },
        {
         "arg": 2
-       },
-       {
-        "arg": 3
-       },
-       {
-        "arg": 4
-       },
-       {
-        "arg": 5
        }
       ]
      }

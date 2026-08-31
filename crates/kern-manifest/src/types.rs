@@ -444,6 +444,53 @@ impl fmt::Display for StepArg {
     }
 }
 
+/// A remote cubin reference in a step's `cubin` field:
+/// `hf:<org>/<repo>/<path>[@<revision>]` (revision defaults to `main`).
+/// The runtime materializes it into a content-addressed local cache at load
+/// time; the step's `sha256` — mandatory for registry refs — is the artifact's
+/// identity, so the transport needs no trust. Names are just URLs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryRef {
+    pub org: String,
+    pub repo: String,
+    pub path: String,
+    pub revision: String,
+}
+
+impl RegistryRef {
+    /// `None` if `s` is a plain local file name (no registry prefix);
+    /// otherwise the parsed ref or why it is malformed.
+    pub fn parse(s: &str) -> Option<Result<RegistryRef, String>> {
+        let rest = s.strip_prefix("hf:")?;
+        let malformed =
+            || format!("invalid registry ref `{s}`: expected hf:<org>/<repo>/<path>[@revision]");
+        let (rest, revision) = match rest.rsplit_once('@') {
+            Some((r, rev)) if !rev.is_empty() && !rev.contains('/') => (r, rev),
+            Some(_) => return Some(Err(malformed())),
+            None => (rest, "main"),
+        };
+        let Some((org, rest)) = rest.split_once('/') else {
+            return Some(Err(malformed()));
+        };
+        let Some((repo, path)) = rest.split_once('/') else {
+            return Some(Err(malformed()));
+        };
+        if org.is_empty()
+            || repo.is_empty()
+            || path.is_empty()
+            || path.split('/').any(|seg| seg.is_empty() || seg == "." || seg == "..")
+        {
+            return Some(Err(malformed()));
+        }
+        Some(Ok(RegistryRef {
+            org: org.to_string(),
+            repo: repo.to_string(),
+            path: path.to_string(),
+            revision: revision.to_string(),
+        }))
+    }
+}
+
 /// The closed scalar-expression set. This is deliberately not a language:
 /// grid geometry and dynamic shared memory are the only runtime-dependent
 /// numbers a provider may compute, and only with these forms.
