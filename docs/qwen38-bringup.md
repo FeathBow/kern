@@ -319,5 +319,115 @@
   plain→spec **2.2×**（vLLM 1.85×）。
 - 附带发现：spec manifest 的 `decode`（投机核 T=1）对 Stage 1 decode 的一致长度
   89/93/62/185/**12**——prompt 4 在第 12 个 token 多了一个逗号。这个位置在
-  其它 9 个配置里全都一致，正在用 vLLM 的 top-2 logit 间距核实是否 near-tie
-  （`tools/qwen38_margins.py`）。
+  其它 9 个配置里全都一致。用 vLLM 的 top-2 logprob 间距核实
+  （`tools/qwen38_margins.py` → `docs/qwen38-margins.json`）：该位置间距
+  **0.125**——正好是 bf16 logit 在这个量级上的一个量子；见 Stage 3。
+
+## Stage 3 — 统计与结论
+
+### 时间
+
+| 阶段 | 起止（UTC） | 用时 | 人工干预 |
+|---|---|---|---|
+| 读文档 + 环境 + capture | 12:02Z–12:10Z | 8 min | 0 |
+| 逐核 ABI 分析 | 12:12Z–12:40Z | 28 min | 0 |
+| 权重导出 / 参考 / 手写核 / 生成器 | 12:31Z–12:54Z | 23 min（部分并行） | 0 |
+| 首次端到端 + 逐 token 对比 | 12:55Z–13:20Z | 25 min | 0 |
+| 精度定位到最后一个 op；验收放宽 | 13:20Z–13:37Z | 17 min | **1**（放宽为"合理一致"） |
+| Stage 1 验收 + 提交 `f273c9a` | 13:38Z–13:45Z | 7 min | 0 |
+| Stage 2 准备（spec capture、vLLM 参考、draft 导出） | 13:45Z–14:00Z | 15 min | 0 |
+| Stage 2 生成器 / driver / 抽核 / 首次跑通 | 14:00Z–14:16Z | 16 min | 0 |
+| Stage 2 验收 + 提交 `9ece6a4` | 14:16Z–14:20Z | 4 min | 0 |
+
+从零到 Stage 1 验收 **1 h 43 min**，Stage 2（投机）再 **35 min**；全程 1 次人工
+干预（验收标准），另有 1 次中途询问（用户问"是不是在调精度"，未改变工作）。
+没有超过 30 分钟的卡点；最长的一段（精度定位，12:55Z–13:37Z 共 42 min）
+分两个阶段各有产出（先定位到 layer，再定位到 op）。
+
+### 代码量（`git diff bf0e944..9ece6a4`）
+
+| 位置 | 改动 | 说明 |
+|---|---|---|
+| `crates/kern-manifest` + `crates/kern-runtime`（3646 行） | **+49 / −12** | schema：`State.bytes_fixed`（+11）、verify 放行固定字节 state（+12）、`meta.spec`（+15）；runtime：state 分配按 `bytes_fixed`（+3）、多 blob 权重（+10） |
+| `crates/kern-run`（示例 caller，不是 runtime） | +284 / −81 | `prefill_emits_next_token` 契约、`--stop-tokens`、`--weights` 可重复、`KERN_PROBE_LAYER`、投机 driver 泛化（meta.spec / num_accepted / 首 token 来自 prefill / 所有 `*block_table`） |
+| `schema/manifest-v2.schema.json` | +31（生成） | |
+| `tools/gen_qwen35.py` | **1417 行**（新） | 两份 manifest 的全部模型知识：layer 结构、ABI、钉核、投机 state 布局 |
+| `tools/kernels-src/*.cu` | 6 个文件 360 行 | Stage 1：Gemma norm 146、sigmoid_mul 26、copy_rows 29；Stage 2：dflash_conv 41、topk_row 62、dflash_select 56 |
+| 其余 `tools/`（导出、参考、对比、探针、测试） | ~1000 行 | 一次性脚本，模型无关的部分可复用 |
+
+新模型的成本落点：**runtime 49 行 vs 生成器 1417 行 + 手写核 360 行**。
+runtime 那 49 行里没有一行提到 GDN、DFlash 或 Qwen——`bytes_fixed` 是"固定
+大小的 state"，`meta.spec` 是 caller 契约，多 blob 是权重装载。
+
+### 手写核为什么存在（六个，全部 < 150 行）
+
+manifest 的目标是零手写。六个例外各有一个不可钉的理由：
+- `gemma_rms_norm`（norm + fused-add + per-head 三个入口）：vLLM 的 Gemma norm
+  是 `forward_native`，纯 ATen 算子链，没有单个核可钉。
+- `sigmoid_mul`：attention 输出门控 `attn * sigmoid(gate)`，ATen。
+- `copy_rows`/`last_row`：把 strided 视图变连续、取最后一行——vLLM 里是
+  `.contiguous()` / 索引。
+- `dflash_conv`：DFlash 的 grouped conv，ATen 链。
+- `topk_row`：`torch.topk`（ATen，cub 内部核不可钉）。
+- `dflash_select`：Triton `_selector_walk_kernel` 带 packed-struct ABI，不可按
+  cuFuncGetParamInfo 消歧。
+每个都对 ATen 参考做了逐 bit 测试（`tools/test_kernels_*.py`）。
+
+### 性能（GB300 单卡，bs=1，CUDA graph 两边都开；vLLM 0.28）
+
+| | kern | vLLM | 备注 |
+|---|---|---|---|
+| plain decode | **80.8 tok/s**（12.4 ms/step，742 dispatch） | 95.0（默认后端）/ 96.0（TRITON_ATTN + triton GDN） | kern 85%；差距来自 742 次独立 kernel launch 没有融合（vLLM 的 decode 也是同一批核，但 graph 内 launch 更密）。5 条 prompt × 400 token 均值。 |
+| chunked prefill | 10.0k tok/s（1787 token，4×512 chunk，eager） | — | Stage 1 |
+| DFlash2 投机 | **177.9 tok/s**（133.6–220.8） | 175.6（148.8–207.6） | 2.61 vs 2.46 token/轮；kern plain→spec 2.2×，vLLM 1.85× |
+
+投机的速度差距为零而 plain decode 差 15%——投机每轮的 verify 是 T=8 的一次
+forward，launch 开销被摊薄。
+
+### runtime 改动清单（本次 bring-up 全部）
+
+1. `State.bytes_fixed`：state 可以是固定字节而不是每 token 字节（GDN 的
+   conv/SSM state 按层不按 token）。
+2. verify：`bytes_fixed` state 的 offset 上界按固定字节检查。
+3. `Runtime::load_weights(&[&[u8]])`：多份 safetensors，每个权重恰在一份里。
+4. `meta.spec {block, mask_token}`：投机 caller 契约，runtime 不解释。
+
+### 设计发现（精度调试 → kern 的机制）
+
+- **manifest 里唯一没被 sha256 钉住的东西就是残差的来源。** Stage 1 的逐 op
+  对比把 kern 与 vLLM 的差异收敛到 cuBLAS 在 M=43、N=96 GEMM 上的算法选择
+  （1 ulp / 4 个元素）——`extern:cublaslt_bf16_tn` 是 manifest 里唯一由
+  runtime 自行挑算法的 dispatch。下一步自然是把 cublasLt 的 algo id 也写进
+  manifest（`extern` 带 `algo` 字段），让 GEMM 和 Triton 核一样可钉、可 diff。
+- **`kern-attest` 需要"外部参考"这一侧。** 现在它 diff 的是两份 manifest；
+  这次真正有用的是"manifest vs vLLM 的逐 op 中间量"（`KERN_PROBE_LAYER` +
+  `qwen38_probe_vllm.py`）。把 vLLM 的 forward hook 输出当作一份"参考 tap"
+  喂给 attest，就能在一次运行里回答"第一个不一致的 dispatch 是哪个"。
+- **near-tie 翻转不是 bug 信号。** 5 条 prompt 上，vLLM 自己 graph vs eager、
+  spec vs plain、chunk 16 vs 单块，两两一致长度都在 66–400 之间；kern 的每个
+  配置也落在同一区间。要区分"算术不同"和"算术错误"，需要看的是 top-2 logit
+  间距，而不是一致长度（`tools/qwen38_margins.py`）。
+
+### 14:20Z–14:32Z  near-tie 核实 + 文档 / README / 网站（无人工干预）
+
+- `tools/qwen38_margins.py`：vLLM eager 参考轨迹上每一步的 top-2 logprob
+  间距（5 prompt × 200 步）。**所有落在参考轨迹上的分叉点，间距全部
+  ≤ 0.125**（0.0 / 0.0625 / 0.125 三个值，即 bf16 logit 的量子），而各 prompt
+  的中位间距是 1.1–2.0：
+
+  | prompt | 分叉位置 → 间距 | 中位间距 |
+  |---|---|---|
+  | 0 | 66 → 0.125，124 → 0.0 | 1.12 |
+  | 1 | 93 → 0.0 | 1.38 |
+  | 2 | 62 → 0.0625，147 → 0.0，196 → 0.125 | 1.5 |
+  | 3 | 82 → 0.0，185 → 0.125 | 2.0 |
+  | 4 | 12 → 0.125，112 → 0.0，178 → 0.0 | 1.25 |
+
+  （分叉后不在参考轨迹上的位置——如 prompt 1 的 132、prompt 4 的 193——
+  没有可比的间距。）prompt 4 第 12 个 token 那个"多出来的逗号"也是 0.125。
+  结论：kern 的每一次分叉都是 bf16 量子级的 near-tie 翻转，与 vLLM 自己
+  graph/eager、spec/plain 之间的翻转同类；**没有算术错误的证据**。
+- 两次 vLLM 启动失败都是环境问题（脚本缺 `__main__` 守卫 → spawn 重入；
+  非登录 ssh shell 的 PATH 没有 venv 的 `ninja`），各 1 分钟。
+- README Proof 加一行、网站 06/MEASURED 加一张卡（`website/dist` 是容器里
+  root 建的删不掉，改用 `vite build --outDir` 到 scratchpad 验证构建通过）。

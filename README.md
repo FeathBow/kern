@@ -54,6 +54,7 @@ And:
 - The entire runtime is **under 3,000 lines of Rust**.
 - Speculative decoding took **six programs and zero new kernels** — composed, not implemented.
 - **92%** of vLLM's decode throughput, **37×** faster prefill than the naive path. *(Qwen3-4B · GB300 · bs=1)*
+- A second model family — **Qwen3.8-27B** (hybrid linear attention, 64 layers) plus its DFlash2 speculative draft — cost the runtime and schema **49 lines**. Everything model-specific landed in a 1.4k-line generator and six kernels under 150 lines; decode 81 vs 95 tok/s, speculative 178 vs 176. *(timeline: [docs/qwen38-bringup.md](docs/qwen38-bringup.md))*
 
 ## The loop
 
