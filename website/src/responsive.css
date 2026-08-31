@@ -1,0 +1,266 @@
+@media (max-width: 1100px) {
+  .hero {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto auto auto;
+  }
+
+  .hero-copy {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .hero-diagram {
+    grid-column: 1;
+    grid-row: 2;
+    width: min(620px, 100%);
+    margin: 40px auto 0;
+  }
+
+  .hero-proof,
+  .hero-scale {
+    grid-column: 1;
+    width: min(620px, 100%);
+    margin-left: auto;
+  }
+
+  .hero-scale {
+    grid-row: 3;
+    margin-top: 38px;
+  }
+
+  .hero-proof {
+    grid-row: 4;
+    margin-top: 26px;
+  }
+
+  .program-blueprint {
+    grid-template-columns: 1fr;
+    max-width: 720px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .program-blueprint > .arrow {
+    margin: 0 auto;
+    transform: rotate(90deg);
+  }
+
+  .implementation-layout {
+    grid-template-columns: 1fr;
+    padding-top: 8vh;
+  }
+
+  .implementation-visual {
+    width: min(760px, 100%);
+    margin-left: auto;
+  }
+
+  .lifecycle-flow {
+    grid-template-columns: 1fr;
+    max-width: 720px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .lifecycle-flow > .arrow {
+    margin: 0 auto;
+    transform: rotate(90deg);
+  }
+}
+
+@media (max-width: 760px) {
+  .site-header {
+    height: 68px;
+  }
+
+  .site-header nav a:not(.github-link) {
+    display: none;
+  }
+
+  .hero {
+    padding-top: 112px;
+  }
+
+  .hero-copy h1 {
+    font-size: clamp(52px, 16vw, 82px);
+  }
+
+  .hero-bottomline {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 18px;
+  }
+
+  .hero-proof,
+  .hero-scale {
+    display: block;
+  }
+
+  .hero-proof strong,
+  .hero-scale strong {
+    display: block;
+    font-size: 72px;
+  }
+
+  .hero-proof span,
+  .hero-scale span {
+    display: block;
+    margin-top: 14px;
+  }
+
+  .hero-proof small,
+  .hero-scale small {
+    display: block;
+    margin-top: 7px;
+    line-height: 1.5;
+  }
+
+  .hero-diagram {
+    min-height: 540px;
+  }
+
+  .artifact-stack {
+    left: 0;
+  }
+
+  .verify-stamp {
+    right: 0;
+  }
+
+  .runtime-chip {
+    right: 4%;
+  }
+
+  .artifact-title,
+  .verifier-header,
+  .composition-title,
+  .lifecycle-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 34px;
+  }
+
+  .verifier-header h2 {
+    font-size: 46px;
+  }
+
+  .composition-title h2 {
+    text-align: left;
+  }
+
+  .manifest-body {
+    grid-template-columns: 1fr;
+  }
+
+  .interface-block code {
+    position: static;
+    display: block;
+    margin-top: 20px;
+  }
+
+  .type-row {
+    flex-direction: column;
+  }
+
+  .launch-flow {
+    flex-direction: column;
+    padding-top: 24px;
+  }
+
+  .scratch-bus {
+    transform: rotate(90deg);
+    margin: 28px 0;
+  }
+
+  .verifier-console {
+    grid-template-columns: 1fr;
+  }
+
+  .verify-tabs {
+    position: static;
+    width: 100%;
+    padding: 12px;
+    background: #111419;
+  }
+
+  .broken-wire {
+    grid-template-columns: 1fr;
+    gap: 18px;
+    padding-top: 30px;
+  }
+
+  .broken-wire svg {
+    transform: rotate(90deg);
+    max-height: 90px;
+  }
+
+  .wire-target {
+    text-align: left;
+  }
+
+  .composition-title > div {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .program-graph {
+    transform: scale(0.85);
+    transform-origin: center;
+    margin-left: -9%;
+    margin-right: -9%;
+  }
+
+  .composition-facts {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .schema-diff {
+    grid-template-columns: 1fr;
+  }
+
+  .schema-contract {
+    border-right: 0;
+    border-bottom: 1px solid var(--ink);
+  }
+
+  .schema-payoff {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    padding: 20px 0 0 20px;
+  }
+
+  .schema-payoff strong {
+    width: 100%;
+    min-height: 54px;
+    margin: 4px 0 0 -20px;
+    padding-left: 20px;
+  }
+
+  .proof-pair {
+    grid-template-columns: 1fr;
+  }
+
+  .bar-row {
+    grid-template-columns: 52px 1fr 66px;
+  }
+
+  .bar-row strong {
+    font-size: 32px;
+  }
+
+  footer {
+    min-height: 90vh;
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  * {
+    transition: none !important;
+  }
+}
