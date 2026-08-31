@@ -111,6 +111,137 @@ pub struct Buffer {
     pub dtype: DType,
     pub shape: Vec<Dim>,
     pub class: BufferClass,
+    /// Optional prior on the buffer's *contents*. Never required: a manifest
+    /// without domains runs exactly the same. With one, the runtime rejects
+    /// out-of-domain input writes, and attestation can synthesize valid
+    /// values for the buffer (and check produced values against it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<Domain>,
+}
+
+/// A prior on buffer contents, declared by whoever wires the model — the
+/// only party that knows a `buffer<i32>` is a page table and not an
+/// activation. It is unary (one buffer, no relations between buffers) and
+/// says nothing about kernel behaviour: a kernel that misbehaves on
+/// in-domain input is a kernel bug the harness can now provoke.
+///
+/// Two forms, mutually exclusive:
+/// - `min`/`max`: inclusive bounds (like `Symbol`), integers, floats or a
+///   symbol expression; either may be omitted. Float buffers without a
+///   domain are implicitly "any finite value".
+/// - `index_into`: every element indexes a row of the named buffer or a
+///   token slot of the named state, `unit` rows/tokens per index (a paged
+///   KV block table indexes 16 tokens at a time).
+///
+/// `monotone` additionally requires a non-decreasing sequence (prefix sums
+/// such as `cu_seqlens`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Domain {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<Bound>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<Bound>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_into: Option<String>,
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub unit: u64,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub monotone: bool,
+}
+
+fn one() -> u64 {
+    1
+}
+fn is_one(v: &u64) -> bool {
+    *v == 1
+}
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
+/// A domain bound: a literal integer, a literal float, or a symbol
+/// expression (evaluated at the caller's symbol values).
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum Bound {
+    Int(i64),
+    Float(f64),
+    Expr(Expr),
+}
+
+impl Bound {
+    pub fn eval(&self, env: &BTreeMap<String, u64>) -> Result<f64, EvalError> {
+        Ok(match self {
+            Bound::Int(v) => *v as f64,
+            Bound::Float(v) => *v,
+            Bound::Expr(e) => e.eval(env)? as f64,
+        })
+    }
+}
+
+/// A domain with its bounds evaluated for one symbol environment and one
+/// state capacity. `lo`/`hi` are inclusive; `None` is unbounded.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResolvedDomain {
+    pub lo: Option<f64>,
+    pub hi: Option<f64>,
+    pub monotone: bool,
+}
+
+impl ResolvedDomain {
+    pub fn contains(&self, v: f64) -> bool {
+        if v.is_nan() {
+            return false;
+        }
+        self.lo.is_none_or(|lo| v >= lo) && self.hi.is_none_or(|hi| v <= hi)
+    }
+}
+
+impl Domain {
+    /// Row count of `index_into`'s target at `env`, or its token capacity for
+    /// a state; `None` when the name resolves to nothing.
+    fn target_rows(
+        &self,
+        m: &Manifest,
+        env: &BTreeMap<String, u64>,
+        state_capacity_tokens: u64,
+    ) -> Result<Option<u64>, EvalError> {
+        let Some(t) = &self.index_into else { return Ok(None) };
+        if let Some(b) = m.buffers.get(t) {
+            return Ok(Some(match b.shape.first() {
+                Some(Dim::Const(c)) => *c,
+                Some(Dim::Sym(s)) => {
+                    *env.get(s).ok_or_else(|| EvalError::UnknownSymbol(s.clone()))?
+                }
+                None => 0,
+            }));
+        }
+        if m.states.contains_key(t) {
+            return Ok(Some(state_capacity_tokens));
+        }
+        Ok(None)
+    }
+
+    /// Evaluate the bounds. Verification guarantees the references resolve;
+    /// an unknown `index_into` target here yields an unbounded domain.
+    pub fn resolve(
+        &self,
+        m: &Manifest,
+        env: &BTreeMap<String, u64>,
+        state_capacity_tokens: u64,
+    ) -> Result<ResolvedDomain, EvalError> {
+        if self.index_into.is_some() {
+            let rows = self.target_rows(m, env, state_capacity_tokens)?;
+            let hi = rows.map(|r| (r / self.unit.max(1)).saturating_sub(1) as f64);
+            return Ok(ResolvedDomain { lo: Some(0.0), hi, monotone: self.monotone });
+        }
+        Ok(ResolvedDomain {
+            lo: self.min.as_ref().map(|b| b.eval(env)).transpose()?,
+            hi: self.max.as_ref().map(|b| b.eval(env)).transpose()?,
+            monotone: self.monotone,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]

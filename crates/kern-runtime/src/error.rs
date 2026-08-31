@@ -39,6 +39,12 @@ pub enum Error {
     #[error("caller contract: {0}")]
     Api(String),
 
+    /// An input write violates the buffer's declared domain (out-of-range
+    /// element, non-monotone sequence). Caller-side bug — the values were
+    /// wrong before any kernel saw them.
+    #[error("domain: {0}")]
+    Domain(String),
+
     /// One launch of a program failed; `context` locates it in the
     /// program's dispatch list, `source` is the underlying failure.
     #[error("{context}: {source}")]

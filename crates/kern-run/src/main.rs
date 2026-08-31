@@ -14,11 +14,10 @@ use std::time::Instant;
 
 use anyhow::{bail, ensure, Context, Result};
 use clap::Parser;
+use kern_run::{env, i64_from_le, le_bytes_i32, le_bytes_i64, Caller, STOP_TOKENS};
 use kern_runtime::Runtime;
 use tracing::info;
 
-// Qwen3 stop tokens for raw (template-free) completion.
-const STOP_TOKENS: [i64; 2] = [151643, 151645]; // <|endoftext|>, <|im_end|>
 // DSpark draft fill token for the 6 non-anchor query slots (draft config).
 const MASK_TOKEN: i64 = 151669;
 // DSpark block size: 7 draft queries per round, verified as anchor + 7.
@@ -88,18 +87,6 @@ fn ellipsize(s: &str, n: usize) -> String {
     } else {
         format!("{}…", s.chars().take(n - 1).collect::<String>())
     }
-}
-
-fn le_bytes_i64(v: &[i64]) -> Vec<u8> {
-    v.iter().flat_map(|x| x.to_le_bytes()).collect()
-}
-
-fn le_bytes_i32(v: &[i32]) -> Vec<u8> {
-    v.iter().flat_map(|x| x.to_le_bytes()).collect()
-}
-
-fn i64_from_le(b: &[u8]) -> Vec<i64> {
-    b.chunks_exact(8).map(|c| i64::from_le_bytes(c.try_into().unwrap())).collect()
 }
 
 fn main() -> Result<()> {
@@ -213,52 +200,43 @@ fn main() -> Result<()> {
     ensure!(!prompt_ids.is_empty(), "empty prompt");
     info!("prompt: {} tokens {prompt_ids:?}", prompt_ids.len());
 
-    // One-time inputs: identity page table (pages allocated linearly by
-    // position), single-sequence query bounds.
-    let n_pages = match rt.manifest.buffers["block_table"].shape.as_slice() {
-        [kern_manifest::types::Dim::Const(n)] => *n as i32,
-        s => bail!("unexpected block_table shape {s:?}"),
-    };
-    rt.write_input("block_table", &le_bytes_i32(&(0..n_pages).collect::<Vec<_>>()))?;
+    let mut caller = Caller::new(rt)?;
 
     // Chunked prefill over the first n-1 prompt tokens: repeated `prefill`
     // calls (KV writes only, no logits). The final prompt token goes through
     // `decode`, which produces the first logits — decode doubles as
     // "prefill of the last token".
-    let chunk = o.chunk.min(rt.manifest.symbols["tokens"].max).max(1);
+    let chunk = o.chunk.min(caller.rt.manifest.symbols["tokens"].max).max(1);
     let n_prompt = prompt_ids.len();
-    let mut pos: i64 = 0;
     if n_prompt > 1 {
         let t = Instant::now();
-        let mut captured = false;
-        while (pos as usize) < n_prompt - 1 {
-            let c = ((n_prompt - 1 - pos as usize) as u64).min(chunk);
-            let ids = &prompt_ids[pos as usize..pos as usize + c as usize];
-            let positions: Vec<i64> = (pos..pos + c as i64).collect();
-            rt.write_input("token_ids", &le_bytes_i64(ids))?;
-            rt.write_input("positions", &le_bytes_i64(&positions))?;
-            rt.write_input("slot_mapping", &le_bytes_i64(&positions))?;
-            rt.write_input("seq_lens", &le_bytes_i32(&[pos as i32 + c as i32]))?;
-            rt.write_input("cu_seqlens_q", &le_bytes_i32(&[0, c as i32]))?;
-            let env = BTreeMap::from([("tokens".to_string(), c)]);
-            if !o.eager && c == chunk {
-                if !captured {
-                    rt.capture("prefill", &env)?;
-                    captured = true;
+        let captured = if o.spec {
+            // Each chunk's fc taps must be projected into the draft's context
+            // KV while positions/slot_mapping still hold this chunk's rows.
+            let mut captured = false;
+            let mut i = 0;
+            while i < n_prompt - 1 {
+                let c = (n_prompt - 1 - i).min(chunk as usize);
+                let e = caller.stage_prefill(&prompt_ids[i..i + c])?;
+                if !o.eager && c == chunk as usize {
+                    if !captured {
+                        caller.rt.capture("prefill", &e)?;
+                        captured = true;
+                    }
+                    caller.rt.run_captured("prefill", &e)?;
+                } else {
+                    caller.rt.run("prefill", &e)?;
                 }
-                rt.run_captured("prefill", &env)?;
-            } else {
-                rt.run("prefill", &env)?; // remainder chunk: eager
+                caller.rt.run("draft_precompute", &e)?;
+                caller.advance(c as u64);
+                i += c;
             }
-            if o.spec {
-                // The chunk's fc taps are in fc_out; project them into the
-                // draft's context KV while positions/slot_mapping still hold
-                // this chunk's rows.
-                rt.run("draft_precompute", &env)?;
-            }
-            pos += c as i64;
-        }
+            captured
+        } else {
+            caller.prefill(&prompt_ids[..n_prompt - 1], chunk, o.eager)?
+        };
         let dt = t.elapsed();
+        let pos = caller.pos;
         let n_chunks = (pos as u64).div_ceil(chunk);
         info!(
             "prefill: {pos} tokens in {n_chunks} chunk(s) of <= {chunk} \
@@ -268,22 +246,21 @@ fn main() -> Result<()> {
         );
     }
     if o.spec {
-        let generated = spec_decode(&mut rt, &o, &prompt_ids, pos)?;
+        let pos = caller.pos;
+        let generated = spec_decode(&mut caller.rt, &o, &prompt_ids, pos)?;
         let gen_u32: Vec<u32> = generated.iter().map(|&t| t as u32).collect();
         let text = tokenizer.decode(&gen_u32, false).map_err(|e| anyhow::anyhow!("decode: {e}"))?;
         println!("{}{}", o.prompt, text);
         return Ok(());
     }
-    rt.write_input("cu_seqlens_q", &le_bytes_i32(&[0, 1]))?;
-
-    let env = BTreeMap::from([("tokens".to_string(), 1u64)]);
+    let env = env(1);
     if !o.eager {
         let t = Instant::now();
-        rt.capture("decode", &env)?;
+        caller.rt.capture("decode", &env)?;
         info!(
             "CUDA graph: `decode` stream-captured at tokens=1, {} dispatches -> \
              1 graph launch/step ({:?})",
-            rt.manifest.programs["decode"].dispatches.len(),
+            caller.rt.manifest.programs["decode"].dispatches.len(),
             t.elapsed()
         );
     }
@@ -292,28 +269,23 @@ fn main() -> Result<()> {
     let mut decode_steps = 0u32;
 
     loop {
-        let tok = if (pos as usize) < prompt_ids.len() {
-            prompt_ids[pos as usize]
-        } else {
-            *generated.last().unwrap()
-        };
-        rt.write_input("token_ids", &le_bytes_i64(&[tok]))?;
-        rt.write_input("positions", &le_bytes_i64(&[pos]))?;
-        rt.write_input("slot_mapping", &le_bytes_i64(&[pos]))?;
-        rt.write_input("seq_lens", &le_bytes_i32(&[pos as i32 + 1]))?;
+        let pos = caller.pos as usize;
+        let tok = if pos < prompt_ids.len() { prompt_ids[pos] } else { *generated.last().unwrap() };
+        caller.stage_decode(tok)?;
 
         let t = Instant::now();
         if o.eager {
-            rt.run("decode", &env)?;
+            caller.rt.run("decode", &env)?;
         } else {
-            rt.run_captured("decode", &env)?;
+            caller.rt.run_captured("decode", &env)?;
         }
-        pos += 1;
+        caller.advance(1);
+        let pos = caller.pos;
 
         if (pos as usize) < prompt_ids.len() {
             continue; // prefill-as-decode: logits unused until the last prompt token
         }
-        let next = i64::from_le_bytes(rt.read_output("next_token")?.try_into().unwrap());
+        let next = caller.next_token()?;
         decode_ns += t.elapsed().as_nanos();
         decode_steps += 1;
         if STOP_TOKENS.contains(&next) {

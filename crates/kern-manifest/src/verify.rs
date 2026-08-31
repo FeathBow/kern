@@ -7,7 +7,8 @@
 //!   2. symbols: bounds sane
 //!   3. states: non-zero size, power-of-two alignment
 //!   4. buffers: shapes resolve, byte sizes don't overflow at symbol upper
-//!      bounds
+//!      bounds; a declared domain is well-formed (bound kinds vs dtype,
+//!      `index_into` resolves, min <= max at the symbol corners)
 //!   5. kernels (interface + implementation):
 //!      - scratch shapes resolve, every scratch is used
 //!      - per step: CUDA block/grid limits at symbol upper bounds (and
@@ -161,6 +162,9 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
             &mut errs,
         ) {
             buf_sizes.insert(name, sz);
+        }
+        if let Some(d) = &b.domain {
+            check_domain(name, b, d, m, &env_max, &env_min, &mut used_syms, &mut errs);
         }
     }
 
@@ -584,6 +588,72 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
         Ok(())
     } else {
         Err(VerifyErrors(errs))
+    }
+}
+
+/// A domain is a prior on contents; the verifier only proves it is
+/// well-formed against the declaration it decorates (never that any kernel
+/// honours it).
+#[allow(clippy::too_many_arguments)]
+fn check_domain(
+    name: &str,
+    b: &Buffer,
+    d: &Domain,
+    m: &Manifest,
+    env_max: &BTreeMap<String, u64>,
+    env_min: &BTreeMap<String, u64>,
+    used_syms: &mut BTreeSet<String>,
+    errs: &mut Vec<String>,
+) {
+    let ctx = format!("buffer `{name}` domain");
+    let is_float = matches!(b.dtype, DType::Bf16 | DType::F16 | DType::F32 | DType::Fp8E4m3);
+    if d.index_into.is_some() && (d.min.is_some() || d.max.is_some()) {
+        errs.push(format!("{ctx}: `index_into` and `min`/`max` are mutually exclusive"));
+    }
+    if d.index_into.is_none() && d.min.is_none() && d.max.is_none() && !d.monotone {
+        errs.push(format!("{ctx}: empty (declare bounds, `index_into`, or `monotone`)"));
+    }
+    if d.unit == 0 {
+        errs.push(format!("{ctx}: `unit` must be > 0"));
+    }
+    if d.unit > 1 && d.index_into.is_none() {
+        errs.push(format!("{ctx}: `unit` only applies with `index_into`"));
+    }
+    if let Some(t) = &d.index_into {
+        if is_float {
+            errs.push(format!("{ctx}: a {} buffer cannot index anything", b.dtype));
+        }
+        match (m.buffers.contains_key(t), m.states.contains_key(t)) {
+            (false, false) => errs.push(format!("{ctx}: `index_into` unknown buffer/state `{t}`")),
+            (true, true) => errs.push(format!("{ctx}: `index_into` `{t}` is both a buffer and a state")),
+            (true, false) if t == name => errs.push(format!("{ctx}: a buffer cannot index itself")),
+            _ => {}
+        }
+    }
+    if d.monotone && b.shape.len() != 1 {
+        errs.push(format!("{ctx}: `monotone` requires a one-dimensional buffer"));
+    }
+    for (which, bound) in [("min", &d.min), ("max", &d.max)] {
+        let Some(bound) = bound else { continue };
+        match bound {
+            Bound::Float(_) if !is_float => {
+                errs.push(format!("{ctx}: float `{which}` on a {} buffer", b.dtype));
+            }
+            Bound::Expr(e) => check_expr(e, m, used_syms, errs, &format!("{ctx}: `{which}`")),
+            _ => {}
+        }
+    }
+    if let (Some(lo), Some(hi)) = (&d.min, &d.max) {
+        // Must hold at every symbol value the bounds can take; both corners
+        // suffice for the monotone expression set.
+        for env in [env_min, env_max] {
+            if let (Ok(lo), Ok(hi)) = (lo.eval(env), hi.eval(env)) {
+                if lo > hi {
+                    errs.push(format!("{ctx}: min {lo} > max {hi}"));
+                    break;
+                }
+            }
+        }
     }
 }
 
@@ -1016,6 +1086,78 @@ mod tests {
         let mut v = base();
         v["kernels"]["embed"]["impl"]["steps"] = serde_json::json!([]);
         assert_err(v, "implementation has no steps");
+    }
+
+    // --- domains ---
+
+    #[test]
+    fn domain_index_into_and_bounds_verify() {
+        let mut v = base();
+        v["buffers"]["x"]["domain"] = serde_json::json!({ "index_into": "w" });
+        v["buffers"]["y"]["domain"] = serde_json::json!({ "min": -1.5, "max": 1.5 });
+        check(v).unwrap();
+        let mut v = base();
+        v["buffers"]["x"]["domain"] =
+            serde_json::json!({ "min": 0, "max": { "sym": "tokens" }, "monotone": true });
+        check(v).unwrap();
+        let mut v = base();
+        v["buffers"]["x"]["domain"] = serde_json::json!({ "index_into": "kv", "unit": 16 });
+        check(v).unwrap();
+    }
+
+    #[test]
+    fn domain_resolves() {
+        use crate::types::ResolvedDomain;
+        let mut v = base();
+        v["buffers"]["x"]["domain"] = serde_json::json!({ "index_into": "kv", "unit": 16 });
+        let m: Manifest = serde_json::from_value(v).unwrap();
+        let env = BTreeMap::from([("tokens".to_string(), 4u64)]);
+        let r = m.buffers["x"].domain.as_ref().unwrap().resolve(&m, &env, 4096).unwrap();
+        assert_eq!(r, ResolvedDomain { lo: Some(0.0), hi: Some(255.0), monotone: false });
+        assert!(r.contains(255.0) && !r.contains(256.0) && !r.contains(-1.0));
+
+        let mut v = base();
+        v["buffers"]["x"]["domain"] = serde_json::json!({ "index_into": "w" });
+        let m: Manifest = serde_json::from_value(v).unwrap();
+        let r = m.buffers["x"].domain.as_ref().unwrap().resolve(&m, &env, 0).unwrap();
+        assert_eq!(r.hi, Some(63.0));
+
+        let mut v = base();
+        v["buffers"]["x"]["domain"] = serde_json::json!({ "min": 1, "max": { "sym": "tokens" } });
+        let m: Manifest = serde_json::from_value(v).unwrap();
+        let r = m.buffers["x"].domain.as_ref().unwrap().resolve(&m, &env, 0).unwrap();
+        assert_eq!((r.lo, r.hi), (Some(1.0), Some(4.0)));
+    }
+
+    #[test]
+    fn domain_rejects_malformed() {
+        let mut v = base();
+        v["buffers"]["x"]["domain"] = serde_json::json!({ "index_into": "nope" });
+        assert_err(v, "unknown buffer/state `nope`");
+        let mut v = base();
+        v["buffers"]["x"]["domain"] = serde_json::json!({ "index_into": "w", "max": 3 });
+        assert_err(v, "mutually exclusive");
+        let mut v = base();
+        v["buffers"]["x"]["domain"] = serde_json::json!({ "min": 0.5 });
+        assert_err(v, "float `min` on a i32 buffer");
+        let mut v = base();
+        v["buffers"]["h"]["domain"] = serde_json::json!({ "index_into": "w" });
+        assert_err(v, "a bf16 buffer cannot index anything");
+        let mut v = base();
+        v["buffers"]["h"]["domain"] = serde_json::json!({ "min": 0, "monotone": true });
+        assert_err(v, "`monotone` requires a one-dimensional buffer");
+        let mut v = base();
+        v["buffers"]["x"]["domain"] = serde_json::json!({ "min": 5, "max": 2 });
+        assert_err(v, "min 5 > max 2");
+        let mut v = base();
+        v["buffers"]["x"]["domain"] = serde_json::json!({});
+        assert_err(v, "empty");
+        let mut v = base();
+        v["buffers"]["x"]["domain"] = serde_json::json!({ "max": { "sym": "ghost" } });
+        assert_err(v, "unknown symbol `ghost`");
+        let mut v = base();
+        v["buffers"]["x"]["domain"] = serde_json::json!({ "min": 0, "unit": 4 });
+        assert_err(v, "`unit` only applies with `index_into`");
     }
 
     #[test]

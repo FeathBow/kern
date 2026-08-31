@@ -22,42 +22,65 @@
    "shape": [
     "tokens"
    ],
-   "class": "input"
+   "class": "input",
+   "domain": {
+    "index_into": "model.embed_tokens.weight"
+   }
   },
   "positions": {
    "dtype": "i64",
    "shape": [
     "tokens"
    ],
-   "class": "input"
+   "class": "input",
+   "domain": {
+    "index_into": "rope.cos_sin_cache"
+   }
   },
   "slot_mapping": {
    "dtype": "i64",
    "shape": [
     "tokens"
    ],
-   "class": "input"
+   "class": "input",
+   "domain": {
+    "index_into": "kv"
+   }
   },
   "block_table": {
    "dtype": "i32",
    "shape": [
     256
    ],
-   "class": "input"
+   "class": "input",
+   "domain": {
+    "index_into": "kv",
+    "unit": 16
+   }
   },
   "seq_lens": {
    "dtype": "i32",
    "shape": [
     1
    ],
-   "class": "input"
+   "class": "input",
+   "domain": {
+    "min": 1
+   }
   },
   "cu_seqlens_q": {
    "dtype": "i32",
    "shape": [
     2
    ],
-   "class": "input"
+   "class": "input",
+   "domain": {
+    "min": 0,
+    "max": {
+     "sym": "tokens"
+    },
+    "monotone": true
+   }
   },
   "logits": {
    "dtype": "bf16",
@@ -72,7 +95,10 @@
    "shape": [
     1
    ],
-   "class": "output"
+   "class": "output",
+   "domain": {
+    "index_into": "model.embed_tokens.weight"
+   }
   },
   "residual": {
    "dtype": "bf16",
@@ -182,7 +208,10 @@
    "shape": [
     72
    ],
-   "class": "weight"
+   "class": "weight",
+   "domain": {
+    "min": 0.0
+   }
   },
   "model.layers.0.input_layernorm.weight": {
    "dtype": "bf16",
@@ -2349,21 +2378,30 @@
    "shape": [
     1
    ],
-   "class": "input"
+   "class": "input",
+   "domain": {
+    "index_into": "model.embed_tokens.weight"
+   }
   },
   "draft_tokens": {
    "dtype": "i64",
    "shape": [
     7
    ],
-   "class": "output"
+   "class": "output",
+   "domain": {
+    "index_into": "model.embed_tokens.weight"
+   }
   },
   "verify_tokens": {
    "dtype": "i64",
    "shape": [
     8
    ],
-   "class": "output"
+   "class": "output",
+   "domain": {
+    "index_into": "model.embed_tokens.weight"
+   }
   },
   "logits_blk": {
    "dtype": "bf16",

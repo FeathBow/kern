@@ -394,6 +394,24 @@ def single(symbol, params, block, grid, shared_mem=None, cubin=None,
                                     shared_mem, cubin, sha256)]}}
 
 
+# 结构输入的先验（domain）：接模型的人才知道 buffer<i32> 是页表不是激活。
+# runtime 写入时校验；kern-attest 据此合成合法值 + 检查产出。激活不声明。
+TOKEN_DOMAIN = {"index_into": "model.embed_tokens.weight"}
+DOMAINS = {
+    "token_ids": TOKEN_DOMAIN,
+    "positions": {"index_into": "rope.cos_sin_cache"},
+    "slot_mapping": {"index_into": "kv"},
+    "block_table": {"index_into": "kv", "unit": 16},  # vLLM block_size
+    "seq_lens": {"min": 1},
+    "cu_seqlens_q": {"min": 0, "max": {"sym": "tokens"}, "monotone": True},
+    "next_token": TOKEN_DOMAIN,
+    "kv_scales": {"min": 0.0},
+    "anchor_token": TOKEN_DOMAIN,
+    "draft_tokens": TOKEN_DOMAIN,
+    "verify_tokens": TOKEN_DOMAIN,
+}
+
+
 def build(by, eps, scale, pf, pins, spec=False):
     pf_sym, pf_block, pf_smem = pf
     causal_cubin, causal_sha = pins["causal"]
@@ -858,6 +876,9 @@ def build(by, eps, scale, pf, pins, spec=False):
                 scales="draft.kv_scales", lm_head_w="draft.lm_head.weight",
                 final_norm_w="draft.norm.weight")}
         programs["draft_precompute"] = {"dispatches": draft_precompute()}
+    for name, dom in DOMAINS.items():
+        if name in buffers:
+            buffers[name]["domain"] = dom
     return {
         "meta": {"version": 2,
                  "model": "qwen3-4b-dspark" if spec else "qwen3-4b"},

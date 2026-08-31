@@ -24,6 +24,41 @@ fn qwen3_decode_mined_verifies() {
 
     let again = Manifest::from_json(&m.to_json()).expect("reparse");
     assert_eq!(m.to_json(), again.to_json());
+
+    // Domains: the structural inputs carry priors the runtime enforces and
+    // attestation synthesizes from; activations deliberately carry none.
+    for name in ["token_ids", "slot_mapping", "block_table", "cu_seqlens_q", "next_token"] {
+        assert!(m.buffers[name].domain.is_some(), "{name} has no domain");
+    }
+    assert!(m.buffers["residual"].domain.is_none());
+}
+
+/// The A/B fixture for `kern-attest`: identical to qwen3-4b.json except
+/// `silu_mul`'s *impl* is the mined vLLM cubin (6-param launch ABI) instead
+/// of the HF hub package (3-param ABI forwarding interface args 0..3). The
+/// interface and every dispatch are untouched — a pure impl swap.
+const QWEN3_SILU_MINED: &str = include_str!("../../../examples/qwen3-4b-silu-mined.json");
+
+#[test]
+fn qwen3_silu_mined_fixture_verifies() {
+    let m = Manifest::from_json(QWEN3_SILU_MINED).expect("parse");
+    if let Err(errs) = verify(&m) {
+        panic!("silu-mined fixture failed verification:\n{}", errs.join("\n"));
+    }
+    let a = Manifest::from_json(QWEN3).unwrap();
+    let (ka, kb) = (&a.kernels["silu_mul"], &m.kernels["silu_mul"]);
+    assert_eq!(ka.params, kb.params, "interface must be unchanged");
+    assert_eq!(ka.imp.steps[0].params.len(), 3);
+    assert!(ka.imp.steps[0].cubin.as_deref().unwrap_or("").starts_with("hf:"));
+    assert_eq!(kb.imp.steps[0].params.len(), 6);
+    assert!(kb.imp.steps[0].cubin.is_none());
+    for p in ["decode", "prefill"] {
+        assert_eq!(
+            serde_json::to_string(&a.programs[p]).unwrap(),
+            serde_json::to_string(&m.programs[p]).unwrap(),
+            "{p}: dispatches must be identical"
+        );
+    }
 }
 
 const QWEN3_DSPARK: &str = include_str!("../../../examples/qwen3-4b-dspark.json");

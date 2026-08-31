@@ -123,11 +123,38 @@
       ],
       "description": "A dispatch argument. Explicitly tagged so a buffer name can never be\nmistaken for a symbol name: `{\"buf\": \"hidden\"}`, `{\"state\": \"kv\"}`,\n`{\"sym\": \"tokens\"}`, `{\"i32\": 2560}`, `{\"i64\": 4096}`, `{\"f32\": 1e-6}`.\n\nBuffer and state args carry an optional byte `offset` (default 0): the\nkernel receives base + offset. This is how a provider addresses a view\ninside a fused buffer (q/k/v slices of a merged qkv projection) or a\nper-layer region inside an opaque state — the offset is a literal from\nthe provider's own layout arithmetic, the runtime just adds it."
     },
+    "Bound": {
+      "anyOf": [
+        {
+          "format": "int64",
+          "type": "integer"
+        },
+        {
+          "format": "double",
+          "type": "number"
+        },
+        {
+          "$ref": "#/$defs/Expr"
+        }
+      ],
+      "description": "A domain bound: a literal integer, a literal float, or a symbol\nexpression (evaluated at the caller's symbol values)."
+    },
     "Buffer": {
       "additionalProperties": false,
       "properties": {
         "class": {
           "$ref": "#/$defs/BufferClass"
+        },
+        "domain": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Domain"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional prior on the buffer's *contents*. Never required: a manifest\nwithout domains runs exactly the same. With one, the runtime rejects\nout-of-domain input writes, and attestation can synthesize valid\nvalues for the buffer (and check produced values against it)."
         },
         "dtype": {
           "$ref": "#/$defs/DType"
@@ -225,6 +252,47 @@
         "kernel",
         "args"
       ],
+      "type": "object"
+    },
+    "Domain": {
+      "additionalProperties": false,
+      "description": "A prior on buffer contents, declared by whoever wires the model — the\nonly party that knows a `buffer<i32>` is a page table and not an\nactivation. It is unary (one buffer, no relations between buffers) and\nsays nothing about kernel behaviour: a kernel that misbehaves on\nin-domain input is a kernel bug the harness can now provoke.\n\nTwo forms, mutually exclusive:\n- `min`/`max`: inclusive bounds (like `Symbol`), integers, floats or a\n  symbol expression; either may be omitted. Float buffers without a\n  domain are implicitly \"any finite value\".\n- `index_into`: every element indexes a row of the named buffer or a\n  token slot of the named state, `unit` rows/tokens per index (a paged\n  KV block table indexes 16 tokens at a time).\n\n`monotone` additionally requires a non-decreasing sequence (prefix sums\nsuch as `cu_seqlens`).",
+      "properties": {
+        "index_into": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bound"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "min": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bound"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "monotone": {
+          "type": "boolean"
+        },
+        "unit": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
       "type": "object"
     },
     "Expr": {

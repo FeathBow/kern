@@ -44,6 +44,38 @@ Model provider 交付 `manifest.json + kernels.cubin + weights`，runtime 负责
   `{"ceil_div": [e, c]}`、`{"mul": [e, c]}`——这不是语言，是填空模板，
   永远不会加控制流。
 
+**Domain（buffer 内容的先验，可选）**：`buffers.<name>.domain` 声明"这个
+buffer 里的值合法长什么样"。挂在 buffer 上而不是 kernel 接口上——知道
+`buffer<i32>` 是页表而不是激活的是接模型的人，不是写 kernel 的人；换
+impl 不必重写先验，kernel package 零改动。两种形式互斥：
+
+- `{"min": lo, "max": hi}`：闭区间（和 `symbols` 的 min/max 同一口径），
+  端点可以是整数、浮点或同一封闭表达式集合（`{"sym": "tokens"}`），任一
+  端可省略；
+- `{"index_into": "<buffer|state>", "unit": n}`：每个元素是目标 buffer
+  的**行**下标或目标 state 的 **token 槽**下标，`unit`（默认 1）是每个
+  下标覆盖的行/槽数（paged KV 的 block_table 一个下标覆盖 16 个 token）。
+
+附加 `"monotone": true` 要求非递减序列（`cu_seqlens` 这类前缀和）。
+
+```json
+"token_ids":    {"dtype": "i64", "shape": ["tokens"], "class": "input",
+                 "domain": {"index_into": "model.embed_tokens.weight"}},
+"block_table":  {"dtype": "i32", "shape": [256], "class": "input",
+                 "domain": {"index_into": "kv", "unit": 16}},
+"cu_seqlens_q": {"dtype": "i32", "shape": [2], "class": "input",
+                 "domain": {"min": 0, "max": {"sym": "tokens"}, "monotone": true}}
+```
+
+它是一元的（只说一个 buffer，不表达 buffer 之间的关系）、是先验不是行为
+描述：verifier 只证明它对着自己的声明自洽（界的类型 vs dtype、
+`index_into` 可解析、min ≤ max），不证明任何 kernel 需要或维护它。**不填
+完全合法**——e2e 一模一样地跑；填了以后 runtime 在 `write_input` 时校验
+host 写入（O(n)，免费），`kern-attest` 据此为整数 buffer 合成合法随机值、
+并检查 kernel 产出的值落在声明域内（后置条件）。浮点 buffer 不写 = 任意
+有限值，attest 自己决定分布。整数 buffer 不写 = attest 跳过它的 fuzz 并
+在报告里列为 unfuzzed。
+
 **可插拔**：换一个 kernel 的实现 = 只改它的 `impl` 块（可能带上新 cubin
 文件），接口、程序连线、其余 manifest 一字不动；verifier 静态把关新
 impl 与接口的自洽（方向、dtype、scratch 数据流），runtime 加载时用
@@ -85,7 +117,10 @@ manifest，见 [spec-decode.md](spec-decode.md)）。
 1. 格式版本；
 2. symbol 界自洽；
 3. state 尺寸非零、对齐为 2 的幂；
-4. buffer shape 解析、字节数在 symbol 上界下不溢出；
+4. buffer shape 解析、字节数在 symbol 上界下不溢出；domain（若有）自洽：
+   界的类型对得上 dtype、`index_into` 指向存在的 buffer/state、
+   `index_into` 与 min/max 互斥、`monotone` 只许一维、min ≤ max 在
+   symbol 两端成立；
 5. kernel impl 逐 step：block 不超 CUDA 限制、grid 在 symbol 上界不超
    CUDA 限制/下界不为零、`sha256` 形状且必须伴随 `cubin`、step args 与
    step params 数量/逐位类型匹配；

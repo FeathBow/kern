@@ -82,6 +82,9 @@ pub(crate) struct Launch {
 
 pub(crate) struct CompiledProgram {
     pub(crate) launches: Vec<Launch>,
+    /// Launch index range `[lo, hi)` of every dispatch, in dispatch order
+    /// (a multi-step impl contributes several launches).
+    pub(crate) dispatch_ranges: Vec<(usize, usize)>,
 }
 
 /// One kernel implementation step, resolved against the loaded modules.
@@ -257,20 +260,23 @@ pub(crate) fn compile_programs(
     let mut programs = BTreeMap::new();
     for (pname, prog) in &manifest.programs {
         let mut launches = Vec::new();
+        let mut dispatch_ranges = Vec::with_capacity(prog.dispatches.len());
         for (di, d) in prog.dispatches.iter().enumerate() {
             let dctx = dispatch_ctx(di, d);
             let (Some(k), Some(rk)) = (manifest.kernels.get(&d.kernel), kernels.get(&d.kernel))
             else {
                 bail!(Manifest, "program `{pname}` {dctx}: unknown kernel");
             };
+            let lo = launches.len();
             compile_dispatch(d, k, rk, &dctx, buffers, states, &syms, &mut launches).map_err(
                 |e| Error::Dispatch {
                     context: format!("program `{pname}` {dctx}"),
                     source: Box::new(e),
                 },
             )?;
+            dispatch_ranges.push((lo, launches.len()));
         }
-        programs.insert(pname.clone(), CompiledProgram { launches });
+        programs.insert(pname.clone(), CompiledProgram { launches, dispatch_ranges });
     }
     Ok(programs)
 }
