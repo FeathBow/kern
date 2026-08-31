@@ -209,3 +209,115 @@
   下与 vLLM 单块 1787 token 完全一致。**kern 的算术就是 vLLM 的算术**，剩下的
   是 cuBLAS 在小 M / 瘦 N 形状上的算法选择——这也是 manifest 里唯一没被
   sha256 钉住的 extern。
+
+## Stage 2 — DFlash2 投机
+
+### 13:45Z–14:00Z  准备（无人工干预）
+
+- 13:45Z Stage 1 提交 `f273c9a`。
+- 13:46Z `tools/capture_qwen38_spec.sh`：同一套注入库抓 vLLM 的 dflash 投机路径
+  （`dumped-kernels/pid1576524`，173 cubin）。与 Stage 1 capture 对
+  symbol 集合：新增 94 个 symbol。要点——
+  - verify 路径的 GDN 层走的是**递推核**（`fused_sigmoid_gating_delta_rule_update`
+    ×1249 ≈ 26 轮 × 48 层，`causal_conv1d_update`），不是 chunked FLA；每轮还有
+    `precopy/preprocess_mamba_align_fused` + `postprocess_mamba_fused` 三个
+    state 对齐核（被拒 token 的 state 回滚）。
+  - draft 的 attention 走了 `flash_fwd_sm100`（cute FA，packed-struct ABI，
+    不可钉）——draft 用 Stage 1 已钉的 Triton unified attention 实例代替。
+    draft 只影响接受率不影响正确性（greedy 投机无损），这条替换不需要 oracle。
+  - selector：`_selector_walk_kernel`、`_prepare_dflash_inputs_kernel` 等
+    Triton 核 + ATen topk/sort。
+- 13:48Z vLLM bs=1 CUDA-graph 参考（Stage 3 性能表用；5 条 prompt ×
+  400 token 均值）：普通 decode **95.0 tok/s**（默认后端）/ **96.0 tok/s**
+  （TRITON_ATTN + triton GDN）；DFlash2 投机 **149–199 tok/s**
+  （`docs/qwen38-vllm-perf-*.json`）。对照 kern Stage 1 graph decode 80.8 tok/s
+  （5120-hidden、64 层、bs=1，每步 742 个 dispatch）。
+- 13:50Z runtime 改动一处：`Runtime::load_weights` 接受多份 safetensors
+  （target 50 GiB + draft 单独一份，不重复导出 50 GiB）；kern-run / kern-attest
+  的 `--weights` 可重复。+10 行。
+- 13:52Z vLLM DFlash2 参考（开 stats 重跑）：5 条 prompt 均值 **175.6 tok/s**
+  （149–208），817 轮 / 5719 draft token / 1191 接受 → **2.46 token/轮**，
+  接受率 20.8%，逐位接受 [521, 307, 164, 93, 46, 35, 25]（第 1 位 64%，第 7 位
+  3%）。普通 decode 95.0 → 投机 1.85×。
+
+### 14:00Z–14:16Z  生成器 + driver + 抽核 + 首次端到端（无人工干预）
+
+- 14:00Z–14:10Z `tools/gen_qwen35.py --spec <spec dump>`：同一个生成器长出六个
+  program（`prefill`/`decode`/`decode_spec`/`verify`/`draft`/
+  `draft_precompute`）。设计要点——
+  - **target 在投机下的 GDN 换成 vLLM 自己的投机核**：`causal_conv1d_update`
+    （seqlen 8 / state_len 10 constexpr，按 `num_accepted_tokens-1` 取历史）+
+    `fused_sigmoid_gating_delta_rule_update`（T=8 逐行 checkpoint SSM state 到
+    `ssm_state_indices[i]`，初始 state 取 `[num_accepted-1]`）。state 布局改为
+    每层 8 页（conv 204800 B + SSM 3 MiB，385 页 = 1.31 GB `bytes_fixed`），
+    prefill 的 FLA 链只是把 `chunk_h` 的 h0/ht 指到新页、`conv_fwd` 换成 page
+    stride 重烤的实例（`pin_nearest`：同符号同 REG 的实例里取 .ttir diff 最小
+    的）。**回滚免费**：被拒 token 的 checkpoint 页下一轮直接覆盖，vLLM 那三个
+    `*_mamba_align/rollback` 核一个都不要。
+  - `decode`/`decode_spec` = 同一套投机核在 tokens=1 下跑（`gdn.one` 当
+    num_accepted）；Stage 1 的 packed decode 核在这份 manifest 里不出现。
+  - DFlash2 的 5 个 tap（第 5/19/33/47/61 层之后的 hidden+residual）：fc 的
+    [5120, 25600] 拆成 5 个列块，在 tap 处做 β=0/β=1 的 GEMM 累加进 `fc_out`，
+    不拼接（新 extern `cublaslt_bf16_tn_acc`）。
+  - draft：5 层非因果 Qwen3 层 + 每层两对 grouped conv（prepare/finish），
+    KV 用 DSpark 的布局和它借来的 `unified_noncausal.cubin`；draft 的 norm /
+    rope / cache write 直接钉 vLLM 的 CUDA 核（`rms_norm<8,2>`、`<8,3>`、
+    `fused_add_rms_norm`、`rotary_embedding`、`reshape_and_cache_flash`，用
+    参数个数 + REG 从 spec dump 里钉）。K-only rope = 同一核，q 指向 k、
+    kv_heads=0。
+  - 三个新手写核（`tools/kernels-src/`，共 159 行）：`dflash_conv`（两 tap
+    grouped conv，bf16 链顺序照 ATen）、`topk_row`（top-16）、`dflash_select`
+    （rank-256 双线性打分 + 7 步贪心游走）。为什么手写：vLLM 里这三段是
+    ATen 算子链 / 带 packed-struct ABI 的 Triton 核，不可钉；它们只影响接受
+    率不影响输出。`tools/test_kernels_dflash2.py` 对 ATen 参考全过。
+  - 跨 dump 钉核：Stage 1 dump 里有 spec dump 没有的实例（conv_fwd、
+    reshape_and_cache、unified 2D/3D），生成器按 sha 前缀命名 cubin，
+    `extract_kernels.sh` 改成多 dump 目录按 sha 查找。
+  - Stage 1 manifest 由同一生成器重生成，与提交的 `examples/qwen3.8-27b.json`
+    逐字节相同（非 spec 路径零改动）。
+- 14:10Z–14:14Z runtime/driver：`kern-manifest` 加 `meta.spec {block,
+  mask_token}`（+15 行，schema +31 行，runtime 不解释）；kern-run 的
+  `spec_decode` 泛化（draft 行数 / mask token 来自 meta，`num_accepted_tokens`
+  = 1 + 上轮接受数，首 token 来自 prefill）；`Caller::new` 填所有
+  `*block_table`。kern-runtime 本阶段只有多 blob 那 10 行。
+- 14:14Z 首次 verify 失败：manifest 里留着 Stage 1 的 packed decode 核和
+  `gdn.line_index`，runtime 拒绝死核/死 buffer——生成器加了按引用裁剪。
+- 14:16Z **首次端到端投机跑通**（eager）：10-token prompt → 63 token，
+  25 轮，2.52 token/轮，接受率 24.0%，逐位 [16, 11, 8, 4, 2, 1, 0]，
+  15.5 ms/轮 = **162 tok/s**，文本连贯（Aqua Appia, 312 BC …）。
+  对照 vLLM 的 2.46 token/轮 / 20.8%。
+
+### 14:16Z–14:20Z  Stage 2 验收（无人工干预）
+
+5 条参考 prompt × 400 token，`tools/qwen38_compare.py --spec`
+（oracle 换成 Stage 1 的 kern decode 输出）。结果文件
+`docs/qwen38-spec-{eager,graph}.json`、`docs/qwen38-spec-manifest-plain-graph.json`。
+
+- **eager 与 graph（draft + verify 各一张 CUDA graph）5/5 逐字节一致**——
+  投机路径本身是确定的。
+- 与 Stage 1 plain decode 的一致长度 **[66, 132, 62, 185, 193]/400**。不是
+  逐字节：verify 走的是 vLLM 的投机核（sigmoid-gating 递推核 + T=8 的 2D
+  attention），和 Stage 1 的 packed decode 核算术不同。但分叉点 66、62 正是
+  Stage 1 与 vLLM 分叉的位置——同一批 near-tie。全矩阵（一致长度）：
+
+  | vs | kern spec | kern plain (S1) | vLLM spec | vLLM plain graph | vLLM eager |
+  |---|---|---|---|---|---|
+  | kern spec | — | 66/132/62/185/193 | 66/196/196/82/112 | 124/196/196/82/112 | 124/93/264/185/178 |
+  | vLLM spec | | | — | 66/262/222/400/165 | 66/93/196/82/112 |
+  | vLLM plain graph | | | | — | 130/93/196/82/112 |
+
+  vLLM 自己的投机 vs 自己的 plain graph 也只有 66/262/222/400/165；kern spec
+  对 vLLM eager 参考的一致长度（124/93/264/185/178）反而比 Stage 1 plain
+  （66/93/62/255/178）还长。所有配置两两都落在同一个"near-tie 翻转"区间里。
+- 接受统计（5 prompt 合计 765 轮 / 1995 token）：**2.61 token/轮**，接受率
+  24.6%，逐位 [518, 301, 183, 108, 63, 38, 26]；vLLM 自己是 817 轮、
+  2.46 token/轮、20.8%、[521, 307, 164, 93, 46, 35, 25]——draft（手写
+  selector + 借来的 attention 实例）和 vLLM 的 draft 行为几乎重合。
+- 吞吐（graph）：**177.9 tok/s** 均值（133.6–220.8），15.1 ms/轮；eager
+  169.5。vLLM DFlash2 graph 175.6（149–208）。同一 manifest 的 `decode`
+  program（投机核在 tokens=1）80.8–83.1 tok/s = Stage 1 的数字；kern
+  plain→spec **2.2×**（vLLM 1.85×）。
+- 附带发现：spec manifest 的 `decode`（投机核 T=1）对 Stage 1 decode 的一致长度
+  89/93/62/185/**12**——prompt 4 在第 12 个 token 多了一个逗号。这个位置在
+  其它 9 个配置里全都一致，正在用 vLLM 的 top-2 logit 间距核实是否 near-tie
+  （`tools/qwen38_margins.py`）。

@@ -48,8 +48,9 @@ struct Opts {
     /// Directory holding the .cubin modules (both manifests)
     #[arg(long, default_value = "kernels")]
     kernels: PathBuf,
+    /// Safetensors artifact(s); repeat for a target + draft pair
     #[arg(long, default_value = "weights/qwen3-4b-decode.safetensors")]
-    weights: PathBuf,
+    weights: Vec<PathBuf>,
     #[arg(long, default_value = "weights/tokenizer.json")]
     tokenizer: PathBuf,
     /// Prompt for the real-workload tap
@@ -461,9 +462,9 @@ struct Snap {
     ref_states: BTreeMap<String, Vec<u8>>,
 }
 
-fn load_side(json: &str, o: &Opts, blob: &[u8]) -> Result<Caller> {
+fn load_side(json: &str, o: &Opts, blobs: &[&[u8]]) -> Result<Caller> {
     let mut rt = Runtime::load(json, &o.kernels, o.gpu, o.capacity)?;
-    rt.load_weights(blob)?;
+    rt.load_weights(blobs)?;
     Caller::new(rt)
 }
 
@@ -941,10 +942,15 @@ fn main() -> Result<()> {
     }
 
     // ---- load A + B
-    let blob = std::fs::read(&o.weights).with_context(|| format!("reading {}", o.weights.display()))?;
+    let blobs = o
+        .weights
+        .iter()
+        .map(|p| std::fs::read(p).with_context(|| format!("reading {}", p.display())))
+        .collect::<Result<Vec<_>>>()?;
+    let refs: Vec<&[u8]> = blobs.iter().map(Vec::as_slice).collect();
     let t = Instant::now();
-    let mut s = Sides { a: load_side(&ja, &o, &blob)?, b: load_side(&jb, &o, &blob)? };
-    drop(blob);
+    let mut s = Sides { a: load_side(&ja, &o, &refs)?, b: load_side(&jb, &o, &refs)? };
+    drop(blobs);
     let load_t = t.elapsed();
     let tokenizer = tokenizers::Tokenizer::from_file(&o.tokenizer)
         .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;

@@ -73,6 +73,21 @@ pub struct Meta {
     pub version: u32,
     /// Free-form label; the runtime assigns no meaning to it.
     pub model: String,
+    /// Caller contract of a speculative-decoding manifest (absent for plain
+    /// prefill/decode ones). The runtime assigns no meaning to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec: Option<SpecMeta>,
+}
+
+/// How a driver stages the `draft` / `verify` programs of a speculative
+/// manifest: `draft` runs over `block` rows = the anchor token followed by
+/// `block - 1` copies of `mask_token`, `verify` over `block` rows = the
+/// anchor followed by the `block - 1` drafted tokens.
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SpecMeta {
+    pub block: u64,
+    pub mask_token: i64,
 }
 
 /// A runtime-provided scalar (e.g. token count this step). The declared

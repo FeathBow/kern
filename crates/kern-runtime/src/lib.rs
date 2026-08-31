@@ -220,17 +220,25 @@ impl Runtime {
         self.resolution.clone()
     }
 
-    /// Bind every `weight` buffer by name from a safetensors blob.
-    pub fn load_weights(&mut self, blob: &[u8]) -> Result<()> {
-        let st = safetensors::SafeTensors::deserialize(blob)
+    /// Bind every `weight` buffer by name from one or more safetensors blobs
+    /// (a target and a draft artifact, say); each weight must come from
+    /// exactly one of them.
+    pub fn load_weights(&mut self, blobs: &[&[u8]]) -> Result<()> {
+        let sts = blobs
+            .iter()
+            .map(|b| safetensors::SafeTensors::deserialize(b))
+            .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| Error::WeightArtifact(format!("unparseable safetensors: {e}")))?;
         for (name, b) in &self.manifest.buffers {
             if b.class != BufferClass::Weight {
                 continue;
             }
-            let t = st.tensor(name).map_err(|e| {
-                Error::WeightArtifact(format!("weight `{name}` missing from artifact: {e}"))
-            })?;
+            let found: Vec<_> = sts.iter().filter_map(|st| st.tensor(name).ok()).collect();
+            let t = match found.as_slice() {
+                [t] => t,
+                [] => bail!(WeightArtifact, "weight `{name}` missing from the artifact(s)"),
+                _ => bail!(WeightArtifact, "weight `{name}` present in {} artifacts", found.len()),
+            };
             let dst = self.buffers.get_mut(name).unwrap();
             if t.data().len() as u64 != dst.bytes {
                 bail!(

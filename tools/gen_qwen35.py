@@ -118,6 +118,51 @@ GDN_LINE_BYTES = 3211264                 # conv + ssm + 4096 pad (vLLM page)
 GDN_LINES = len(GDN_LAYERS) + 1          # line 0 = null
 GDN_STATE_BYTES = GDN_LINES * GDN_LINE_BYTES
 
+# --- DFlash2 speculative decoding (examples/qwen3.8-27b-dflash2.json, --spec)
+SPEC_BLOCK = 8                           # draft block: anchor + 7 masks = verify rows
+DRAFT_TOKENS = SPEC_BLOCK - 1
+MASK_TOKEN = 248070                      # dflash_config.mask_token_id
+TAPS = {5: 0, 19: 1, 33: 2, 47: 3, 61: 4}   # target_layer_ids -> fc column block
+# GDN state under speculation (vLLM: mamba page aligned to an 832-token
+# attention block): per layer 8 pages, one SSM checkpoint per verify row,
+# the conv line of page 0 is 10 wide (3 history + 7 drafts).  Kernels read
+# the SSM slot / conv offset `num_accepted - 1` of the previous round.
+SPEC_PAGE_BYTES = 3407872
+SPEC_CONV_BYTES = CONV_DIM * (3 + DRAFT_TOKENS) * BF16   # 204800
+SPEC_SSM_OFF = SPEC_CONV_BYTES
+SPEC_PAGES = len(GDN_LAYERS) * SPEC_BLOCK + 1            # page 0 = null
+SPEC_STATE_BYTES = SPEC_PAGES * SPEC_PAGE_BYTES          # 1.31 GB
+# draft geometry (5 Qwen3 layers, non-causal over the block, sliding window 2048)
+D_LAYERS = 5
+D_HEADS = 32
+D_KV_HEADS = 8
+D_HEAD_DIM = 128
+D_Q = D_HEADS * D_HEAD_DIM               # 4096
+D_KV = D_KV_HEADS * D_HEAD_DIM           # 1024
+D_QKV = D_Q + 2 * D_KV                   # 6144
+D_GROUPS = 320                           # grouped conv: 5120 / conv_group_size 16
+D_CONV_PROJ = 2 * 2 * D_GROUPS           # kernel_projection out: (side, tap, group)
+SEL_RANK = 256
+SEL_K = 16
+D_BLOCK = 16                             # draft KV page: constexpr of the borrowed non-causal instance
+D_BLOCK_ELEMS_PER_LAYER = D_BLOCK * D_KV_HEADS * 2 * D_HEAD_DIM   # 32768
+D_LAYER_KV_BYTES = D_BLOCK_ELEMS_PER_LAYER * BF16                # 65536
+D_BLOCK_STRIDE = D_LAYERS * D_BLOCK_ELEMS_PER_LAYER              # elems per page
+D_KV_BYTES_PER_TOKEN = D_LAYERS * D_KV_HEADS * 2 * D_HEAD_DIM * BF16   # 20480
+D_V_BYTE_OFF = D_HEAD_DIM * BF16
+D_TABLE_LEN = MAX_POS // D_BLOCK
+D_KV_FLAT = D_LAYERS * 2 * D_KV          # fused context-KV GEMM width 10240
+D_ATTN_SCALE = D_HEAD_DIM ** -0.5
+SPEC_SYMS = {
+    "conv_update_spec": "_causal_conv1d_update_kernel",
+    "recurrent_spec": "fused_sigmoid_gating_delta_rule_update_kernel",
+    "d_rms_norm": "_ZN4vllm15rms_norm_kernelIN3c108BFloat16ELi8ELi2ELb1EEEvPT_PKS3_lllllS6_lfii",
+    "d_head_norm": "_ZN4vllm15rms_norm_kernelIN3c108BFloat16ELi8ELi3ELb1EEEvPT_PKS3_lllllS6_lfii",
+    "d_fused_norm": "_ZN4vllm25fused_add_rms_norm_kernelIN3c108BFloat16ELi8ELb1EEENSt9enable_ifIXaagtT0_Li0Esr4vllm12_typeConvertIT_EE6existsEvE4typeEPS4_lS7_PKS4_fiil",
+    "d_rope": "_ZN4vllm23rotary_embedding_kernelIN3c108BFloat16ES2_Lb1EEEvPKlPT_S6_PKT0_illliiilb",
+    "d_cache": "_ZN4vllm30reshape_and_cache_flash_kernelI13__nv_bfloat16S1_LNS_18Fp8KVCacheDataTypeE0EEEvPKT_S5_PT0_S7_PKlllllliiiPKfSB_i",
+}
+
 TRITON = {
     "conv_fwd": "_causal_conv1d_fwd_kernel",
     "conv_update": "_causal_conv1d_update_kernel",
@@ -177,6 +222,29 @@ def group(fwd):
     return by
 
 
+def spec_launches(recs):
+    """One bs=1 launch record per speculative-path kernel (tools/capture_qwen38_spec.sh
+    dump): the IS_SPEC_DECODING conv update (13 params, batch 1), the T=8
+    recurrent kernel (N=1), and the draft's vLLM CUDA kernels."""
+    want = {
+        "conv_update_spec": lambda r: len(r["params"]) == 13 and pv(r, 7) == 1,
+        "recurrent_spec": lambda r: r["grid"][2] == GDN_V_HEADS and pv(r, 16) == 1 and pv(r, 17) == SPEC_BLOCK,
+        "d_rms_norm": lambda r: r["block"][0] == HIDDEN // 8,
+        "d_head_norm": lambda r: pv(r, 2) == D_HEAD_DIM,
+        "d_fused_norm": lambda r: pv(r, 6) == HIDDEN,
+        "d_rope": lambda r: pv(r, 4) == D_HEAD_DIM,
+        "d_cache": lambda r: pv(r, 10) == D_KV_HEADS,
+    }
+    out = {}
+    for r in recs:
+        for tag, sym in SPEC_SYMS.items():
+            if tag not in out and r["symbol"] == sym and isinstance(r.get("params"), list) and want[tag](r):
+                out[tag] = r
+    missing = [t for t in SPEC_SYMS if t not in out]
+    assert not missing, f"spec capture lacks launches for {missing}"
+    return out
+
+
 def pv(rec, i):
     return int.from_bytes(bytes.fromhex(rec["params"][i]["data"]), "little")
 
@@ -224,17 +292,18 @@ def ttir_signature(ttir_path, symbol):
     assert m, f"no tt.func signature in {ttir_path}"
     sig = re.sub(r'loc\("[^"]*"\([^)]*\)\)', "", m.group(1))
     sig = re.sub(r"loc\([^)]*\)", "", sig)
-    ints, attrs = 0, 0
+    ints, attrs, ptrs = 0, 0, 0
     for arg in re.split(r",\s*(?=%)", sig):
         arg = arg.strip()
         if not arg:
             continue
         if "!tt.ptr" in arg:
+            ptrs += 1
             continue
         ints += 1
         if "{" in arg:
             attrs += 1
-    return ints, attrs
+    return ints, attrs, ptrs
 
 
 class Pinner:
@@ -252,7 +321,10 @@ class Pinner:
         self.shas = {m: hashlib.sha256(m.read_bytes()).hexdigest() for m in self.mods}
         self.cache = triton_cache_by_sha()
 
-    def pin(self, symbol, regs):
+    def pin(self, symbol, regs, nparams=None):
+        """`nparams` (the launch's param count) separates instances whose
+        constexpr choice changes the pointer list (IS_SPEC_DECODING adds two
+        pointers to the conv update) but not the register count."""
         cands = {}
         for mod, fns in self.mods.items():
             if fns.get(symbol) == regs:
@@ -265,11 +337,38 @@ class Pinner:
         for sha, mod in cands.items():
             cb = self.cache.get(sha)
             assert cb, f"{symbol}: dump module {mod.name} not in the Triton cache, cannot read its signature"
-            ints, attrs = ttir_signature(cb.with_suffix(".ttir"), symbol)
+            ints, attrs, ptrs = ttir_signature(cb.with_suffix(".ttir"), symbol)
+            if nparams is not None and ints + ptrs != nparams - 2:   # minus Triton's 2 scratch pointers
+                continue
             scored.append(((-ints, attrs), sha, mod))
         scored.sort()
-        assert scored[0][0] != scored[1][0], f"{symbol}: instances {scored} not separable"
+        assert scored, f"{symbol}: no instance with {nparams} launch params"
+        assert len(scored) == 1 or scored[0][0] != scored[1][0], f"{symbol}: instances {scored} not separable"
         return scored[0][2].name, scored[0][1]
+
+    def ttir(self, sha):
+        cb = self.cache.get(sha)
+        assert cb, f"{sha[:12]}: not in the Triton cache"
+        return cb.with_suffix(".ttir").read_text().splitlines()
+
+    def pin_nearest(self, symbol, regs, ref_sha):
+        """Among the instances with `regs`, the one whose .ttir differs least
+        from a reference instance (same specialization, different baked
+        constants — e.g. the conv_fwd of the speculative state layout, whose
+        only change is the page stride)."""
+        import difflib
+        ref = self.ttir(ref_sha)
+        best = None
+        for mod, fns in self.mods.items():
+            if fns.get(symbol) != regs:
+                continue
+            sha = self.shas[mod]
+            n = sum(1 for l in difflib.unified_diff(ref, self.ttir(sha), lineterm="", n=0)
+                    if not l.startswith(("---", "+++", "@@")))
+            if best is None or n < best[0]:
+                best = (n, mod.name, sha)
+        assert best, f"{symbol} REG={regs}: no dump module"
+        return best[1], best[2]
 
 
 # ------------------------------------------------------------ verification
@@ -396,6 +495,10 @@ def f32(v):
     return {"f32": v}
 
 
+def u8(v):
+    return {"u8": v}
+
+
 def d(label, kernel, args):
     return {"label": label, "kernel": kernel, "args": args}
 
@@ -440,8 +543,24 @@ DOMAINS = {
 I2 = ["i64", "i64"]   # Triton's trailing global/profile scratch pointers (always 0)
 
 
-def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym):
+def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
+    """`spec` (from --spec): {"src": bs=1 launch records of the speculative
+    path, "pins": {tag: (cubin, sha)}, "attn_draft": DSpark's pinned
+    non-causal unified-attention step} — adds the DFlash2 programs."""
     T = sym("tokens")
+    # GDN state layout: one page per layer (Stage 1) or 8 checkpoint pages
+    # per layer under speculation; the kernels' page stride is a constexpr
+    if spec:
+        page_bytes, ssm_off, line_table, gdn_state_bytes = SPEC_PAGE_BYTES, SPEC_SSM_OFF, "gdn.spec_line_index", SPEC_STATE_BYTES
+        n_pages = SPEC_PAGES
+    else:
+        page_bytes, ssm_off, line_table, gdn_state_bytes = GDN_LINE_BYTES, CONV_STATE_BYTES, "gdn.line_index", GDN_STATE_BYTES
+        n_pages = GDN_LINES
+
+    def gdn_page(i):
+        """First page of GDN layer i (its conv line and SSM checkpoint 0)."""
+        g = GDN_LAYERS.index(i)
+        return SPEC_BLOCK * g + 1 if spec else g + 1
     buffers = {
         "token_ids": {"dtype": "i64", "shape": ["tokens"], "class": "input"},
         "positions": {"dtype": "i64", "shape": ["tokens"], "class": "input"},
@@ -510,11 +629,70 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym):
             weight(p + "linear_attn.norm.weight", [GDN_D])
             weight(p + "linear_attn.out_proj.weight", [HIDDEN, GDN_V])
 
+    if spec:
+        buffers.update({
+            # caller contract: accepted tokens of the previous round (anchor
+            # + accepted drafts), selects the SSM slot / conv offset to resume from
+            "num_accepted_tokens": {"dtype": "i32", "shape": [1], "class": "input"},
+            "draft_block_table": {"dtype": "i32", "shape": [D_TABLE_LEN], "class": "input"},
+            "anchor_token": {"dtype": "i64", "shape": [1], "class": "input"},
+            # target hidden states at the 5 taps, projected by fc: written by
+            # prefill / decode_spec / verify, read by draft_precompute
+            "fc_out": {"dtype": "bf16", "shape": ["tokens", HIDDEN], "class": "carry"},
+            "verify_tokens": {"dtype": "i64", "shape": [SPEC_BLOCK], "class": "output"},
+            "draft_tokens": {"dtype": "i64", "shape": [DRAFT_TOKENS], "class": "output"},
+            "logits_blk": {"dtype": "bf16", "shape": [SPEC_BLOCK, VOCAB], "class": "workspace"},
+            "cand_ids": {"dtype": "i64", "shape": [DRAFT_TOKENS, SEL_K], "class": "workspace"},
+            "cand_vals": {"dtype": "f32", "shape": [DRAFT_TOKENS, SEL_K], "class": "workspace"},
+        })
+        for name, shape in {
+            "a_c": ["tokens", GDN_V_HEADS], "b_c": ["tokens", GDN_V_HEADS],   # contiguous a/b for the T=8 recurrent kernel
+            "kv_flat": ["tokens", D_KV_FLAT],
+            "d_qkv": [SPEC_BLOCK, D_QKV], "d_q": [SPEC_BLOCK, D_Q], "d_coef": [SPEC_BLOCK, D_CONV_PROJ],
+            "d_attn": [SPEC_BLOCK, D_Q],
+            "hidden_r": [DRAFT_TOKENS, SEL_RANK], "succ_g": [DRAFT_TOKENS * SEL_K, SEL_RANK],
+            "pred_g": [DRAFT_TOKENS * SEL_K, SEL_RANK], "pred_anchor": [1, SEL_RANK],
+        }.items():
+            buffers[name] = {"dtype": "bf16", "shape": shape, "class": "workspace"}
+        weight("gdn.spec_line_index", [64], "i32")
+        weight("gdn.spec_slots", [len(GDN_LAYERS), SPEC_BLOCK], "i32")
+        weight("gdn.one", [1], "i32")
+        for j in range(5):
+            weight(f"draft.fc.{j}.weight", [HIDDEN, HIDDEN])
+        weight("draft.hidden_norm.weight", [HIDDEN])
+        weight("draft.norm.weight", [HIDDEN])
+        weight("draft.fused_kv.weight", [D_KV_FLAT, HIDDEN])
+        weight("draft.rope.cos_sin_cache", [MAX_POS, D_HEAD_DIM])
+        weight("draft.kv_scales", [2 * D_LAYERS], "f32")
+        weight("draft.selector.hidden_projection.weight", [SEL_RANK, HIDDEN])
+        weight("draft.selector.predecessor", [VOCAB, SEL_RANK])
+        weight("draft.selector.successor", [VOCAB, SEL_RANK])
+        for l in range(D_LAYERS):
+            p = f"draft.layers.{l}."
+            weight(p + "input_layernorm.weight", [HIDDEN])
+            weight(p + "post_attention_layernorm.weight", [HIDDEN])
+            weight(p + "self_attn.qkv_proj.weight", [D_QKV, HIDDEN])
+            weight(p + "self_attn.q_norm.weight", [D_HEAD_DIM])
+            weight(p + "self_attn.k_norm.weight", [D_HEAD_DIM])
+            weight(p + "self_attn.o_proj.weight", [HIDDEN, D_Q])
+            weight(p + "mlp.gate_up_proj.weight", [2 * FFN, HIDDEN])
+            weight(p + "mlp.down_proj.weight", [HIDDEN, FFN])
+            for c in ("attention_conv", "mlp_conv"):
+                weight(p + c + ".base_kernel", [4, HIDDEN])
+                weight(p + c + ".kernel_projection.weight", [D_CONV_PROJ, HIDDEN])
+
     def blk(tag, src=pre):
         return src[tag][0]["block"]
 
     def smem(tag, src=pre):
         return src[tag][0]["dynamic_shared_mem_bytes"]
+
+    def spec_kernel(tag, params, grid, **kw):
+        """Single-step kernel from the speculative capture, pinned."""
+        r = spec["src"][tag]
+        cubin, sha = spec["pins"][tag]
+        return single(SPEC_SYMS[tag], params, r["block"], grid,
+                      shared_mem=r["dynamic_shared_mem_bytes"] or None, cubin=cubin, sha256=sha, **kw)
 
     def tri(tag, params, grid, src=pre, **kw):
         """Single-step Triton kernel pinned to its dump module."""
@@ -696,6 +874,86 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym):
 
     Z2 = [i64(0), i64(0)]
 
+    if spec:
+        RMS_PARAMS = ["out buffer<bf16>", "in buffer<bf16>", "i64", "i64", "i64", "i64", "i64",
+                      "in buffer<bf16>", "i64", "f32", "i32", "i32"]
+        ad = spec["attn_draft"]
+        kernels.update({
+            "gemm_acc": single("extern:cublaslt_bf16_tn_acc",
+                               ["in buffer<bf16>", "in buffer<bf16>", "inout buffer<bf16>", "i32", "i32", "i32"],
+                               [1, 1, 1], [1, 1, 1]),
+            # --- target GDN under speculation (vLLM's spec-decode kernels)
+            # conv update: seqlen 8 / state_len 10 are constexprs; reads the
+            # history taps at conv-line offset num_accepted-1, writes the
+            # new 10-wide window (in place on the qkvz rows)
+            "conv_update_spec": spec_kernel("conv_update_spec",
+                                            ["in buffer<bf16>", "in buffer<bf16>", "inout ptr", "in buffer<i32>",
+                                             "in buffer<i32>", "in buffer<i32>", "out buffer<bf16>",
+                                             "i32", "i32", "i64", "i64"] + I2,
+                                            [1, CONV_DIM // 256, 1]),
+            # recurrent delta rule over T rows with the sigmoid gating fused:
+            # initial state from SSM slot num_accepted-1, every row's state
+            # checkpointed to its own slot (ssm_state_indices)
+            "recurrent_spec": spec_kernel("recurrent_spec",
+                                          ["in buffer<f32>", "in buffer<bf16>", "in buffer<bf16>", "in buffer<bf16>",
+                                           "f32", "f32", "in buffer<bf16>", "in buffer<bf16>", "in buffer<bf16>",
+                                           "out buffer<bf16>", "inout ptr", "inout ptr", "in buffer<i32>",
+                                           "in buffer<i32>", "in buffer<i32>", "f32", "i64", "i64"] + I2,
+                                          [1, GDN_D // 32, GDN_V_HEADS]),
+            "argmax": {
+                "params": ["in buffer<bf16>", "out buffer<i64>", "i32"],
+                "impl": {
+                    "scratch": {"pmax": {"dtype": "f32", "shape": [SPEC_BLOCK, 64]},
+                                "pidx": {"dtype": "i32", "shape": [SPEC_BLOCK, 64]}},
+                    "steps": [
+                        step("kern_argmax_partial_bf16",
+                             ["in buffer<bf16>", "out buffer<f32>", "out buffer<i32>", "i32"],
+                             [1024, 1, 1], [T, 64, 1], [a(0), scr("pmax"), scr("pidx"), a(2)],
+                             cubin="argmax.cubin"),
+                        step("kern_argmax_final_i64",
+                             ["in buffer<f32>", "in buffer<i32>", "out buffer<i64>", "i32"],
+                             [64, 1, 1], [T, 1, 1], [scr("pmax"), scr("pidx"), a(1), i32(64)],
+                             cubin="argmax.cubin"),
+                    ],
+                },
+            },
+            # --- draft (vLLM CUDA kernels + the borrowed non-causal attention instance)
+            "d_rms_norm": spec_kernel("d_rms_norm", RMS_PARAMS, [T, 1, 1]),
+            "d_head_norm": spec_kernel("d_head_norm", RMS_PARAMS, [mul(T, D_HEADS), 1, 1]),
+            "d_kv_norm": spec_kernel("d_head_norm", RMS_PARAMS, [mul(T, D_KV_HEADS), 1, 1]),
+            "d_fused_norm": spec_kernel("d_fused_norm",
+                                        ["inout buffer<bf16>", "i64", "inout buffer<bf16>", "in buffer<bf16>",
+                                         "f32", "i32", "i32", "i64"], [T, 1, 1]),
+            "d_rope": spec_kernel("d_rope",
+                                  ["in buffer<i64>", "inout buffer<bf16>", "inout buffer<bf16>", "in buffer<bf16>",
+                                   "i32", "i64", "i64", "i64", "i32", "i32", "i32", "i64", "u8"], [T, 1, 1]),
+            "d_cache": spec_kernel("d_cache",
+                                   ["in buffer<bf16>", "in buffer<bf16>", "inout ptr", "inout ptr", "in buffer<i64>",
+                                    "i64", "i64", "i64", "i64", "i64", "i32", "i32", "i32",
+                                    "in buffer<f32>", "in buffer<f32>", "i32"], [T, 1, 1]),
+            "attn_draft": single("kernel_unified_attention", ATTN_IFACE, ad["block"],
+                                 [cdiv(T, ad["grid"][0]["ceil_div"][1]), D_KV_HEADS, 1],
+                                 shared_mem=ad.get("shared_mem"), cubin=ad["cubin"], sha256=ad["sha256"]),
+            "dflash_conv": single("kern_dflash_conv_bf16",
+                                  ["inout buffer<bf16>", "in buffer<bf16>", "in buffer<bf16>",
+                                   "i32", "i32", "i32", "i32", "i32"],
+                                  [256, 1, 1], [HIDDEN // 256, 1, 1], cubin="dflash_conv.cubin"),
+            "topk16": single("kern_topk16_bf16",
+                             ["in buffer<bf16>", "out buffer<i64>", "out buffer<f32>", "i32", "i32"],
+                             [1024, 1, 1], [DRAFT_TOKENS, 1, 1], cubin="topk_row.cubin"),
+            "dflash_select": single("kern_dflash_select",
+                                    ["in buffer<i64>", "in buffer<f32>", "in buffer<bf16>", "in buffer<bf16>",
+                                     "in buffer<bf16>", "in buffer<bf16>", "out buffer<i64>", "i32", "i32", "i32"],
+                                    [SEL_RANK, 1, 1], [1, 1, 1], shared_mem=SEL_K * SEL_RANK * 4,
+                                    cubin="dflash_select.cubin"),
+            "gather_cands": single("kern_embedding_i64_bf16",
+                                   ["in buffer<i64>", "in buffer<bf16>", "out buffer<bf16>", "i32", "i32"],
+                                   [256, 1, 1], [DRAFT_TOKENS * SEL_K, 1, 1], cubin="embedding.cubin"),
+            "gather_row": single("kern_embedding_i64_bf16",
+                                 ["in buffer<i64>", "in buffer<bf16>", "out buffer<bf16>", "i32", "i32"],
+                                 [256, 1, 1], [1, 1, 1], cubin="embedding.cubin"),
+        })
+
     def gemm(label, ab, w, c, m, n, k):
         return d(label, "gemm", [buf(ab), buf(w), buf(c), m, i32(n), i32(k)])
 
@@ -704,18 +962,24 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym):
                  [buf("x"), buf(x_in), buf("residual"), buf(w), i32(HIDDEN), T,
                   i32(HIDDEN), i32(HIDDEN), f32(eps)])
 
-    def gdn_layer(i, decode):
+    def gdn_layer(i, decode, nacc=None):
+        """decode=False: the chunked FLA prefill chain.  decode=True: the
+        recurrent chain — Stage 1's packed kernels, or, when `nacc` names
+        the num_accepted_tokens buffer, vLLM's speculative kernels over the
+        `tokens` rows (SSM checkpoint per row, resume from slot nacc-1)."""
         p = f"model.layers.{i}.linear_attn."
         l = f"l{i}."
-        line = GDN_LAYERS.index(i) + 1
-        idx = buf("gdn.line_index", 4 * line)
+        g = GDN_LAYERS.index(i)
+        line = g + 1
+        idx = buf(line_table, 4 * line)
+        page = gdn_page(i)
         ds = [
             gemm(l + "in_proj_qkvz", "x", p + "in_proj_qkvz.weight", "qkvz", T, QKVZ_DIM, HIDDEN),
             gemm(l + "in_proj_ba", "x", p + "in_proj_ba.weight", "ba", T, BA_DIM, HIDDEN),
         ]
         a_ = buf("ba", GDN_V_HEADS * BF16)   # ba row = [b | a]
         b_ = buf("ba")
-        if not decode:
+        if not decode and nacc is None:
             ds += [
                 d(l + "conv", "conv_fwd",
                   [buf("qkvz"), buf(p + "conv1d.weight"), state("gdn"), idx, buf("gdn.has_initial"),
@@ -739,8 +1003,8 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym):
                    buf("g_cum"), buf("cu_seqlens_q"), buf("fla.chunk_indices"), T] + Z2),
                 d(l + "chunk_h", "chunk_h",
                   [buf("gdn_k"), buf("u"), buf("w"), buf("v_new"), buf("g_cum"), buf("h"),
-                   state("gdn", line * GDN_LINE_BYTES + CONV_STATE_BYTES),
-                   state("gdn", line * GDN_LINE_BYTES + CONV_STATE_BYTES),
+                   state("gdn", page * page_bytes + ssm_off),
+                   state("gdn", page * page_bytes + ssm_off),
                    buf("cu_seqlens_q"), buf("fla.chunk_offsets"), T] + Z2),
                 d(l + "chunk_o", "chunk_o",
                   [buf("gdn_q"), buf("gdn_k"), buf("v_new"), buf("h"), buf("g_cum"),
@@ -752,19 +1016,45 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym):
                   [buf("core_attn_out"), buf("core_attn_out"), buf(p + "norm.weight"), buf("z_c"),
                    i32(GDN_D), i32(GDN_D), i32(GDN_D), expr(mul(T, GDN_V_HEADS)), f32(eps)] + Z2),
             ]
-        else:
+        elif nacc is None:
             ds += [
                 d(l + "conv_update", "conv_update",
                   [buf("qkvz"), buf(p + "conv1d.weight"), state("gdn"), idx, buf("qkvz"),
-                   i32(1), i32(GDN_LINES), i64(1), i64(1)] + Z2),
+                   i32(1), i32(n_pages), i64(1), i64(1)] + Z2),
                 d(l + "recurrent", "recurrent",
                   [buf("qkvz"), a_, b_, buf(p + "A_log"), buf(p + "dt_bias"), buf("core_attn_out"),
-                   state("gdn", CONV_STATE_BYTES), state("gdn", CONV_STATE_BYTES), idx,
+                   state("gdn", ssm_off), state("gdn", ssm_off), idx,
                    f32(gdn_scale)] + Z2),
                 d(l + "gated_norm", "gated_norm_decode",
                   [buf("core_attn_out"), buf("core_attn_out"), buf(p + "norm.weight"),
                    buf("qkvz", Z_OFF * BF16), i32(GDN_D), i32(GDN_D), i32(GDN_D), i32(GDN_V_HEADS),
                    f32(eps)] + Z2),
+            ]
+        else:
+            # vLLM's spec-decode GDN path: conv update with the accepted-token
+            # offset (seqlen 8 baked: it reads/writes 8 qkvz rows, rows past
+            # `tokens` are scratch), post_conv split, contiguous a/b, the
+            # recurrent kernel over T rows checkpointing every row's state.
+            ds += [
+                d(l + "conv_update", "conv_update_spec",
+                  [buf("qkvz"), buf(p + "conv1d.weight"), state("gdn"), idx, nacc, buf("cu_seqlens_q"),
+                   buf("qkvz"), i32(1), i32(n_pages), i64(QKVZ_DIM), i64(QKVZ_DIM)] + Z2),
+                d(l + "post_conv", "post_conv",
+                  [buf("qkvz"), a_, b_, buf(p + "A_log"), buf(p + "dt_bias"),
+                   buf("gdn_q"), buf("gdn_k"), buf("gdn_v"), buf("g"), buf("beta"),
+                   i32(QKVZ_DIM), i32(BA_DIM), i32(BA_DIM), i32(GDN_Q), i32(GDN_Q), i32(GDN_V), T] + Z2),
+                d(l + "a_copy", "copy_rows", [buf("a_c"), a_, i32(GDN_V_HEADS), i32(BA_DIM), i32(GDN_V_HEADS)]),
+                d(l + "b_copy", "copy_rows", [buf("b_c"), b_, i32(GDN_V_HEADS), i32(BA_DIM), i32(GDN_V_HEADS)]),
+                d(l + "recurrent", "recurrent_spec",
+                  [buf(p + "A_log"), buf("a_c"), buf("b_c"), buf(p + "dt_bias"), f32(1.0), f32(20.0),
+                   buf("gdn_q"), buf("gdn_k"), buf("gdn_v"), buf("core_attn_out"),
+                   state("gdn", ssm_off), state("gdn", ssm_off), buf("cu_seqlens_q"),
+                   buf("gdn.spec_slots", 4 * SPEC_BLOCK * g), nacc, f32(gdn_scale), i64(1), T] + Z2),
+                d(l + "z_copy", "copy_rows",
+                  [buf("z_c"), buf("qkvz", Z_OFF * BF16), i32(GDN_V), i32(QKVZ_DIM), i32(GDN_V)]),
+                d(l + "gated_norm", "gated_norm",
+                  [buf("core_attn_out"), buf("core_attn_out"), buf(p + "norm.weight"), buf("z_c"),
+                   i32(GDN_D), i32(GDN_D), i32(GDN_D), expr(mul(T, GDN_V_HEADS)), f32(eps)] + Z2),
             ]
         ds.append(gemm(l + "out_proj", "core_attn_out", p + "out_proj.weight", "y", T, HIDDEN, GDN_V))
         return ds
@@ -805,7 +1095,14 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym):
             gemm(l + "o_proj", "gated", p + "o_proj.weight", "y", T, HIDDEN, Q_DIM),
         ]
 
-    def forward(decode):
+    def forward(decode, taps=False, nacc=None, tail=None):
+        """Target forward.  decode: recurrent GDN + split-KV attention (else
+        chunked FLA + 2D attention over the `tokens` rows).  taps: the five
+        fc GEMMs into `fc_out` at the DFlash taps (after layers 5/19/33/47/61:
+        residual = hidden + residual there).  tail: "prefill" (last row ->
+        next_token), "decode" (row 0 -> next_token), "verify" (all rows ->
+        verify_tokens)."""
+        tail = tail or ("decode" if decode else "prefill")
         ds = [
             d("embed", "embedding",
               [buf("token_ids"), buf("model.embed_tokens.weight"), buf("residual"), T, i32(HIDDEN)]),
@@ -820,7 +1117,7 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym):
         for i in range(LAYERS):
             p = f"model.layers.{i}."
             l = f"l{i}."
-            ds += attn_layer(i, decode) if i in ATTN_LAYERS else gdn_layer(i, decode)
+            ds += attn_layer(i, decode) if i in ATTN_LAYERS else gdn_layer(i, decode, nacc)
             ds += [
                 fused(l + "post_attn_norm", "y", p + "post_attention_layernorm.weight_p1"),
                 gemm(l + "gate_up", "x", p + "mlp.gate_up_proj.weight", "gate_up", T, 2 * FFN, HIDDEN),
@@ -831,30 +1128,204 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym):
             last = i + 1 == LAYERS
             ds.append(fused(l + ("final_norm" if last else "next_input_norm"), "y",
                             "model.norm.weight_p1" if last else f"model.layers.{i + 1}.input_layernorm.weight_p1"))
+            if taps and i in TAPS:
+                # residual now holds hidden + residual = the input of layer
+                # i+1, vLLM's aux hidden state; fc's column block j, β=1
+                # accumulating after the first (no concat)
+                j = TAPS[i]
+                ds.append(d(l + "fc_tap", "gemm" if j == 0 else "gemm_acc",
+                            [buf("residual"), buf(f"draft.fc.{j}.weight"), buf("fc_out"),
+                             T, i32(HIDDEN), i32(HIDDEN)]))
         # The final norm runs over all rows like vLLM (ATen's reduction width
         # depends on the row count); lm_head only needs the last one.
-        if decode:
+        if tail == "decode":
             ds.append(gemm("lm_head", "x", "lm_head.weight", "logits", i32(1), VOCAB, HIDDEN))
+            ds.append(d("sample", "argmax_row", [buf("logits"), buf("next_token"), i32(VOCAB)]))
+        elif tail == "verify":
+            ds.append(gemm("lm_head", "x", "lm_head.weight", "logits_blk", T, VOCAB, HIDDEN))
+            ds.append(d("sample", "argmax", [buf("logits_blk"), buf("verify_tokens"), i32(VOCAB)]))
         else:
             ds.append(d("last_row", "last_row", [buf("final_x"), buf("x"), i32(HIDDEN), i32(HIDDEN), T]))
             ds.append(gemm("lm_head", "final_x", "lm_head.weight", "logits", i32(1), VOCAB, HIDDEN))
-        ds.append(d("sample", "argmax_row", [buf("logits"), buf("next_token"), i32(VOCAB)]))
+            ds.append(d("sample", "argmax_row", [buf("logits"), buf("next_token"), i32(VOCAB)]))
         return ds
 
-    programs = {
-        "prefill": {"dispatches": forward(False)},
-        "decode": {"dispatches": forward(True)},
-    }
+    def d_fused(label, x, w):
+        return d(label, "d_fused_norm",
+                 [buf(x), i64(HIDDEN), buf("residual"), buf(w), f32(eps), T, i32(HIDDEN), i64(HIDDEN)])
+
+    def d_conv(label, x, c, side):
+        return d(label, "dflash_conv",
+                 [buf(x), buf("d_coef"), buf(c + ".base_kernel"), T, i32(HIDDEN), i32(D_GROUPS),
+                  i32(D_CONV_PROJ), i32(side)])
+
+    def draft():
+        """One non-causal pass over the 8-row block [anchor, mask x7] at
+        positions pos..pos+7 (env tokens=8), then top-16 + selector walk ->
+        7 draft tokens.  Draft hidden size = target's, so the target's
+        activation buffers are reused; the two grouped convs of every layer
+        wrap attention and MLP (prepare before, finish after, coefficients
+        from one GEMM of the pre-attention / pre-MLP normed state)."""
+        mp = "draft."
+        ds = [
+            d("embed", "embedding",
+              [buf("token_ids"), buf("model.embed_tokens.weight"), buf("residual"), T, i32(HIDDEN)]),
+            d("l0.input_norm", "d_rms_norm",
+              [buf("x"), buf("residual"), i64(HIDDEN), i64(0), i64(0), i64(0), i64(0),
+               buf(mp + "layers.0.input_layernorm.weight"), i64(0), f32(eps), T, i32(HIDDEN)]),
+        ]
+        for j in range(D_LAYERS):
+            p = f"{mp}layers.{j}."
+            l = f"l{j}."
+            koff = j * D_LAYER_KV_BYTES
+            ks, vs = buf("draft.kv_scales", j * 8), buf("draft.kv_scales", j * 8 + 4)
+            last = j + 1 == D_LAYERS
+            ds += [
+                gemm(l + "attn_conv_proj", "x", p + "attention_conv.kernel_projection.weight", "d_coef",
+                     T, D_CONV_PROJ, HIDDEN),
+                d_conv(l + "attn_conv_pre", "x", p + "attention_conv", 0),
+                gemm(l + "qkv_proj", "x", p + "self_attn.qkv_proj.weight", "d_qkv", T, D_QKV, HIDDEN),
+                d(l + "q_norm", "d_head_norm",
+                  [buf("d_q"), buf("d_qkv"), i64(D_HEAD_DIM), i64(D_QKV), i64(0), i64(D_HEADS), i64(0),
+                   buf(p + "self_attn.q_norm.weight"), i64(0), f32(eps), expr(mul(T, D_HEADS)), i32(D_HEAD_DIM)]),
+                d(l + "k_norm", "d_kv_norm",
+                  [buf("k_n"), buf("d_qkv", D_Q * BF16), i64(D_HEAD_DIM), i64(D_QKV), i64(0), i64(D_KV_HEADS),
+                   i64(0), buf(p + "self_attn.k_norm.weight"), i64(0), f32(eps), expr(mul(T, D_KV_HEADS)),
+                   i32(D_HEAD_DIM)]),
+                d(l + "rope", "d_rope",
+                  [buf("positions"), buf("d_q"), buf("k_n"), buf("draft.rope.cos_sin_cache"), i32(D_HEAD_DIM),
+                   i64(D_Q), i64(D_KV), i64(D_HEAD_DIM), i32(D_HEADS), i32(D_KV_HEADS), i32(D_HEAD_DIM),
+                   i64(0), u8(0)]),
+                d(l + "kv_write", "d_cache",
+                  [buf("k_n"), buf("d_qkv", (D_Q + D_KV) * BF16),
+                   state("draft_kv", koff), state("draft_kv", koff + D_V_BYTE_OFF), buf("slot_mapping"),
+                   i64(D_BLOCK_STRIDE), i64(D_KV_HEADS * 2 * D_HEAD_DIM), i64(2 * D_HEAD_DIM),
+                   i64(D_KV), i64(D_QKV), i32(D_KV_HEADS), i32(D_HEAD_DIM), i32(D_BLOCK), ks, vs, i32(0)]),
+                d(l + "attn", "attn_draft",
+                  [buf("d_attn"), buf("d_q"), state("draft_kv", koff), state("draft_kv", koff + D_V_BYTE_OFF),
+                   buf("draft_block_table"), buf("seq_lens"), f32(D_ATTN_SCALE), ks, vs, f32(1.0), f32(0.0),
+                   i64(D_TABLE_LEN), i64(D_Q), i64(D_HEAD_DIM), i64(D_Q), i64(D_HEAD_DIM), i64(0),
+                   buf("seq_lens"),
+                   i64(D_BLOCK_STRIDE), i64(D_KV_HEADS * 2 * D_HEAD_DIM), i64(2 * D_HEAD_DIM),
+                   i64(D_BLOCK_STRIDE), i64(D_KV_HEADS * 2 * D_HEAD_DIM), i64(2 * D_HEAD_DIM),
+                   buf("cu_seqlens_q"), i32(1)] + Z2),
+                gemm(l + "o_proj", "d_attn", p + "self_attn.o_proj.weight", "y", T, HIDDEN, D_Q),
+                d_conv(l + "attn_conv_post", "y", p + "attention_conv", 1),
+                d_fused(l + "post_attn_norm", "y", p + "post_attention_layernorm.weight"),
+                gemm(l + "mlp_conv_proj", "y", p + "mlp_conv.kernel_projection.weight", "d_coef",
+                     T, D_CONV_PROJ, HIDDEN),
+                d_conv(l + "mlp_conv_pre", "y", p + "mlp_conv", 0),
+                gemm(l + "gate_up", "y", p + "mlp.gate_up_proj.weight", "gate_up", T, 2 * FFN, HIDDEN),
+                d(l + "silu_mul", "silu_mul", [buf("act"), buf("gate_up"), i32(FFN), i32(0), f32(1.0), i32(0)]),
+                gemm(l + "down_proj", "act", p + "mlp.down_proj.weight", "x", T, HIDDEN, FFN),
+                d_conv(l + "mlp_conv_post", "x", p + "mlp_conv", 1),
+                d_fused(l + ("final_norm" if last else "next_input_norm"), "x",
+                        mp + "norm.weight" if last else f"{mp}layers.{j + 1}.input_layernorm.weight"),
+            ]
+        # rows 1..7 (the masks) -> shared lm_head -> top-16 candidates; the
+        # rank-256 selector scores predecessor/successor codebook rows of the
+        # candidates (gathered with the embedding kernel) and walks greedily
+        row1 = HIDDEN * BF16
+        ds += [
+            d("lm_head", "gemm", [buf("x", row1), buf("lm_head.weight"), buf("logits_blk"),
+                                  i32(DRAFT_TOKENS), i32(VOCAB), i32(HIDDEN)]),
+            d("sel.topk", "topk16", [buf("logits_blk"), buf("cand_ids"), buf("cand_vals"), i32(VOCAB), i32(VOCAB)]),
+            d("sel.hidden_proj", "gemm", [buf("x", row1), buf("draft.selector.hidden_projection.weight"),
+                                          buf("hidden_r"), i32(DRAFT_TOKENS), i32(SEL_RANK), i32(HIDDEN)]),
+            d("sel.succ", "gather_cands", [buf("cand_ids"), buf("draft.selector.successor"), buf("succ_g"),
+                                           i32(DRAFT_TOKENS * SEL_K), i32(SEL_RANK)]),
+            d("sel.pred", "gather_cands", [buf("cand_ids"), buf("draft.selector.predecessor"), buf("pred_g"),
+                                           i32(DRAFT_TOKENS * SEL_K), i32(SEL_RANK)]),
+            d("sel.pred_anchor", "gather_row", [buf("anchor_token"), buf("draft.selector.predecessor"),
+                                                buf("pred_anchor"), i32(1), i32(SEL_RANK)]),
+            d("sel.walk", "dflash_select", [buf("cand_ids"), buf("cand_vals"), buf("hidden_r"), buf("succ_g"),
+                                            buf("pred_g"), buf("pred_anchor"), buf("draft_tokens"),
+                                            i32(DRAFT_TOKENS), i32(SEL_RANK), i32(SEL_RANK)]),
+        ]
+        return ds
+
+    def draft_precompute():
+        """Target taps -> draft context KV (DSpark's shape, docs/spec-decode.md):
+        hidden_norm(fc_out) -> fused KV GEMM [n, 10240] -> per layer k_norm,
+        K-only rope (key = the same buffer with 0 kv heads), cache write.
+        Runs at env tokens = valid rows of fc_out; positions / slot_mapping
+        are still those of the forward that produced them."""
+        ds = [
+            d("hidden_norm", "d_rms_norm",
+              [buf("x"), buf("fc_out"), i64(HIDDEN), i64(0), i64(0), i64(0), i64(0),
+               buf("draft.hidden_norm.weight"), i64(0), f32(eps), T, i32(HIDDEN)]),
+            gemm("fused_kv", "x", "draft.fused_kv.weight", "kv_flat", T, D_KV_FLAT, HIDDEN),
+        ]
+        for j in range(D_LAYERS):
+            koff = j * D_LAYER_KV_BYTES
+            ks, vs = buf("draft.kv_scales", j * 8), buf("draft.kv_scales", j * 8 + 4)
+            ds += [
+                d(f"ctx{j}.k_norm", "d_kv_norm",
+                  [buf("k_n"), buf("kv_flat", j * 2 * D_KV * BF16), i64(D_HEAD_DIM), i64(D_KV_FLAT), i64(0),
+                   i64(D_KV_HEADS), i64(0), buf(f"draft.layers.{j}.self_attn.k_norm.weight"), i64(0), f32(eps),
+                   expr(mul(T, D_KV_HEADS)), i32(D_HEAD_DIM)]),
+                d(f"ctx{j}.rope", "d_rope",
+                  [buf("positions"), buf("k_n"), buf("k_n"), buf("draft.rope.cos_sin_cache"), i32(D_HEAD_DIM),
+                   i64(D_KV), i64(0), i64(D_HEAD_DIM), i32(D_KV_HEADS), i32(0), i32(D_HEAD_DIM), i64(0), u8(0)]),
+                d(f"ctx{j}.kv_write", "d_cache",
+                  [buf("k_n"), buf("kv_flat", (j * 2 * D_KV + D_KV) * BF16),
+                   state("draft_kv", koff), state("draft_kv", koff + D_V_BYTE_OFF), buf("slot_mapping"),
+                   i64(D_BLOCK_STRIDE), i64(D_KV_HEADS * 2 * D_HEAD_DIM), i64(2 * D_HEAD_DIM),
+                   i64(D_KV), i64(D_KV_FLAT), i32(D_KV_HEADS), i32(D_HEAD_DIM), i32(D_BLOCK), ks, vs, i32(0)]),
+            ]
+        return ds
+
+    states = {"kv": {"bytes_per_token": KV_BYTES_PER_TOKEN}, "gdn": {"bytes_fixed": gdn_state_bytes}}
+    meta = {"version": 2, "model": "qwen3.8-27b"}
+    if spec:
+        one = buf("gdn.one")
+        programs = {
+            "prefill": {"dispatches": forward(False, taps=True)},
+            # non-speculative decode on the speculative state layout: the
+            # spec kernels at tokens=1, resuming from SSM slot 0 / conv
+            # offset 0 (where prefill and every previous tokens=1 step leave
+            # the state)
+            "decode": {"dispatches": forward(True, nacc=one)},
+            "decode_spec": {"dispatches": forward(True, taps=True, nacc=one)},
+            # verify = the target over [anchor, d0..d6] (tokens=8): 2D
+            # attention, spec GDN resuming from num_accepted_tokens-1
+            "verify": {"dispatches": forward(False, taps=True, nacc=buf("num_accepted_tokens"), tail="verify")},
+            "draft": {"dispatches": draft()},
+            "draft_precompute": {"dispatches": draft_precompute()},
+        }
+        states["draft_kv"] = {"bytes_per_token": D_KV_BYTES_PER_TOKEN}
+        meta = {"version": 2, "model": "qwen3.8-27b-dflash2",
+                # caller contract: draft rows = [anchor] + [mask] * (block-1) at
+                # tokens=block; verify at tokens=block; num_accepted_tokens =
+                # 1 + accepted drafts of the previous round (1 after prefill)
+                "spec": {"block": SPEC_BLOCK, "mask_token": MASK_TOKEN}}
+        DOMAINS.update({
+            "num_accepted_tokens": {"min": 1, "max": SPEC_BLOCK},
+            "draft_block_table": {"index_into": "draft_kv", "unit": D_BLOCK},
+            "anchor_token": TOKEN_DOMAIN, "verify_tokens": TOKEN_DOMAIN, "draft_tokens": TOKEN_DOMAIN,
+            "cand_ids": {"index_into": "draft.selector.successor"},
+            "draft.kv_scales": {"min": 0.0},
+        })
+    else:
+        programs = {
+            "prefill": {"dispatches": forward(False)},
+            "decode": {"dispatches": forward(True)},
+        }
     for name, dom in DOMAINS.items():
         if name in buffers:
             buffers[name]["domain"] = dom
+    # the runtime rejects dead kernels / buffers (a manifest describes only
+    # what runs): the spec layout leaves Stage 1's packed decode chain unused
+    used_k = {dd["kernel"] for pr in programs.values() for dd in pr["dispatches"]}
+    used_b = {a["buf"] for pr in programs.values() for dd in pr["dispatches"] for a in dd["args"] if "buf" in a}
+    kernels = {k: v for k, v in kernels.items() if k in used_k}
+    buffers = {k: v for k, v in buffers.items() if k in used_b}
     return {
-        "meta": {"version": 2, "model": "qwen3.8-27b"},
+        "meta": meta,
         # bs=1; prefill per chunk (tokens <= CHUNK_MAX) over *all* prompt
         # tokens (it emits next_token), decode at tokens=1
         "symbols": {"tokens": {"max": CHUNK_MAX}},
-        "states": {"kv": {"bytes_per_token": KV_BYTES_PER_TOKEN},
-                   "gdn": {"bytes_fixed": GDN_STATE_BYTES}},
+        "states": states,
         "buffers": buffers,
         "kernels": kernels,
         "programs": programs,
@@ -863,8 +1334,15 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym):
 
 def main():
     repo = pathlib.Path(__file__).resolve().parent.parent
-    dump = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else repo / "dumped-kernels" / "pid1898802")
-    out = pathlib.Path(sys.argv[2] if len(sys.argv) > 2 else repo / "examples" / "qwen3.8-27b.json")
+    args = sys.argv[1:]
+    spec_dump = None
+    if "--spec" in args:
+        i = args.index("--spec")
+        spec_dump = pathlib.Path(args[i + 1])
+        del args[i:i + 2]
+    dump = pathlib.Path(args[0] if args else repo / "dumped-kernels" / "pid1898802")
+    out = pathlib.Path(args[1] if len(args) > 1 else
+                       repo / "examples" / ("qwen3.8-27b-dflash2.json" if spec_dump else "qwen3.8-27b.json"))
 
     recs = load(dump / "launches.jsonl")
     fwds = forwards(recs)
@@ -901,7 +1379,34 @@ def main():
         print(f"  pin {TRITON[tag]:<52} {'prefill' if is_pre else 'decode '} -> {mod} {sha[:12]}",
               file=sys.stderr)
 
-    m = build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym)
+    spec = None
+    if spec_dump:
+        # Two dumps feed one manifest (Stage 1's target instances + the
+        # speculative path's), so pinned cubins are named by content
+        # (sha prefix); extract_kernels.sh resolves them across dumps.
+        by_sha = lambda mod_sha: (f"{mod_sha[1][:12]}.cubin", mod_sha[1])  # noqa: E731
+        pins = {k: by_sha(v) for k, v in pins.items()}
+        src = spec_launches(load(spec_dump / "launches.jsonl"))
+        sp = Pinner(spec_dump)
+        spins = {}
+        for tag, r in src.items():
+            spins[tag] = by_sha(sp.pin(SPEC_SYMS[tag], r["attributes"]["num_regs"], nparams=len(r["params"])))
+        # conv_fwd of the spec state layout: Stage 1's instance with the page stride rebaked
+        pins[("conv_fwd", True)] = by_sha(sp.pin_nearest(TRITON["conv_fwd"], pre["conv_fwd"][0]["attributes"]["num_regs"],
+                                                         pinner.pin(TRITON["conv_fwd"], pre["conv_fwd"][0]["attributes"]["num_regs"])[1]))
+        assert pf(src["recurrent_spec"], 15) == gdn_scale and pf(src["recurrent_spec"], 4) == 1.0
+        assert pf(src["recurrent_spec"], 5) == 20.0, "softplus threshold"
+        assert pv(src["conv_update_spec"], 9) == pv(src["conv_update_spec"], 10), "conv update not in place"
+        assert pf(src["d_rms_norm"], 9) == eps and pf(src["d_fused_norm"], 4) == eps
+        dspark = json.loads((repo / "examples" / "qwen3-4b-dspark.json").read_text())
+        ad = dspark["kernels"]["attn_draft"]["impl"]["steps"][0]
+        assert ad["symbol"] == TRITON["unified"] and ad["cubin"] == "unified_noncausal.cubin"
+        for tag, (mod, sha) in sorted(spins.items()):
+            print(f"  spec pin {SPEC_SYMS[tag][:52]:<52} -> {mod} {sha[:12]}", file=sys.stderr)
+        print(f"  spec pin conv_fwd (page stride rebaked) -> {pins[('conv_fwd', True)][0]}", file=sys.stderr)
+        spec = {"src": src, "pins": spins, "attn_draft": ad}
+
+    m = build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec)
     out.write_text(json.dumps(m, indent=1) + "\n")
     n_disp = {k: len(v["dispatches"]) for k, v in m["programs"].items()}
     print(f"wrote {out}: {len(m['buffers'])} buffers, {len(m['kernels'])} kernels, "

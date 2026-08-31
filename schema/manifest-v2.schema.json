@@ -412,6 +412,17 @@
           "description": "Free-form label; the runtime assigns no meaning to it.",
           "type": "string"
         },
+        "spec": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpecMeta"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Caller contract of a speculative-decoding manifest (absent for plain\nprefill/decode ones). The runtime assigns no meaning to it."
+        },
         "version": {
           "description": "Manifest format version. Only 2 is accepted.",
           "format": "uint32",
@@ -462,6 +473,26 @@
       "required": [
         "dtype",
         "shape"
+      ],
+      "type": "object"
+    },
+    "SpecMeta": {
+      "additionalProperties": false,
+      "description": "How a driver stages the `draft` / `verify` programs of a speculative\nmanifest: `draft` runs over `block` rows = the anchor token followed by\n`block - 1` copies of `mask_token`, `verify` over `block` rows = the\nanchor followed by the `block - 1` drafted tokens.",
+      "properties": {
+        "block": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "mask_token": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "block",
+        "mask_token"
       ],
       "type": "object"
     },

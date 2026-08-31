@@ -9,3 +9,4 @@ tools/kernel-capture/libkernelcapture.so
 /kernels-qwen38
 /.wrangler/
 /attestation.json
+/kernels-qwen38-dflash2

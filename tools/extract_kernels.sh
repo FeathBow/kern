@@ -2,18 +2,20 @@
 # 从 capture dump 的 module cubin 里抽出 manifest 用到的核，连同自编核
 # （tools/kernels-src/*.cu）放进 kernel 目录。
 #
-#   tools/extract_kernels.sh <manifest.json> <dump_dir> [out_dir=kernels]
+#   tools/extract_kernels.sh <manifest.json> <dump_dir>[:<dump_dir>...] [out_dir=kernels]
 #
-# 两种取法：manifest 里钉定了 `cubin`（+sha256）的 step 按文件名从 dump 里
-# 原样复制并校验 sha（同名 Triton 核的多个 constexpr 实例 ABI 相同，只能
-# 靠钉定）；没钉定的 symbol 把含它的 module 全部抽出，runtime 加载时按
+# 两种取法：manifest 里钉定了 `cubin`（+sha256）的 step 按 sha 在所有 dump
+# 目录（以及仓库 kernels/ 里借用的核，如 DSpark 的 unified_noncausal）中查
+# 找，以 manifest 里的文件名落地（同名 Triton 核的多个 constexpr 实例 ABI
+# 相同，只能靠钉定；跨 dump 时生成器按 sha 前缀命名，避免 module_N 撞名）；
+# 没钉定的 symbol 把含它的 module 全部抽出，runtime 加载时按
 # cuFuncGetParamInfo 的参数布局与 manifest 声明比对来消歧。不同模型的
 # dump 别混进同一个 out_dir——同名同 ABI 的实例（如 reshape_and_cache 的
 # block_size 16 / 784 版本）会串。
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 manifest="${1:?manifest.json}"
-dump="${2:?dump dir}"
+IFS=: read -r -a dumps <<<"${2:?dump dir(s)}"
 out="${3:-$repo/kernels}"
 mkdir -p "$out"
 rm -f "$out"/module_*.cubin
@@ -36,29 +38,39 @@ for k in m["kernels"].values():
 PY
 )
 
+# content index over every candidate cubin (dumps + the repo's borrowed kernels)
+declare -A by_sha
+while read -r sha path; do
+  by_sha[$sha]="${by_sha[$sha]:-$path}"
+done < <(for dmp in "${dumps[@]}"; do sha256sum "$dmp"/*.cubin; done; sha256sum "$repo"/kernels/*.cubin 2>/dev/null)
+
 cuobjdump="${CUDA_HOME:-/usr/local/cuda}/bin/cuobjdump"
 n=0
 declare -A copied
 for entry in "${pinned[@]}"; do
   read -r cubin sha sym <<<"$entry"
   if [ "$cubin" != "-" ]; then
-    src="$dump/$cubin"
-    [ -f "$src" ] || { echo "pinned $cubin ($sym) missing in $dump" >&2; exit 1; }
+    [ -n "${copied[$cubin]:-}" ] && continue
+    src=""
     if [ "$sha" != "-" ]; then
-      got="$(sha256sum "$src" | cut -d' ' -f1)"
-      [ "$got" = "$sha" ] || { echo "sha mismatch for $cubin: $got != $sha" >&2; exit 1; }
+      src="${by_sha[$sha]:-}"
+      [ -n "$src" ] || { echo "pinned $cubin ($sym) sha $sha not found in ${dumps[*]} / kernels" >&2; exit 1; }
+    else
+      for dmp in "${dumps[@]}"; do [ -f "$dmp/$cubin" ] && { src="$dmp/$cubin"; break; }; done
+      [ -n "$src" ] || { echo "pinned $cubin ($sym) missing in ${dumps[*]}" >&2; exit 1; }
     fi
-    if [ -z "${copied[$cubin]:-}" ]; then
-      cp "$src" "$out/$cubin"; copied[$cubin]=1; n=$((n+1))
-    fi
+    [ "$(realpath "$src")" = "$(realpath -m "$out/$cubin")" ] || cp "$src" "$out/$cubin"
+    copied[$cubin]=1; n=$((n+1))
   else
-    for mod in "$dump"/module_*.cubin; do
-      base="$(basename "$mod")"
-      [ -n "${copied[$base]:-}" ] && continue
-      names="$("$cuobjdump" -symbols "$mod" 2>/dev/null | awk '{print $NF}')" || continue
-      if grep -qxF "$sym" <<<"$names"; then
-        cp "$mod" "$out/$base"; copied[$base]=1; n=$((n+1))
-      fi
+    for dmp in "${dumps[@]}"; do
+      for mod in "$dmp"/module_*.cubin; do
+        base="$(basename "$mod")"
+        [ -n "${copied[$base]:-}" ] && continue
+        names="$("$cuobjdump" -symbols "$mod" 2>/dev/null | awk '{print $NF}')" || continue
+        if grep -qxF "$sym" <<<"$names"; then
+          cp "$mod" "$out/$base"; copied[$base]=1; n=$((n+1))
+        fi
+      done
     done
   fi
 done

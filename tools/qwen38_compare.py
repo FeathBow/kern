@@ -25,12 +25,16 @@ STOP = "248046,248044"   # <|im_end|>, <|endoftext|> of the Qwen3.8 tokenizer
 
 def run_one(args, prompt, steps):
     cmd = [str(REPO / "target/release/kern-run"),
-           "--manifest", str(REPO / "examples/qwen3.8-27b.json"),
-           "--kernels", str(REPO / "kernels-qwen38"),
+           "--manifest", str(REPO / args.manifest),
+           "--kernels", str(REPO / args.kernels),
            "--weights", str(WEIGHTS / "qwen3.8-27b.safetensors"),
            "--tokenizer", str(WEIGHTS / "tokenizer.json"),
            "--gpu", str(args.gpu), "--capacity", str(args.capacity), "--chunk", str(args.chunk),
            "--steps", str(steps), "--stop-tokens", STOP, "--prompt", prompt]
+    if args.draft:
+        cmd += ["--weights", str(WEIGHTS / "qwen3.8-27b-dflash2-draft.safetensors")]
+    if args.spec:
+        cmd.append("--spec")
     if args.eager:
         cmd.append("--eager")
     t0 = time.time()
@@ -44,7 +48,7 @@ def run_one(args, prompt, steps):
         "prompt_ids": ids("prompt"),
         "generated": ids("generated ids"),
         "prefill": re.search(r"prefill: .*", err).group(0) if "prefill:" in err else "",
-        "decode": re.search(r"\d+ tokens generated, .*", err).group(0),
+        "decode": re.search(r"\d+ tokens generated, .*|spec: .*", err).group(0),
         "wall_s": round(wall, 1),
         "stdout": p.stdout,
     }
@@ -60,10 +64,22 @@ def main():
     ap.add_argument("--capacity", type=int, default=4704)
     ap.add_argument("--only", type=int, default=None, help="run a single prompt index")
     ap.add_argument("--out", default=None)
-    ap.add_argument("--ref", default=str(REPO / "docs/qwen38-ref.json"))
+    ap.add_argument("--ref", default=str(REPO / "docs/qwen38-ref.json"),
+                    help="vLLM reference (qwen38_ref.py) or a kern compare JSON (then kern-vs-kern)")
+    ap.add_argument("--manifest", default="examples/qwen3.8-27b.json")
+    ap.add_argument("--kernels", default="kernels-qwen38")
+    ap.add_argument("--draft", action="store_true", help="also load the DFlash2 draft artifact")
+    ap.add_argument("--spec", action="store_true", help="kern-run --spec (draft/verify rounds)")
     args = ap.parse_args()
 
     ref = json.load(open(args.ref))
+    if "results" in ref and ref["results"] and "generated" in ref["results"][0]:
+        # a kern compare JSON as the oracle: greedy spec decode must reproduce
+        # plain decode token for token
+        base = json.load(open(REPO / "docs/qwen38-ref.json"))
+        ref = {"results": [{"prompt": b["prompt"], "prompt_token_ids": b["prompt_token_ids"],
+                            "output_token_ids": r["generated"]}
+                           for r, b in zip(ref["results"], base["results"])]}
     results = []
     all_ok = True
     for i, r in enumerate(ref["results"]):

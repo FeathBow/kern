@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, ensure, Result};
 use kern_manifest::types::{Arg, Dim, Manifest};
 use kern_runtime::Runtime;
 
@@ -62,14 +62,27 @@ impl Caller {
     /// position). Entries past the state's capacity are never read, but
     /// they must still be valid page ids — the buffer's domain says so.
     pub fn new(mut rt: Runtime) -> Result<Caller> {
-        let n_entries = match rt.manifest.buffers["block_table"].shape.as_slice() {
-            [Dim::Const(n)] => *n as i64,
-            s => bail!("unexpected block_table shape {s:?}"),
-        };
-        let unit = rt.manifest.buffers["block_table"].domain.as_ref().map_or(16, |d| d.unit) as i64;
-        let n_pages = (rt.capacity() as i64 / unit).max(1);
-        let table: Vec<i32> = (0..n_entries).map(|i| i.min(n_pages - 1) as i32).collect();
-        rt.write_input("block_table", &le_bytes_i32(&table))?;
+        // Every `*block_table` input (a speculative manifest has one per
+        // paged state, e.g. `draft_block_table`); page size from its domain.
+        let tables: Vec<String> = rt
+            .manifest
+            .buffers
+            .keys()
+            .filter(|n| n.ends_with("block_table"))
+            .cloned()
+            .collect();
+        ensure!(tables.iter().any(|n| n == "block_table"), "manifest has no `block_table` input");
+        for name in tables {
+            let b = &rt.manifest.buffers[&name];
+            let n_entries = match b.shape.as_slice() {
+                [Dim::Const(n)] => *n as i64,
+                s => bail!("unexpected {name} shape {s:?}"),
+            };
+            let unit = b.domain.as_ref().map_or(16, |d| d.unit) as i64;
+            let n_pages = (rt.capacity() as i64 / unit).max(1);
+            let table: Vec<i32> = (0..n_entries).map(|i| i.min(n_pages - 1) as i32).collect();
+            rt.write_input(&name, &le_bytes_i32(&table))?;
+        }
         Ok(Caller { rt, pos: 0 })
     }
 

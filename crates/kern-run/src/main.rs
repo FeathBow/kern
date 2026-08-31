@@ -14,6 +14,7 @@ use std::time::Instant;
 
 use anyhow::{bail, ensure, Context, Result};
 use clap::Parser;
+use kern_manifest::types::Dim;
 use kern_run::{
     env, i64_from_le, le_bytes_i32, le_bytes_i64, prefill_emits_next_token, Caller, STOP_TOKENS,
 };
@@ -38,8 +39,9 @@ struct Opts {
     kernels: PathBuf,
 
     /// Safetensors weight artifact, tensors bound by name
+    /// Safetensors artifact(s); repeat for a target + draft pair
     #[arg(long, default_value = "weights/qwen3-4b-decode.safetensors")]
-    weights: PathBuf,
+    weights: Vec<PathBuf>,
 
     /// HF tokenizer.json
     #[arg(long, default_value = "weights/tokenizer.json")]
@@ -192,15 +194,18 @@ fn main() -> Result<()> {
     }
 
     let t0 = Instant::now();
-    let blob = std::fs::read(&o.weights)
-        .with_context(|| format!("reading weights {}", o.weights.display()))?;
-    let blob_len = blob.len();
-    rt.load_weights(&blob)?;
-    drop(blob);
+    let blobs = o
+        .weights
+        .iter()
+        .map(|p| std::fs::read(p).with_context(|| format!("reading weights {}", p.display())))
+        .collect::<Result<Vec<_>>>()?;
+    let blob_len: usize = blobs.iter().map(Vec::len).sum();
+    rt.load_weights(&blobs.iter().map(Vec::as_slice).collect::<Vec<_>>())?;
+    drop(blobs);
     let n_weights = by_class.get("weight").map_or(0, |e| e.0);
     info!(
         "weights: {n_weights} tensors bound by name from {} ({}) in {:?}",
-        o.weights.display(),
+        o.weights.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(" + "),
         human(blob_len as u64),
         t0.elapsed()
     );
@@ -287,7 +292,8 @@ fn main() -> Result<()> {
     }
     if o.spec {
         let pos = caller.pos;
-        let generated = spec_decode(&mut caller.rt, &o, &prompt_ids, pos)?;
+        let generated = spec_decode(&mut caller.rt, &o, &prompt_ids, pos, generated)?;
+        info!("generated ids: {generated:?}");
         let gen_u32: Vec<u32> = generated.iter().map(|&t| t as u32).collect();
         let text = tokenizer.decode(&gen_u32, false).map_err(|e| anyhow::anyhow!("decode: {e}"))?;
         println!("{}{}", o.prompt, text);
@@ -356,7 +362,6 @@ fn main() -> Result<()> {
 /// / `y` (live `tokens` rows) and the final logits as raw little-endian
 /// files `<tag>.<point>.bin`.
 fn probe(caller: &mut Caller, prompt_ids: &[i64], dir: &std::path::Path, chunk: u64) -> Result<()> {
-    use kern_manifest::types::Dim;
     std::fs::create_dir_all(dir)?;
     match caller.rt.manifest.buffers["y"].shape.as_slice() {
         [Dim::Sym(_), Dim::Const(_)] => {}
@@ -447,42 +452,69 @@ fn probe(caller: &mut Caller, prompt_ids: &[i64], dir: &std::path::Path, chunk: 
 /// projects the accepted rows' target hidden states (fc taps in `fc_out`)
 /// into the draft's context KV. Rollback is free: rejected slots are simply
 /// overwritten by the next round (paged KV, position-identity slots).
+///
+/// Two manifest contracts, told apart by `meta.spec`:
+/// - DSpark (no `meta.spec`): draft rows = [anchor, mask x6] (7), verify
+///   rows = 8; the last prompt token goes through `decode_spec`.
+/// - `meta.spec = {block, mask_token}` (DFlash2): draft and verify both run
+///   over `block` rows ([anchor, mask x block-1] / [anchor, drafts]); the
+///   manifest's prefill emits the first token, so `decode_spec` is only
+///   needed when it doesn't. If the manifest takes a `num_accepted_tokens`
+///   input (the target's recurrent state resumes from the checkpoint of the
+///   last accepted row), it is 1 + the drafts accepted in the previous
+///   round.
 fn spec_decode(
     rt: &mut Runtime,
     o: &Opts,
     prompt_ids: &[i64],
     mut pos: i64,
+    mut generated: Vec<i64>,
 ) -> Result<Vec<i64>> {
-    for p in ["decode_spec", "verify", "draft", "draft_precompute"] {
+    for p in ["verify", "draft", "draft_precompute"] {
         if !rt.manifest.programs.contains_key(p) {
             bail!("--spec needs program `{p}` (not in this manifest)");
         }
     }
     let env = |t: u64| BTreeMap::from([("tokens".to_string(), t)]);
-    let verify_n = DRAFT_TOKENS + 1;
+    let n_drafts = match rt.manifest.buffers["draft_tokens"].shape.as_slice() {
+        [Dim::Const(n)] => *n as usize,
+        s => bail!("unexpected draft_tokens shape {s:?}"),
+    };
+    let verify_n = n_drafts + 1;
+    let (draft_rows, mask_token) = match &rt.manifest.meta.spec {
+        Some(s) => (s.block as usize, s.mask_token),
+        None => (DRAFT_TOKENS, MASK_TOKEN),
+    };
+    ensure!(draft_rows == n_drafts || draft_rows == verify_n, "draft rows {draft_rows} vs {n_drafts} drafts");
+    let has_nacc = rt.manifest.buffers.contains_key("num_accepted_tokens");
 
-    // Last prompt token through decode_spec: first logits + its aux tap.
-    rt.write_input("token_ids", &le_bytes_i64(&[prompt_ids[pos as usize]]))?;
-    rt.write_input("positions", &le_bytes_i64(&[pos]))?;
-    rt.write_input("slot_mapping", &le_bytes_i64(&[pos]))?;
-    rt.write_input("seq_lens", &le_bytes_i32(&[pos as i32 + 1]))?;
-    rt.write_input("cu_seqlens_q", &le_bytes_i32(&[0, 1]))?;
-    rt.run("decode_spec", &env(1))?;
-    rt.run("draft_precompute", &env(1))?;
-    pos += 1;
-    let first = i64::from_le_bytes(rt.read_output("next_token")?.try_into().unwrap());
-    if o.stop_tokens.contains(&first) {
-        info!("stop token {first} at pos {pos}");
-        return Ok(Vec::new());
+    if generated.is_empty() {
+        // Last prompt token through decode_spec: first logits + its aux tap.
+        if !rt.manifest.programs.contains_key("decode_spec") {
+            bail!("--spec needs program `decode_spec` (prefill does not emit next_token)");
+        }
+        rt.write_input("token_ids", &le_bytes_i64(&[prompt_ids[pos as usize]]))?;
+        rt.write_input("positions", &le_bytes_i64(&[pos]))?;
+        rt.write_input("slot_mapping", &le_bytes_i64(&[pos]))?;
+        rt.write_input("seq_lens", &le_bytes_i32(&[pos as i32 + 1]))?;
+        rt.write_input("cu_seqlens_q", &le_bytes_i32(&[0, 1]))?;
+        rt.run("decode_spec", &env(1))?;
+        rt.run("draft_precompute", &env(1))?;
+        pos += 1;
+        let first = i64::from_le_bytes(rt.read_output("next_token")?.try_into().unwrap());
+        if o.stop_tokens.contains(&first) {
+            info!("stop token {first} at pos {pos}");
+            return Ok(Vec::new());
+        }
+        generated.push(first);
     }
-    let mut generated = vec![first];
 
     if !o.eager {
         let t = Instant::now();
-        rt.capture("draft", &env(DRAFT_TOKENS as u64))?;
+        rt.capture("draft", &env(draft_rows as u64))?;
         rt.capture("verify", &env(verify_n as u64))?;
         info!(
-            "CUDA graphs: `draft` (tokens=7) + `verify` (tokens=8) captured ({:?})",
+            "CUDA graphs: `draft` (tokens={draft_rows}) + `verify` (tokens={verify_n}) captured ({:?})",
             t.elapsed()
         );
     }
@@ -490,27 +522,29 @@ fn spec_decode(
     let t0 = Instant::now();
     let mut rounds = 0u32;
     let mut accepted = 0usize;
+    let mut nacc = 1i32;
+    let mut per_pos = vec![0u32; n_drafts];
     'rounds: while generated.len() < o.steps && (pos + verify_n as i64) as u64 <= o.capacity {
         let anchor = *generated.last().unwrap();
-        // Draft: 7 queries [anchor, mask x6] at pos..pos+6, non-causal.
+        // Draft: [anchor, mask x (rows-1)] at pos.., non-causal.
         let mut ids = vec![anchor];
-        ids.resize(DRAFT_TOKENS, MASK_TOKEN);
-        let positions: Vec<i64> = (pos..pos + DRAFT_TOKENS as i64).collect();
+        ids.resize(draft_rows, mask_token);
+        let positions: Vec<i64> = (pos..pos + draft_rows as i64).collect();
         rt.write_input("token_ids", &le_bytes_i64(&ids))?;
         rt.write_input("positions", &le_bytes_i64(&positions))?;
         rt.write_input("slot_mapping", &le_bytes_i64(&positions))?;
-        rt.write_input("seq_lens", &le_bytes_i32(&[pos as i32 + DRAFT_TOKENS as i32]))?;
-        rt.write_input("cu_seqlens_q", &le_bytes_i32(&[0, DRAFT_TOKENS as i32]))?;
+        rt.write_input("seq_lens", &le_bytes_i32(&[pos as i32 + draft_rows as i32]))?;
+        rt.write_input("cu_seqlens_q", &le_bytes_i32(&[0, draft_rows as i32]))?;
         rt.write_input("anchor_token", &le_bytes_i64(&[anchor]))?;
         if o.eager {
-            rt.run("draft", &env(DRAFT_TOKENS as u64))?;
+            rt.run("draft", &env(draft_rows as u64))?;
         } else {
-            rt.run_captured("draft", &env(DRAFT_TOKENS as u64))?;
+            rt.run_captured("draft", &env(draft_rows as u64))?;
         }
         let drafts = i64_from_le(&rt.read_output("draft_tokens")?);
 
-        // Verify: one causal target pass over [anchor, d0..d6] -> 8 greedy
-        // predictions; row i answers "what follows position pos+i".
+        // Verify: one causal target pass over [anchor, d0..] -> verify_n
+        // greedy predictions; row i answers "what follows position pos+i".
         let mut vids = vec![anchor];
         vids.extend_from_slice(&drafts);
         let positions: Vec<i64> = (pos..pos + verify_n as i64).collect();
@@ -519,6 +553,9 @@ fn spec_decode(
         rt.write_input("slot_mapping", &le_bytes_i64(&positions))?;
         rt.write_input("seq_lens", &le_bytes_i32(&[pos as i32 + verify_n as i32]))?;
         rt.write_input("cu_seqlens_q", &le_bytes_i32(&[0, verify_n as i32]))?;
+        if has_nacc {
+            rt.write_input("num_accepted_tokens", &le_bytes_i32(&[nacc]))?;
+        }
         if o.eager {
             rt.run("verify", &env(verify_n as u64))?;
         } else {
@@ -529,12 +566,14 @@ fn spec_decode(
         // Accept the longest matching prefix; vt[a] is the correction (or the
         // bonus token when everything matched).
         let mut a = 0;
-        while a < DRAFT_TOKENS && drafts[a] == vt[a] {
+        while a < n_drafts && drafts[a] == vt[a] {
+            per_pos[a] += 1;
             a += 1;
         }
         // Project the accepted rows' aux states into the draft context KV
         // (rows 0..=a of fc_out; positions/slot_mapping still hold them).
         rt.run("draft_precompute", &env(a as u64 + 1))?;
+        nacc = a as i32 + 1;
         pos += a as i64 + 1;
         rounds += 1;
         accepted += a;
@@ -550,12 +589,12 @@ fn spec_decode(
         }
     }
     let dt = t0.elapsed();
-    let in_rounds = generated.len() - 1; // first token came from decode_spec
+    let in_rounds = generated.len() - 1; // first token came from prefill / decode_spec
     info!(
         "spec: {in_rounds} tokens in {rounds} rounds ({:.2} tokens/round, \
-         {:.1}% drafts accepted), {:.2} ms/round ({:.1} tok/s)",
+         {:.1}% drafts accepted, per position {per_pos:?}), {:.2} ms/round ({:.1} tok/s)",
         in_rounds as f64 / rounds.max(1) as f64,
-        accepted as f64 * 100.0 / (rounds.max(1) as usize * DRAFT_TOKENS) as f64,
+        accepted as f64 * 100.0 / (rounds.max(1) as usize * n_drafts) as f64,
         dt.as_millis() as f64 / rounds.max(1) as f64,
         in_rounds as f64 / dt.as_secs_f64().max(1e-9),
     );
