@@ -33,6 +33,11 @@ npm run build
 wrangler pages deploy dist --project-name kern --branch master
 ```
 
+Pushes to `master` that change `website/**` deploy through
+`.github/workflows/deploy-website.yml`. The workflow accepts either the
+`CLOUDFLARE_API_TOKEN` or `CF_API_TOKEN` Actions secret and reads the Cloudflare
+account ID from the `CLOUDFLARE_ACCOUNT_ID` Actions variable.
+
 The site can also deploy directly from this repository without a Worker or a
 local Wrangler installation. Connect the repository in the Cloudflare
 dashboard with these settings:
