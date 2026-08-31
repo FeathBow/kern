@@ -1253,3 +1253,274 @@ footer h2 {
 .proof-pair {
   grid-template-columns: repeat(3, 1fr);
 }
+
+/* ------------------------------ 03 / the evidence ------------------------------ */
+
+.evidence-section {
+  background: var(--soft);
+}
+
+.evidence-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 48px;
+  margin: 6vh 0 7vh;
+}
+
+.evidence-header h2 {
+  font-size: clamp(56px, 6.6vw, 104px);
+}
+
+.evidence-header h2 span {
+  color: var(--blue);
+}
+
+.evidence-header-side {
+  max-width: 460px;
+  padding-bottom: 10px;
+}
+
+.evidence-header-side p {
+  margin: 14px 0 0;
+  font-size: 15px;
+  color: var(--muted);
+}
+
+.evidence-cmd {
+  margin: 0;
+  padding: 16px 20px;
+  border: 2px solid var(--ink);
+  background: #fff;
+  font-family: "DM Mono", monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.evidence-cmd b {
+  color: var(--blue);
+  font-weight: 500;
+}
+
+.evidence-stage {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(280px, 0.7fr);
+  gap: clamp(32px, 5vw, 96px);
+  align-items: start;
+}
+
+.evidence-diagram {
+  width: 100%;
+  height: auto;
+  overflow: visible;
+  font-family: "DM Mono", monospace;
+}
+
+.evidence-diagram text {
+  font-size: 11px;
+  fill: var(--ink);
+}
+
+.ev-block path {
+  fill: #fff;
+  stroke: var(--ink);
+  stroke-width: 1.8;
+  stroke-linejoin: round;
+}
+
+.ev-block text {
+  text-anchor: middle;
+  font-size: 11.5px;
+}
+
+.ev-cut path {
+  stroke: var(--blue);
+  stroke-width: 2.6;
+}
+
+.ev-row-a .ev-cut path {
+  fill: rgba(6, 71, 255, 0.08);
+}
+
+.ev-row-b .ev-cut path {
+  fill: var(--green);
+}
+
+.ev-cut text {
+  font-weight: 500;
+}
+
+.ev-label,
+.ev-tag {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  fill: var(--muted);
+}
+
+.ev-tag-blue {
+  fill: var(--blue);
+  font-weight: 500;
+}
+
+.ev-wire {
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.ev-wire-blue {
+  stroke: var(--blue);
+  stroke-width: 2;
+}
+
+.ev-snapshot path {
+  fill: #fff;
+  stroke: var(--ink);
+  stroke-width: 2.2;
+  stroke-linejoin: round;
+}
+
+.ev-snapshot text {
+  text-anchor: middle;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+}
+
+.ev-snapshot .ev-snapshot-sub {
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0.06em;
+  fill: var(--muted);
+}
+
+.ev-check-name {
+  font-weight: 500;
+  letter-spacing: 0.08em;
+}
+
+.ev-check-what {
+  fill: var(--muted);
+}
+
+.ev-check-result {
+  font-weight: 500;
+  fill: #3f8f00;
+}
+
+.evidence-verdict {
+  padding-top: 8px;
+}
+
+.verdict-kicker {
+  font-family: "DM Mono", monospace;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+}
+
+.evidence-verdict strong {
+  display: block;
+  width: fit-content;
+  margin: 22px 0 26px;
+  padding: 0.02em 0.14em 0.1em;
+  font-size: clamp(84px, 9vw, 150px);
+  font-weight: 900;
+  letter-spacing: -0.08em;
+  line-height: 0.8;
+  background: var(--green);
+  transform: rotate(-2deg);
+}
+
+.evidence-verdict p {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.evidence-verdict small {
+  display: block;
+  margin-top: 8px;
+  font-family: "DM Mono", monospace;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.verdict-ladder {
+  list-style: none;
+  margin: 40px 0 0;
+  padding: 0;
+  border-top: 1px solid var(--ink);
+  font-family: "DM Mono", monospace;
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
+}
+
+.verdict-ladder li {
+  display: flex;
+  gap: 14px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+}
+
+.verdict-ladder li:first-child {
+  color: var(--ink);
+}
+
+.verdict-ladder b {
+  min-width: 14px;
+  color: var(--blue);
+  font-weight: 500;
+}
+
+.evidence-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 32px;
+  margin-top: 9vh;
+  padding-top: 26px;
+  border-top: 1px solid var(--ink);
+}
+
+.evidence-metrics strong {
+  display: block;
+  font-size: clamp(48px, 5vw, 84px);
+  font-weight: 900;
+  letter-spacing: -0.08em;
+  line-height: 0.8;
+}
+
+.evidence-metrics strong i {
+  font-style: normal;
+  font-size: 0.4em;
+  margin-left: 0.15em;
+  letter-spacing: -0.02em;
+  color: var(--blue);
+}
+
+.evidence-metrics div:nth-child(2) strong,
+.evidence-metrics div:nth-child(3) strong {
+  color: var(--blue);
+}
+
+.evidence-metrics span {
+  display: block;
+  margin-top: 18px;
+  font-family: "DM Mono", monospace;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+}
+
+.evidence-metrics small {
+  display: block;
+  margin-top: 6px;
+  font-family: "DM Mono", monospace;
+  font-size: 11px;
+  color: var(--muted);
+}

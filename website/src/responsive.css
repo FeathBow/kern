@@ -66,6 +66,23 @@
     margin: 0 auto;
     transform: rotate(90deg);
   }
+
+  .evidence-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 28px;
+  }
+
+  .evidence-stage {
+    grid-template-columns: 1fr;
+    gap: 40px;
+  }
+
+  .evidence-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 40px 32px;
+  }
+
 }
 
 @media (max-width: 760px) {
@@ -253,6 +270,15 @@
     align-items: flex-start;
     flex-direction: column;
   }
+
+  .evidence-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .evidence-verdict strong {
+    font-size: clamp(72px, 22vw, 110px);
+  }
+
 }
 
 @media (prefers-reduced-motion: reduce) {

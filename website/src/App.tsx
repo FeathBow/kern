@@ -44,6 +44,7 @@ function Header() {
       <nav aria-label="Primary navigation">
         <a href="#swap">SWAP</a>
         <a href="#loop">LOOP</a>
+        <a href="#evidence">EVIDENCE</a>
         <a href="#proof">PROOF</a>
         <a href="/schema/">SCHEMA</a>
         <a
@@ -317,13 +318,162 @@ function TheLoop() {
   );
 }
 
+// Slightly hand-drawn rectangle: each edge bows by a pixel or so.
+function sketchRect(x: number, y: number, w: number, h: number, bow = 1.4) {
+  return [
+    `M${x} ${y}`,
+    `Q${x + w / 2} ${y - bow} ${x + w} ${y}`,
+    `Q${x + w + bow} ${y + h / 2} ${x + w} ${y + h}`,
+    `Q${x + w / 2} ${y + h + bow} ${x} ${y + h}`,
+    `Q${x - bow} ${y + h / 2} ${x} ${y}`,
+    "Z",
+  ].join(" ");
+}
+
+const stages = ["rms_norm", "qkv_proj", "attention", "silu_mul", "down_proj", "argmax"];
+const CUT = 3;
+
+function ProgramRow({ y, tone }: { y: number; tone: "a" | "b" }) {
+  return (
+    <g className={`ev-row ev-row-${tone}`}>
+      {stages.map((name, i) => {
+        const x = 40 + i * 98;
+        const cut = i === CUT;
+        return (
+          <g key={name} className={cut ? "ev-block ev-cut" : "ev-block"}>
+            <path d={sketchRect(x, y, 88, 44)} />
+            <text x={x + 44} y={y + 27}>{name}</text>
+          </g>
+        );
+      })}
+    </g>
+  );
+}
+
+function EvidenceDiagram() {
+  const cutX = 40 + CUT * 98 + 44; // centre of the swapped block
+  const checks = [
+    { y: 150, name: "NOISE", what: "A re-run vs A", result: "clean" },
+    { y: 186, name: "LOCAL", what: "B vs A", result: "bit-identical" },
+    { y: 222, name: "FUZZ ×6", what: "synth inputs", result: "±0 only" },
+    { y: 258, name: "TIME", what: "cut alone", result: "−24%" },
+  ];
+  return (
+    <svg
+      className="evidence-diagram"
+      viewBox="0 0 810 440"
+      role="img"
+      aria-label="A and B run one prompt in lockstep; at the swapped dispatch the frontier inputs and A's outputs are snapshotted; every later check — noise floor, local compare, fuzz, timing — replays only that cut from the snapshot"
+    >
+      <text className="ev-label" x={40} y={28}>A · REFERENCE · hf:kernels-community/activation</text>
+      <ProgramRow y={40} tone="a" />
+      <text className="ev-label" x={40} y={428}>B · CANDIDATE · kernels/module_59.cubin (mined vLLM)</text>
+      <ProgramRow y={356} tone="b" />
+
+      {/* tap: A's cut → snapshot */}
+      <path className="ev-wire ev-wire-blue" d={`M${cutX} 86 C${cutX - 3} 120, ${cutX + 4} 140, ${cutX} 172`} />
+      <path className="ev-wire ev-wire-blue" d={`M${cutX - 7} 160 L${cutX} 173 L${cutX + 8} 161`} />
+      <text className="ev-tag ev-tag-blue" x={cutX - 16} y={128} textAnchor="end">TAP</text>
+      <text className="ev-tag" x={cutX - 16} y={143} textAnchor="end">frontier in · A out</text>
+
+      {/* snapshot */}
+      <g className="ev-snapshot">
+        <path d={sketchRect(cutX - 78, 176, 156, 58, 1.8)} />
+        <text x={cutX} y={200}>SNAPSHOT</text>
+        <text className="ev-snapshot-sub" x={cutX} y={220}>35.7 MB · 72 cuts</text>
+      </g>
+
+      {/* replay: snapshot → B's cut */}
+      <path className="ev-wire ev-wire-blue" d={`M${cutX} 236 C${cutX + 3} 280, ${cutX - 4} 310, ${cutX} 352`} />
+      <path className="ev-wire ev-wire-blue" d={`M${cutX - 7} 340 L${cutX} 353 L${cutX + 8} 341`} />
+      <text className="ev-tag ev-tag-blue" x={cutX - 16} y={300} textAnchor="end">REPLAY</text>
+      <text className="ev-tag" x={cutX - 16} y={315} textAnchor="end">only the cut</text>
+
+      {/* the four checks fan out of the snapshot */}
+      {checks.map((c) => (
+        <g key={c.name} className="ev-check">
+          <path className="ev-wire" d={`M${cutX + 80} 205 C${cutX + 110} 205, ${cutX + 112} ${c.y - 4}, ${cutX + 134} ${c.y - 4}`} />
+          <text className="ev-check-name" x={cutX + 142} y={c.y}>{c.name}</text>
+          <text className="ev-check-what" x={cutX + 210} y={c.y}>{c.what}</text>
+          <text className="ev-check-result" x={cutX + 312} y={c.y}>✓ {c.result}</text>
+        </g>
+      ))}
+
+      {/* the rest of the program never runs again */}
+      <text className="ev-tag" x={40} y={206}>one prompt · 17 tokens</text>
+      <text className="ev-tag" x={40} y={221}>the model runs once.</text>
+      <text className="ev-tag" x={40} y={236}>everything else replays the cut.</text>
+    </svg>
+  );
+}
+
+function Evidence() {
+  return (
+    <section className="section evidence-section" id="evidence">
+      <div className="section-number">03 / THE EVIDENCE</div>
+      <div className="evidence-header">
+        <h2>
+          ONE COMMAND.
+          <br />
+          <span>ONE VERDICT.</span>
+        </h2>
+        <div className="evidence-header-side">
+          <pre className="evidence-cmd">
+            <b>$</b> kern-attest --a qwen3-4b.json{"\n"}
+            {"             "}--b qwen3-4b-silu-mined.json
+          </pre>
+          <p>The old program is the oracle. No thresholds anywhere.</p>
+        </div>
+      </div>
+
+      <div className="evidence-stage">
+        <EvidenceDiagram />
+        <div className="evidence-verdict">
+          <span className="verdict-kicker">VERDICT · 7.0 s</span>
+          <strong>PASS</strong>
+          <p>value-identical at every cut</p>
+          <small>only signed zeros differ · exit 0</small>
+          <ol className="verdict-ladder">
+            <li><b>0</b> PASS · bit / value / within noise</li>
+            <li><b>2</b> INCONCLUSIVE · beyond noise, no oracle here</li>
+            <li><b>1</b> FAIL · crash or out of domain</li>
+          </ol>
+        </div>
+      </div>
+
+      <div className="evidence-metrics">
+        <div>
+          <strong>72</strong>
+          <span>CUTS TAPPED</span>
+          <small>36 prefill + 36 decode</small>
+        </div>
+        <div>
+          <strong>−24%</strong>
+          <span>Σ CUTS PER STEP</span>
+          <small>305.9 → 231.9 µs</small>
+        </div>
+        <div>
+          <strong>2.532<i>ms</i></strong>
+          <span>TPOT · DERIVED FROM THE CUT</span>
+          <small>measured 2.549 ms · 17 µs apart</small>
+        </div>
+        <div>
+          <strong>0</strong>
+          <span>TOKENS GENERATED</span>
+          <small>bit-identical cuts imply it</small>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function Verifier() {
   const [mode, setMode] = useState<VerifyMode>("type");
   const example = verifyExamples[mode];
 
   return (
     <section className="section verifier-section">
-      <div className="section-number">03 / CRASH EARLY</div>
+      <div className="section-number">04 / CRASH EARLY</div>
       <div className="verifier-header">
         <h2>BAD DECLARATIONS<br /><span>STOP HERE.</span></h2>
         <p>Why the loop runs unattended.</p>
@@ -374,7 +524,7 @@ function Verifier() {
 function Artifact() {
   return (
     <section className="section artifact-section" id="artifact">
-      <div className="section-number">04 / THE ARTIFACT</div>
+      <div className="section-number">05 / THE ARTIFACT</div>
       <div className="artifact-title">
         <h2>A MODEL IS<br />A PROGRAM.</h2>
         <p>Everything the runtime needs.<br />Nothing about the model architecture.</p>
@@ -416,7 +566,7 @@ function Artifact() {
 function Proof() {
   return (
     <section className="section proof-section" id="proof">
-      <div className="section-number">05 / MEASURED</div>
+      <div className="section-number">06 / MEASURED</div>
       <h2>REAL MODEL.<br />REAL KERNELS.</h2>
       <div className="benchmark benchmark-decode">
         <div className="benchmark-label">
@@ -483,6 +633,7 @@ export default function App() {
       <Hero />
       <TheSwap />
       <TheLoop />
+      <Evidence />
       <Verifier />
       <Artifact />
       <Proof />
