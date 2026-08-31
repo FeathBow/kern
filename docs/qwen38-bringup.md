@@ -408,7 +408,7 @@ forward，launch 开销被摊薄。
   配置也落在同一区间。要区分"算术不同"和"算术错误"，需要看的是 top-2 logit
   间距，而不是一致长度（`tools/qwen38_margins.py`）。
 
-### 14:20Z–14:32Z  near-tie 核实 + 文档 / README / 网站（无人工干预）
+### 14:20Z–14:27Z  near-tie 核实 + 文档 / README / 网站（无人工干预）
 
 - `tools/qwen38_margins.py`：vLLM eager 参考轨迹上每一步的 top-2 logprob
   间距（5 prompt × 200 步）。**所有落在参考轨迹上的分叉点，间距全部
