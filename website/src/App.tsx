@@ -45,6 +45,7 @@ function Header() {
       <nav aria-label="Primary navigation">
         <a href="#artifact">ARTIFACT</a>
         <a href="#proof">PROOF</a>
+        <a href="/schema/">SCHEMA</a>
         <a
           className="github-link"
           href="https://github.com/pegainfer-project/kern"
