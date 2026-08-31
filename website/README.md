@@ -2,6 +2,8 @@
 
 Static product page for Kern: models ship as verified GPU programs.
 
+Production: <https://kern-baa.pages.dev>
+
 ## Local development
 
 Requires Node.js 18 or newer.
@@ -23,7 +25,17 @@ The production output is written to `dist/`.
 
 ## Cloudflare Pages
 
-The site can deploy directly from this repository without a Worker:
+The existing Cloudflare Pages project is named `kern`. Publish the current
+production bundle with:
+
+```sh
+npm run build
+wrangler pages deploy dist --project-name kern --branch master
+```
+
+The site can also deploy directly from this repository without a Worker or a
+local Wrangler installation. Connect the repository in the Cloudflare
+dashboard with these settings:
 
 | Setting | Value |
 | --- | --- |
