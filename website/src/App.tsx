@@ -47,6 +47,7 @@ function Header() {
         <a href="#evidence">EVIDENCE</a>
         <a href="#proof">PROOF</a>
         <a href="/schema/">SCHEMA</a>
+        <a href="/qwen38/">+49</a>
         <a
           className="github-link"
           href="https://github.com/pegainfer-project/kern"
@@ -652,12 +653,12 @@ function Proof() {
           <p><b>6</b> programs, same schema</p>
           <small>DSpark speculative decoding composed from existing kernels</small>
         </div>
-        <div className="proof-stat model-stat">
-          <span>SECOND MODEL · QWEN3.8-27B</span>
+        <a className="proof-stat model-stat" href="/qwen38/">
+          <span>SECOND MODEL · QWEN3.8-27B →</span>
           <strong>+49</strong>
           <p><b>lines</b> of runtime + schema</p>
           <small>hybrid GDN + attention, plus its DFlash2 draft · decode 81 vs 95 tok/s, speculative 178 vs 176 · the rest lives in a 1.4k-line generator</small>
-        </div>
+        </a>
       </div>
       <p className="benchmark-footnote">
         Repository measurements · Qwen3-4B (last card: Qwen3.8-27B, docs/qwen38-bringup.md) · batch 1 · single GB300. Each comparison uses its stated control.
