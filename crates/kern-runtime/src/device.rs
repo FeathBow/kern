@@ -67,10 +67,16 @@ pub(crate) fn gemm_bf16_tn(
     args: &[RVal],
     beta: f32,
 ) -> Result<()> {
-    let [a, w, c, m, n, k] = args else {
-        bail!(Manifest, "gemm expects 6 args, got {}", args.len());
+    // `c[m, n] (+)= a[m, k] @ w[n, k]^T`; an optional 7th arg is C's row
+    // stride in elements (default n) so a call can write every `ldc`-th row.
+    let (a, w, c, m, n, k, ldc) = match args {
+        [a, w, c, m, n, k] => (a, w, c, m.val, n.val, k.val, n.val),
+        [a, w, c, m, n, k, ldc] => (a, w, c, m.val, n.val, k.val, ldc.val),
+        _ => bail!(Manifest, "gemm expects 6 or 7 args, got {}", args.len()),
     };
-    let (m, n, k) = (m.val, n.val, k.val);
+    if ldc < n {
+        bail!(Manifest, "gemm: ldc {ldc} < n {n}");
+    }
     let view = |rv: &RVal| RawBf16 {
         ptr: rv.val,
         len: (rv.bytes / 2) as usize,
@@ -87,7 +93,7 @@ pub(crate) fn gemm_bf16_tn(
         beta,
         lda: k as i64,
         ldb: k as i64,
-        ldc: n as i64,
+        ldc: ldc as i64,
         stride_a: None,
         stride_b: None,
         stride_c: None,

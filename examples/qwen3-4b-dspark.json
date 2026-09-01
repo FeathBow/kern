@@ -2376,7 +2376,7 @@
   "anchor_token": {
    "dtype": "i64",
    "shape": [
-    1
+    "seqs"
    ],
    "kind": "input",
    "domain": {
@@ -2386,6 +2386,7 @@
   "draft_tokens": {
    "dtype": "i64",
    "shape": [
+    "seqs",
     7
    ],
    "kind": "output",
@@ -2396,6 +2397,7 @@
   "verify_tokens": {
    "dtype": "i64",
    "shape": [
+    "seqs",
     8
    ],
    "kind": "output",
@@ -2406,7 +2408,7 @@
   "logits_blk": {
    "dtype": "bf16",
    "shape": [
-    8,
+    "tokens",
     151936
    ],
    "kind": "workspace"
@@ -2430,7 +2432,7 @@
   "membed": {
    "dtype": "bf16",
    "shape": [
-    1,
+    "seqs",
     256
    ],
    "kind": "workspace"
@@ -2845,6 +2847,10 @@
   "embedding": {
    "source": "embedding.cubin",
    "sha256": "1c3dd3e591d872aed259d7ef59d44649061f77a4247a5df864a7fbf0ccbde92f"
+  },
+  "markov_rows": {
+   "source": "markov_rows.cubin",
+   "sha256": "73e7038bafa6c50023ad2db1a1534b83d59890c80573a23c79e16a77390fe72b"
   },
   "reduce_segments": {
    "source": "reduce_segments.cubin",
@@ -4212,7 +4218,12 @@
       "grid": [
        {
         "ceil_div": [
-         "tokens",
+         {
+          "mul": [
+           "seqs",
+           11
+          ]
+         },
          4
         ]
        },
@@ -4310,7 +4321,162 @@
     ]
    }
   },
-  "argmax_row": {
+  "attn_verify": {
+   "params": [
+    "out buffer<bf16>",
+    "in buffer<bf16>",
+    "inout state",
+    "inout state",
+    "in buffer<i32>",
+    "in buffer<i32>",
+    "in buffer<f32>",
+    "in buffer<f32>",
+    "in buffer<i32>",
+    "in buffer<i32>",
+    "i32"
+   ],
+   "impl": {
+    "launches": [
+     {
+      "module": "unified_causal",
+      "entry": "kernel_unified_attention",
+      "params": [
+       "out buffer<bf16>",
+       "in buffer<bf16>",
+       "inout state",
+       "inout state",
+       "in buffer<i32>",
+       "in buffer<i32>",
+       "f32",
+       "in buffer<f32>",
+       "in buffer<f32>",
+       "f32",
+       "f32",
+       "i64",
+       "i64",
+       "i64",
+       "i64",
+       "i64",
+       "i64",
+       "in buffer<i32>",
+       "i64",
+       "i64",
+       "i64",
+       "i64",
+       "i64",
+       "i64",
+       "in buffer<i32>",
+       "i32",
+       "i64",
+       "i64"
+      ],
+      "block": [
+       128,
+       1,
+       1
+      ],
+      "grid": [
+       {
+        "mul": [
+         "seqs",
+         3
+        ]
+       },
+       8,
+       1
+      ],
+      "shared_mem": 21760,
+      "args": [
+       {
+        "param": 0
+       },
+       {
+        "param": 1
+       },
+       {
+        "param": 2
+       },
+       {
+        "param": 3
+       },
+       {
+        "param": 4
+       },
+       {
+        "param": 5
+       },
+       {
+        "f32": 0.0883883461356163
+       },
+       {
+        "param": 6
+       },
+       {
+        "param": 7
+       },
+       {
+        "f32": 1.0
+       },
+       {
+        "f32": 0.0
+       },
+       {
+        "i64": 2560
+       },
+       {
+        "i64": 4096
+       },
+       {
+        "i64": 128
+       },
+       {
+        "i64": 4096
+       },
+       {
+        "i64": 128
+       },
+       {
+        "i64": 0
+       },
+       {
+        "param": 8
+       },
+       {
+        "i64": 1179648
+       },
+       {
+        "i64": 2048
+       },
+       {
+        "i64": 256
+       },
+       {
+        "i64": 1179648
+       },
+       {
+        "i64": 2048
+       },
+       {
+        "i64": 256
+       },
+       {
+        "param": 9
+       },
+       {
+        "param": 10
+       },
+       {
+        "i64": 0
+       },
+       {
+        "i64": 0
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "argmax_rows": {
    "params": [
     "in buffer<bf16>",
     "out buffer<i64>"
@@ -4320,24 +4486,25 @@
      "pmax": {
       "dtype": "f32",
       "shape": [
-       1,
+       "seqs",
        64
       ]
      },
      "pidx": {
       "dtype": "i32",
       "shape": [
-       1,
+       "seqs",
        64
       ]
      }
     },
     "launches": [
      {
-      "module": "argmax",
-      "entry": "kern_argmax_partial_bf16",
+      "module": "markov_rows",
+      "entry": "kern_argmax_rows_partial_bf16",
       "params": [
        "in buffer<bf16>",
+       "i64",
        "out buffer<f32>",
        "out buffer<i32>",
        "i32"
@@ -4348,13 +4515,16 @@
        1
       ],
       "grid": [
-       1,
+       "seqs",
        64,
        1
       ],
       "args": [
        {
         "param": 0
+       },
+       {
+        "i64": 1063552
        },
        {
         "scratch": "pmax"
@@ -4368,12 +4538,13 @@
       ]
      },
      {
-      "module": "argmax",
-      "entry": "kern_argmax_final_i64",
+      "module": "markov_rows",
+      "entry": "kern_argmax_rows_final_i64",
       "params": [
        "in buffer<f32>",
        "in buffer<i32>",
        "out buffer<i64>",
+       "i32",
        "i32"
       ],
       "block": [
@@ -4382,7 +4553,7 @@
        1
       ],
       "grid": [
-       1,
+       "seqs",
        1,
        1
       ],
@@ -4397,6 +4568,9 @@
         "param": 1
        },
        {
+        "i32": 7
+       },
+       {
         "i32": 64
        }
       ]
@@ -4404,22 +4578,23 @@
     ]
    }
   },
-  "embedding_row": {
+  "embedding_rows": {
    "params": [
     "in buffer<i64>",
+    "i32",
     "in buffer<bf16>",
     "out buffer<bf16>"
    ],
    "impl": {
     "launches": [
      {
-      "module": "embedding",
-      "entry": "kern_embedding_i64_bf16",
+      "module": "markov_rows",
+      "entry": "kern_embedding_rows_i64_bf16",
       "params": [
        "in buffer<i64>",
+       "i32",
        "in buffer<bf16>",
        "out buffer<bf16>",
-       "i32",
        "i32"
       ],
       "block": [
@@ -4428,7 +4603,7 @@
        1
       ],
       "grid": [
-       1,
+       "seqs",
        1,
        1
       ],
@@ -4443,7 +4618,7 @@
         "param": 2
        },
        {
-        "i32": 1
+        "param": 3
        },
        {
         "i32": 256
@@ -4458,14 +4633,87 @@
     "in buffer<bf16>",
     "in buffer<bf16>",
     "inout buffer<bf16>",
-    "i32",
-    "i32",
     "i32"
    ],
    "impl": {
     "launches": [
      {
-      "entry": "extern:cublaslt_bf16_tn_acc"
+      "entry": "extern:cublaslt_bf16_tn_acc",
+      "params": [
+       "in buffer<bf16>",
+       "in buffer<bf16>",
+       "inout buffer<bf16>",
+       "i32",
+       "i32",
+       "i32"
+      ],
+      "args": [
+       {
+        "param": 0
+       },
+       {
+        "param": 1
+       },
+       {
+        "param": 2
+       },
+       {
+        "param": 3
+       },
+       {
+        "i32": 2560
+       },
+       {
+        "i32": 2560
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "gemm_acc_ldc": {
+   "params": [
+    "in buffer<bf16>",
+    "in buffer<bf16>",
+    "inout buffer<bf16>",
+    "i32"
+   ],
+   "impl": {
+    "launches": [
+     {
+      "entry": "extern:cublaslt_bf16_tn_acc",
+      "params": [
+       "in buffer<bf16>",
+       "in buffer<bf16>",
+       "inout buffer<bf16>",
+       "i32",
+       "i32",
+       "i32",
+       "i64"
+      ],
+      "args": [
+       {
+        "param": 0
+       },
+       {
+        "param": 1
+       },
+       {
+        "param": 2
+       },
+       {
+        "param": 3
+       },
+       {
+        "i32": 151936
+       },
+       {
+        "i32": 256
+       },
+       {
+        "i64": 1063552
+       }
+      ]
      }
     ]
    }
@@ -7289,12 +7537,6 @@
      },
      {
       "var": "tokens"
-     },
-     {
-      "i32": 2560
-     },
-     {
-      "i32": 2560
      }
     ]
    },
@@ -9753,12 +9995,6 @@
      },
      {
       "var": "tokens"
-     },
-     {
-      "i32": 2560
-     },
-     {
-      "i32": 2560
      }
     ]
    },
@@ -12217,12 +12453,6 @@
      },
      {
       "var": "tokens"
-     },
-     {
-      "i32": 2560
-     },
-     {
-      "i32": 2560
      }
     ]
    },
@@ -14681,12 +14911,6 @@
      },
      {
       "var": "tokens"
-     },
-     {
-      "i32": 2560
-     },
-     {
-      "i32": 2560
      }
     ]
    },
@@ -40370,12 +40594,6 @@
      },
      {
       "var": "tokens"
-     },
-     {
-      "i32": 2560
-     },
-     {
-      "i32": 2560
      }
     ]
    },
@@ -42810,12 +43028,6 @@
      },
      {
       "var": "tokens"
-     },
-     {
-      "i32": 2560
-     },
-     {
-      "i32": 2560
      }
     ]
    },
@@ -45250,12 +45462,6 @@
      },
      {
       "var": "tokens"
-     },
-     {
-      "i32": 2560
-     },
-     {
-      "i32": 2560
      }
     ]
    },
@@ -47690,12 +47896,6 @@
      },
      {
       "var": "tokens"
-     },
-     {
-      "i32": 2560
-     },
-     {
-      "i32": 2560
      }
     ]
    },
@@ -48821,7 +49021,7 @@
    },
    {
     "label": "l0.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -49148,7 +49348,7 @@
    },
    {
     "label": "l1.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -49453,7 +49653,7 @@
    },
    {
     "label": "l2.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -49758,7 +49958,7 @@
    },
    {
     "label": "l3.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -50063,7 +50263,7 @@
    },
    {
     "label": "l4.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -50368,7 +50568,7 @@
    },
    {
     "label": "l5.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -50673,7 +50873,7 @@
    },
    {
     "label": "l6.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -50978,7 +51178,7 @@
    },
    {
     "label": "l7.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -51283,7 +51483,7 @@
    },
    {
     "label": "l8.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -51459,12 +51659,6 @@
      },
      {
       "var": "tokens"
-     },
-     {
-      "i32": 2560
-     },
-     {
-      "i32": 2560
      }
     ]
    },
@@ -51612,7 +51806,7 @@
    },
    {
     "label": "l9.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -51917,7 +52111,7 @@
    },
    {
     "label": "l10.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -52222,7 +52416,7 @@
    },
    {
     "label": "l11.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -52527,7 +52721,7 @@
    },
    {
     "label": "l12.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -52832,7 +53026,7 @@
    },
    {
     "label": "l13.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -53137,7 +53331,7 @@
    },
    {
     "label": "l14.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -53442,7 +53636,7 @@
    },
    {
     "label": "l15.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -53747,7 +53941,7 @@
    },
    {
     "label": "l16.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -53923,12 +54117,6 @@
      },
      {
       "var": "tokens"
-     },
-     {
-      "i32": 2560
-     },
-     {
-      "i32": 2560
      }
     ]
    },
@@ -54076,7 +54264,7 @@
    },
    {
     "label": "l17.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -54381,7 +54569,7 @@
    },
    {
     "label": "l18.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -54686,7 +54874,7 @@
    },
    {
     "label": "l19.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -54991,7 +55179,7 @@
    },
    {
     "label": "l20.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -55296,7 +55484,7 @@
    },
    {
     "label": "l21.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -55601,7 +55789,7 @@
    },
    {
     "label": "l22.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -55906,7 +56094,7 @@
    },
    {
     "label": "l23.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -56211,7 +56399,7 @@
    },
    {
     "label": "l24.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -56387,12 +56575,6 @@
      },
      {
       "var": "tokens"
-     },
-     {
-      "i32": 2560
-     },
-     {
-      "i32": 2560
      }
     ]
    },
@@ -56540,7 +56722,7 @@
    },
    {
     "label": "l25.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -56845,7 +57027,7 @@
    },
    {
     "label": "l26.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -57150,7 +57332,7 @@
    },
    {
     "label": "l27.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -57455,7 +57637,7 @@
    },
    {
     "label": "l28.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -57760,7 +57942,7 @@
    },
    {
     "label": "l29.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -58065,7 +58247,7 @@
    },
    {
     "label": "l30.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -58370,7 +58552,7 @@
    },
    {
     "label": "l31.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -58675,7 +58857,7 @@
    },
    {
     "label": "l32.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -58851,12 +59033,6 @@
      },
      {
       "var": "tokens"
-     },
-     {
-      "i32": 2560
-     },
-     {
-      "i32": 2560
      }
     ]
    },
@@ -59004,7 +59180,7 @@
    },
    {
     "label": "l33.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -59309,7 +59485,7 @@
    },
    {
     "label": "l34.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -59614,7 +59790,7 @@
    },
    {
     "label": "l35.attn",
-    "op": "attn_prefill",
+    "op": "attn_verify",
     "args": [
      {
       "buf": "attn_out"
@@ -59789,7 +59965,7 @@
       "buf": "logits_blk"
      },
      {
-      "i32": 8
+      "var": "tokens"
      },
      {
       "i32": 151936
@@ -61396,10 +61572,13 @@
    },
    {
     "label": "markov0.embed",
-    "op": "embedding_row",
+    "op": "embedding_rows",
     "args": [
      {
       "buf": "anchor_token"
+     },
+     {
+      "i32": 1
      },
      {
       "buf": "draft.markov_w1"
@@ -61411,7 +61590,7 @@
    },
    {
     "label": "markov0.bias",
-    "op": "gemm_acc",
+    "op": "gemm_acc_ldc",
     "args": [
      {
       "buf": "membed"
@@ -61423,19 +61602,13 @@
       "buf": "logits_blk"
      },
      {
-      "i32": 1
-     },
-     {
-      "i32": 151936
-     },
-     {
-      "i32": 256
+      "var": "seqs"
      }
     ]
    },
    {
     "label": "markov0.sample",
-    "op": "argmax_row",
+    "op": "argmax_rows",
     "args": [
      {
       "buf": "logits_blk"
@@ -61447,10 +61620,13 @@
    },
    {
     "label": "markov1.embed",
-    "op": "embedding_row",
+    "op": "embedding_rows",
     "args": [
      {
       "buf": "draft_tokens"
+     },
+     {
+      "i32": 7
      },
      {
       "buf": "draft.markov_w1"
@@ -61462,7 +61638,7 @@
    },
    {
     "label": "markov1.bias",
-    "op": "gemm_acc",
+    "op": "gemm_acc_ldc",
     "args": [
      {
       "buf": "membed"
@@ -61475,19 +61651,13 @@
       "offset": 303872
      },
      {
-      "i32": 1
-     },
-     {
-      "i32": 151936
-     },
-     {
-      "i32": 256
+      "var": "seqs"
      }
     ]
    },
    {
     "label": "markov1.sample",
-    "op": "argmax_row",
+    "op": "argmax_rows",
     "args": [
      {
       "buf": "logits_blk",
@@ -61501,11 +61671,14 @@
    },
    {
     "label": "markov2.embed",
-    "op": "embedding_row",
+    "op": "embedding_rows",
     "args": [
      {
       "buf": "draft_tokens",
       "offset": 8
+     },
+     {
+      "i32": 7
      },
      {
       "buf": "draft.markov_w1"
@@ -61517,7 +61690,7 @@
    },
    {
     "label": "markov2.bias",
-    "op": "gemm_acc",
+    "op": "gemm_acc_ldc",
     "args": [
      {
       "buf": "membed"
@@ -61530,19 +61703,13 @@
       "offset": 607744
      },
      {
-      "i32": 1
-     },
-     {
-      "i32": 151936
-     },
-     {
-      "i32": 256
+      "var": "seqs"
      }
     ]
    },
    {
     "label": "markov2.sample",
-    "op": "argmax_row",
+    "op": "argmax_rows",
     "args": [
      {
       "buf": "logits_blk",
@@ -61556,11 +61723,14 @@
    },
    {
     "label": "markov3.embed",
-    "op": "embedding_row",
+    "op": "embedding_rows",
     "args": [
      {
       "buf": "draft_tokens",
       "offset": 16
+     },
+     {
+      "i32": 7
      },
      {
       "buf": "draft.markov_w1"
@@ -61572,7 +61742,7 @@
    },
    {
     "label": "markov3.bias",
-    "op": "gemm_acc",
+    "op": "gemm_acc_ldc",
     "args": [
      {
       "buf": "membed"
@@ -61585,19 +61755,13 @@
       "offset": 911616
      },
      {
-      "i32": 1
-     },
-     {
-      "i32": 151936
-     },
-     {
-      "i32": 256
+      "var": "seqs"
      }
     ]
    },
    {
     "label": "markov3.sample",
-    "op": "argmax_row",
+    "op": "argmax_rows",
     "args": [
      {
       "buf": "logits_blk",
@@ -61611,11 +61775,14 @@
    },
    {
     "label": "markov4.embed",
-    "op": "embedding_row",
+    "op": "embedding_rows",
     "args": [
      {
       "buf": "draft_tokens",
       "offset": 24
+     },
+     {
+      "i32": 7
      },
      {
       "buf": "draft.markov_w1"
@@ -61627,7 +61794,7 @@
    },
    {
     "label": "markov4.bias",
-    "op": "gemm_acc",
+    "op": "gemm_acc_ldc",
     "args": [
      {
       "buf": "membed"
@@ -61640,19 +61807,13 @@
       "offset": 1215488
      },
      {
-      "i32": 1
-     },
-     {
-      "i32": 151936
-     },
-     {
-      "i32": 256
+      "var": "seqs"
      }
     ]
    },
    {
     "label": "markov4.sample",
-    "op": "argmax_row",
+    "op": "argmax_rows",
     "args": [
      {
       "buf": "logits_blk",
@@ -61666,11 +61827,14 @@
    },
    {
     "label": "markov5.embed",
-    "op": "embedding_row",
+    "op": "embedding_rows",
     "args": [
      {
       "buf": "draft_tokens",
       "offset": 32
+     },
+     {
+      "i32": 7
      },
      {
       "buf": "draft.markov_w1"
@@ -61682,7 +61846,7 @@
    },
    {
     "label": "markov5.bias",
-    "op": "gemm_acc",
+    "op": "gemm_acc_ldc",
     "args": [
      {
       "buf": "membed"
@@ -61695,19 +61859,13 @@
       "offset": 1519360
      },
      {
-      "i32": 1
-     },
-     {
-      "i32": 151936
-     },
-     {
-      "i32": 256
+      "var": "seqs"
      }
     ]
    },
    {
     "label": "markov5.sample",
-    "op": "argmax_row",
+    "op": "argmax_rows",
     "args": [
      {
       "buf": "logits_blk",
@@ -61721,11 +61879,14 @@
    },
    {
     "label": "markov6.embed",
-    "op": "embedding_row",
+    "op": "embedding_rows",
     "args": [
      {
       "buf": "draft_tokens",
       "offset": 40
+     },
+     {
+      "i32": 7
      },
      {
       "buf": "draft.markov_w1"
@@ -61737,7 +61898,7 @@
    },
    {
     "label": "markov6.bias",
-    "op": "gemm_acc",
+    "op": "gemm_acc_ldc",
     "args": [
      {
       "buf": "membed"
@@ -61750,19 +61911,13 @@
       "offset": 1823232
      },
      {
-      "i32": 1
-     },
-     {
-      "i32": 151936
-     },
-     {
-      "i32": 256
+      "var": "seqs"
      }
     ]
    },
    {
     "label": "markov6.sample",
-    "op": "argmax_row",
+    "op": "argmax_rows",
     "args": [
      {
       "buf": "logits_blk",

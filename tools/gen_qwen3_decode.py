@@ -496,20 +496,22 @@ def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
         # DSpark：draft 与 target 几何同构，激活 buffer 全部复用；只加投机
         # 专属的交换面。fc_out 是 carry：verify/prefill/decode_spec 的 tap 写，
         # draft_precompute 读——跨 program 的交接棒，顺序是 caller 契约。
-        buffers["anchor_token"] = {"dtype": "i64", "shape": [1],
+        # 一序列一行：draft/verify 都是 seqs 段 varlen（每段 7/8 行），
+        # tokens = 7·seqs / 8·seqs；seqs=1 就是单序列的老契约
+        buffers["anchor_token"] = {"dtype": "i64", "shape": ["seqs"],
                                    "kind": "input"}
-        buffers["draft_tokens"] = {"dtype": "i64", "shape": [BLOCK_TOKENS],
+        buffers["draft_tokens"] = {"dtype": "i64", "shape": ["seqs", BLOCK_TOKENS],
                                    "kind": "output"}
-        buffers["verify_tokens"] = {"dtype": "i64", "shape": [VERIFY_TOKENS],
+        buffers["verify_tokens"] = {"dtype": "i64", "shape": ["seqs", VERIFY_TOKENS],
                                     "kind": "output"}
         buffers["logits_blk"] = {"dtype": "bf16",
-                                 "shape": [VERIFY_TOKENS, VOCAB],
+                                 "shape": ["tokens", VOCAB],
                                  "kind": "workspace"}
         buffers["fc_out"] = {"dtype": "bf16", "shape": ["tokens", HIDDEN],
                              "kind": "carry"}
         buffers["kv_flat"] = {"dtype": "bf16", "shape": ["tokens", DRAFT_KV_DIM],
                               "kind": "workspace"}
-        buffers["membed"] = {"dtype": "bf16", "shape": [1, MARKOV_RANK],
+        buffers["membed"] = {"dtype": "bf16", "shape": ["seqs", MARKOV_RANK],
                              "kind": "workspace"}
         weight("draft.embed_tokens.weight", [VOCAB, HIDDEN])
         weight("draft.lm_head.weight", [VOCAB, HIDDEN])
@@ -687,44 +689,57 @@ def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
         draft_cubin, draft_sha = pins["draft"]
         # draft attention：又一份同接口实现——non-causal 编译（DFlash 的
         # 7 个 query 全员互见），钉定到自己的 cubin
+        # grid.x 盖住 vLLM 的 q-block 索引空间（seq i 的首 block 在
+        # cu_seqlens_q[i]//BLOCK_Q + i）：7 行/段 → 7·seqs//4 + seqs ≤ ⌈11·seqs/4⌉
         kernels["attn_draft"] = single(
-            pf_sym, ATTN_IFACE, pf_block, [cdiv(T, BLOCK_Q), KV_HEADS, 1],
+            pf_sym, ATTN_IFACE, pf_block, [cdiv(mul(S, 11), BLOCK_Q), KV_HEADS, 1],
             shared_mem=pf_smem, cubin=draft_cubin, sha256=draft_sha)
-        # markov 链是逐行的：单行 argmax / 单 token gather，配 buffer 字节
-        # 偏移使用（行号烘焙在 offset 里，不吃 tokens symbol）
-        kernels["argmax_row"] = {
-            "params": ["in buffer<bf16>", "out buffer<i64>", "i32"],
+        # verify：causal 实例，8 行/段 → 8·seqs//4 + seqs = 3·seqs
+        kernels["attn_verify"] = single(
+            pf_sym, ATTN_IFACE, pf_block, [mul(S, 3), KV_HEADS, 1],
+            shared_mem=pf_smem, cubin=causal_cubin, sha256=causal_sha)
+        # markov 链第 t 步作用在每序列的第 t 行——行集合 {s·7+t}：行距 7·V
+        # 的 argmax、下标距 7 的 gather，grid.x = seqs，步的字节偏移烘在
+        # buffer 参数里
+        kernels["argmax_rows"] = {
+            "params": ["in buffer<bf16>", "i64", "out buffer<i64>", "i32", "i32"],
             "impl": {
                 "scratch": {
-                    "pmax": {"dtype": "f32", "shape": [1, 64]},
-                    "pidx": {"dtype": "i32", "shape": [1, 64]},
+                    "pmax": {"dtype": "f32", "shape": ["seqs", 64]},
+                    "pidx": {"dtype": "i32", "shape": ["seqs", 64]},
                 },
                 "launches": [
-                    step("kern_argmax_partial_bf16",
-                         ["in buffer<bf16>", "out buffer<f32>",
+                    step("kern_argmax_rows_partial_bf16",
+                         ["in buffer<bf16>", "i64", "out buffer<f32>",
                           "out buffer<i32>", "i32"],
-                         [1024, 1, 1], [1, 64, 1],
-                         [a(0), scr("pmax"), scr("pidx"), a(2)],
-                         **hw("argmax")),
-                    step("kern_argmax_final_i64",
+                         [1024, 1, 1], [S, 64, 1],
+                         [a(0), a(1), scr("pmax"), scr("pidx"), a(4)],
+                         **hw("markov_rows")),
+                    step("kern_argmax_rows_final_i64",
                          ["in buffer<f32>", "in buffer<i32>",
-                          "out buffer<i64>", "i32"],
-                         [64, 1, 1], [1, 1, 1],
-                         [scr("pmax"), scr("pidx"), a(1), i32(64)],
-                         **hw("argmax")),
+                          "out buffer<i64>", "i32", "i32"],
+                         [64, 1, 1], [S, 1, 1],
+                         [scr("pmax"), scr("pidx"), a(2), a(3), i32(64)],
+                         **hw("markov_rows")),
                 ],
             },
         }
-        kernels["embedding_row"] = single(
-            "kern_embedding_i64_bf16",
-            ["in buffer<i64>", "in buffer<bf16>", "out buffer<bf16>",
-             "i32", "i32"],
-            [256, 1, 1], [1, 1, 1], **hw("embedding"))
+        kernels["embedding_rows"] = single(
+            "kern_embedding_rows_i64_bf16",
+            ["in buffer<i64>", "i32", "in buffer<bf16>", "out buffer<bf16>",
+             "i32"],
+            [256, 1, 1], [S, 1, 1], **hw("markov_rows"))
         # c[m,n] += a[m,k] @ w[n,k]^T：β=1 累加版，喂 fc 分块和 markov 偏置
         kernels["gemm_acc"] = single(
             "extern:cublaslt_bf16_tn_acc",
             ["in buffer<bf16>", "in buffer<bf16>", "inout buffer<bf16>",
              "i32", "i32", "i32"],
+            [1, 1, 1], [1, 1, 1])
+        # 同上，第 7 参是 C 的行距（元素）：markov 链第 t 步只写每序列的第 t 行
+        kernels["gemm_acc_ldc"] = single(
+            "extern:cublaslt_bf16_tn_acc",
+            ["in buffer<bf16>", "in buffer<bf16>", "inout buffer<bf16>",
+             "i32", "i32", "i32", "i64"],
             [1, 1, 1], [1, 1, 1])
 
     def gemm(label, ab, w, c, m, n, k):
@@ -837,9 +852,9 @@ def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
             ds.append(d("sample", "argmax",
                         [buf("logits"), buf("next_token"), i32(VOCAB)]))
         elif tail == "verify":
-            # 8 行 logits + 8 行 argmax（argmax 行数 = env tokens = 8）
+            # 8·seqs 行 logits + 同样多行 argmax（argmax 行数 = env tokens）
             ds.append(gemm("lm_head", "x", lm_head_w, "logits_blk",
-                           i32(VERIFY_TOKENS), VOCAB, HIDDEN))
+                           T, VOCAB, HIDDEN))
             ds.append(d("sample", "argmax",
                         [buf("logits_blk"), buf("verify_tokens"), i32(VOCAB)]))
         elif tail == "draft":
@@ -848,20 +863,26 @@ def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
             # 累进该行 → argmax_row 出 draft token，喂下一步的 prev
             ds.append(gemm("lm_head", "x", lm_head_w, "logits_blk",
                            T, VOCAB, HIDDEN))
+            # 每步作用在每序列的第 t 行（行集合 {s·7+t}，行距 7·V）；prev
+            # 是各序列自己链上的上一个 token（anchor_token[s] 或
+            # draft_tokens[s, t-1]，下标距 1 / 7）
             for t in range(BLOCK_TOKENS):
-                prev = buf("anchor_token") if t == 0 \
-                    else buf("draft_tokens", (t - 1) * 8)
+                prev, stride = (buf("anchor_token"), 1) if t == 0 \
+                    else (buf("draft_tokens", (t - 1) * 8), BLOCK_TOKENS)
                 ds += [
-                    d(f"markov{t}.embed", "embedding_row",
-                      [prev, buf("draft.markov_w1"), buf("membed"),
-                       i32(1), i32(MARKOV_RANK)]),
-                    d(f"markov{t}.bias", "gemm_acc",
+                    d(f"markov{t}.embed", "embedding_rows",
+                      [prev, i32(stride), buf("draft.markov_w1"), buf("membed"),
+                       i32(MARKOV_RANK)]),
+                    d(f"markov{t}.bias", "gemm_acc_ldc",
                       [buf("membed"), buf("draft.markov_w2.weight"),
                        buf("logits_blk", t * VOCAB * BF16),
-                       i32(1), i32(VOCAB), i32(MARKOV_RANK)]),
-                    d(f"markov{t}.sample", "argmax_row",
+                       S, i32(VOCAB), i32(MARKOV_RANK),
+                       i64(BLOCK_TOKENS * VOCAB)]),
+                    d(f"markov{t}.sample", "argmax_rows",
                       [buf("logits_blk", t * VOCAB * BF16),
-                       buf("draft_tokens", t * 8), i32(VOCAB)]),
+                       i64(BLOCK_TOKENS * VOCAB),
+                       buf("draft_tokens", t * 8), i32(BLOCK_TOKENS),
+                       i32(VOCAB)]),
                 ]
         return ds
 
@@ -921,7 +942,7 @@ def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
         # decode_spec = decode + tap（最后一个 prompt token/anchor 也要出 aux）；
         # decode 保持无 tap，非投机路径不多付 5 个 GEMV
         programs["decode_spec"] = forward("attn", "decode", taps=True)
-        programs["verify"] = forward("attn_prefill", "verify", taps=True)
+        programs["verify"] = forward("attn_verify", "verify", taps=True)
         programs["draft"] = forward(
             "attn_draft", "draft", mp="draft.", layers=DRAFT_LAYERS,
             kv_state="draft_kv", block_stride=DRAFT_BLOCK_STRIDE,

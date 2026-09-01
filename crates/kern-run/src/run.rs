@@ -498,7 +498,7 @@ fn spec_decode(caller: &mut Caller, o: &Opts, prompt_ids: &[i64], mut generated:
         }
     }
     let n_drafts = match rt.manifest.buffers["draft_tokens"].shape.as_slice() {
-        [Dim::Const(n)] => *n as usize,
+        [Dim::Const(n)] | [Dim::Var(_), Dim::Const(n)] => *n as usize,
         s => bail!("unexpected draft_tokens shape {s:?}"),
     };
     let verify_n = n_drafts + 1;

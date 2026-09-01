@@ -68,7 +68,8 @@ pub(crate) enum LaunchKind {
         grid: [CExpr; 3],
         shared_mem: Option<CExpr>,
     },
-    /// `extern:cublaslt_bf16_tn` / `..._acc` (beta 0.0 / 1.0).
+    /// `extern:cublaslt_bf16_tn` / `..._acc` (beta 0.0 / 1.0); 6 args, or
+    /// 7 with C's row stride.
     Gemm { beta: f32 },
 }
 
@@ -327,8 +328,8 @@ fn compile_call(
         }
         let kind = match imp {
             LaunchImpl::GemmBf16Tn { beta } => {
-                if slots.len() != 6 {
-                    bail!(Manifest, "launch #{li}: extern gemm takes 6 args, got {}", slots.len());
+                if slots.len() != 6 && slots.len() != 7 {
+                    bail!(Manifest, "launch #{li}: extern gemm takes 6 args (a, w, c, m, n, k) or 7 (+ ldc), got {}", slots.len());
                 }
                 LaunchKind::Gemm { beta: *beta }
             }
