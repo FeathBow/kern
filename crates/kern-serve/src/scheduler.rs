@@ -153,8 +153,11 @@ impl KernScheduler {
     /// this caller contract.
     pub fn new(mut rt: Runtime, mut policy: Policy) -> Result<(KernScheduler, Facts)> {
         let m = &rt.manifest;
-        for p in ["prefill", "decode", "decode_batch"] {
-            if !m.programs.contains_key(p) {
+        // `decode_batch` drives plain batched decode; a speculative run
+        // only ever runs `prefill` and the spec round's programs.
+        let needed: &[&str] = if policy.spec { &["prefill", "decode"] } else { &["prefill", "decode", "decode_batch"] };
+        for p in needed {
+            if !m.programs.contains_key(*p) {
                 bail!("manifest has no program `{p}`");
             }
         }
