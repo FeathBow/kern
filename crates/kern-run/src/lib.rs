@@ -83,6 +83,8 @@ impl Caller {
     /// once (a speculative manifest has one per paged state, e.g.
     /// `draft_block_table`). A 2-D table (`[seqs, n]`) gets the row in every
     /// slot: this caller uses row 0, but every row must hold valid page ids.
+    /// Line tables of a per-sequence state (`[lines, seqs]`) likewise get
+    /// this sequence's lines in every column.
     pub fn new(mut rt: Runtime) -> Result<Caller> {
         ensure!(rt.manifest.buffers.contains_key("block_table"), "manifest has no `block_table` input");
         let lease = rt.lease(rt.max_seq_tokens().min(rt.capacity() as usize))?;
@@ -96,6 +98,22 @@ impl Caller {
             let mut table = Vec::new();
             for _ in 0..rows {
                 lease.extend_row(&name, &mut table)?;
+            }
+            rt.write_input(&name, &le_bytes_i32(&table))?;
+        }
+        let tables: Vec<String> = rt.seq_tables().map(str::to_string).collect();
+        for name in tables {
+            let cols = match rt.manifest.buffers[&name].shape.as_slice() {
+                [Dim::Const(_)] => 1,
+                [Dim::Const(_), Dim::Var(v)] => rt.manifest.vars[v].max,
+                // A wider table (per-line slot lists of a speculative
+                // manifest) is the spec driver's to stage.
+                _ => continue,
+            };
+            let mut table = Vec::new();
+            for r in 0..lease.seq_lines(&name)? {
+                let line = lease.seq_line(&name, r)?;
+                table.extend(std::iter::repeat_n(line, cols as usize));
             }
             rt.write_input(&name, &le_bytes_i32(&table))?;
         }

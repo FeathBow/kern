@@ -702,16 +702,22 @@
     },
     "State": {
       "additionalProperties": false,
-      "description": "Opaque persistent memory; the runtime provisions the bytes and hands the base pointer to `inout state` params.",
+      "description": "Opaque persistent memory; the runtime provisions the bytes and hands the base pointer to `inout state` params. Exactly one of the three sizes is non-zero.",
       "properties": {
         "bytes": {
-          "description": "Fixed byte count independent of capacity — a recurrent conv/SSM state, e.g. `1409286144`; `0` for a per-token state.",
+          "description": "Fixed byte count independent of capacity and sequences, e.g. `4096`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "bytes_per_seq": {
+          "description": "Bytes per sequence slot, one slot per live sequence — a recurrent conv/SSM state, e.g. `154140672`. The runtime provisions `seqs.max + 2` slots: slot 0 (never leased; kernels may read line index 0 as null), one per sequence, one for a batched caller's padding.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
         },
         "bytes_per_token": {
-          "description": "Bytes per token slot, scaled by the capacity — a paged KV cache, e.g. `147456`; `0` for a fixed-size state.",
+          "description": "Bytes per token slot, scaled by the capacity — a paged KV cache, e.g. `147456`.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"

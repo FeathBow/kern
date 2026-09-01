@@ -39,6 +39,11 @@ pub enum Error {
     #[error("caller contract: {0}")]
     Api(String),
 
+    /// The runtime has no slots for a lease: never (longer than a
+    /// page-table row, more pages than the pool) or not now (busy).
+    #[error("lease denied: {0}")]
+    Denied(#[from] crate::pages::Denied),
+
     /// An input write violates the buffer's declared domain (out-of-range
     /// element, non-monotone sequence). Caller-side bug — the values were
     /// wrong before any kernel saw them.

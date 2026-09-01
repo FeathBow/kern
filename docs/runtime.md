@@ -21,7 +21,8 @@ cubin 算 sha256，**只装载 manifest `modules` 表点名的哈希**（其余�
 （文件名不参与），**同一模块里同名的 Triton 多 constexpr 实例靠
 `cuFuncGetParamInfo` 参数布局与 manifest params 比对来消歧**（phase-2
 ABI 校验兼做实例选择，绕开了 capture 缺 launch→module 映射的坑）→ 按
-var max 分配全部 buffer / 按 bytes_per_token×capacity 分配 state →
+var max 分配全部 buffer / 按 bytes_per_token×capacity（或
+bytes_per_seq×(seqs.max+2) 个序列 slot）分配 state →
 safetensors 按名绑权重（scratch 按 impl 声明另行私有分配）→ 顺序重放
 call 表：接口实参解析一次，逐 launch 按 `args` 连线转发/接 scratch/
 填字面量后 raw `cuLaunchKernel`（实参 staging 成小端 u64 slot；>48KB
@@ -29,7 +30,10 @@ call 表：接口实参解析一次，逐 launch 按 `args` 连线转发/接 scr
 向下对齐到 manifest 里 `index_into` 该 state 的最大页单位（block table 的
 `stride`），不会出现半页；不给（`Runtime::load(.., None)`，kern-serve 的默认）
 则在 buffer 和 scratch 都分完之后 `cuMemGetInfo`，剩余显存减 `HEADROOM`
-（1 GiB）按 Σ bytes_per_token 折成整页，再封顶到 `seqs.max × 行上限 + 1 页`。
+（1 GiB）与定长/per-seq state 之后按 Σ bytes_per_token 折成整页，再封顶到
+`seqs.max × 行上限 + 1 页`。`Runtime::lease(tokens)` 一次租下 KV 页和每个
+per-seq state 的一个 slot（租时在 stream 上清零），`Lease::seq_line(table,
+r)` 给出 line 表的项；租约 drop 时一起归还。
 kern run / kern test 仍默认 4096（test 的 workload 抽样以 capacity 为界）。
 `extern:cublaslt_bf16_tn` 特判：行主序 `C[m,n]=A[m,k]@W[n,k]^T` 映射成列
 主序 `C'=W_cm^T×A_cm`（transa=T、lda=ldb=k、m'=n、ldc=n）；

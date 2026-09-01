@@ -88,6 +88,14 @@ pub struct Manifest {
 }
 
 impl Manifest {
+    /// Sequence slots the runtime provisions for every `bytes_per_seq`
+    /// state: the `seqs` bound (1 without the var), plus one so a batched
+    /// caller can hold a padding lease, plus slot 0, which is never leased
+    /// — kernels may treat line index 0 as the null line.
+    pub fn seq_slots(&self) -> u64 {
+        self.vars.get("seqs").map_or(1, |v| v.max.max(1)) + 2
+    }
+
     pub fn from_json(s: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(s)
     }
@@ -120,16 +128,26 @@ impl Var {
     pub const MIN: u64 = 1;
 }
 
-/// Opaque persistent memory; the runtime provisions the bytes and hands the base pointer to `inout state` params.
+/// Opaque persistent memory; the runtime provisions the bytes and hands the base pointer to `inout state` params. Exactly one of the three sizes is non-zero.
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct State {
-    /// Bytes per token slot, scaled by the capacity — a paged KV cache, e.g. `147456`; `0` for a fixed-size state.
+    /// Bytes per token slot, scaled by the capacity — a paged KV cache, e.g. `147456`.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub bytes_per_token: u64,
-    /// Fixed byte count independent of capacity — a recurrent conv/SSM state, e.g. `1409286144`; `0` for a per-token state.
+    /// Fixed byte count independent of capacity and sequences, e.g. `4096`.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub bytes: u64,
+    /// Bytes per sequence slot, one slot per live sequence — a recurrent conv/SSM state, e.g. `154140672`. The runtime provisions `seqs.max + 2` slots: slot 0 (never leased; kernels may read line index 0 as null), one per sequence, one for a batched caller's padding.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub bytes_per_seq: u64,
+}
+
+impl State {
+    /// Whether this state is one slot per sequence.
+    pub fn is_per_seq(&self) -> bool {
+        self.bytes_per_seq > 0
+    }
 }
 
 fn is_zero(v: &u64) -> bool {
@@ -238,8 +256,15 @@ impl Domain {
                 None => 0,
             }));
         }
-        if m.states.contains_key(t) {
-            return Ok(Some(state_capacity_tokens));
+        if let Some(st) = m.states.get(t) {
+            // A per-sequence state is addressed in lines of `stride` bytes,
+            // `seq_slots` slots of them; `resolve` divides by the stride
+            // again, so hand back the byte count.
+            return Ok(Some(if st.is_per_seq() {
+                m.seq_slots() * st.bytes_per_seq
+            } else {
+                state_capacity_tokens
+            }));
         }
         Ok(None)
     }

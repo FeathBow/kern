@@ -168,15 +168,23 @@ fn execute(o: Opts) -> Result<()> {
     for (name, v) in &m.vars {
         info!("  var      {name} ∈ [{}, {}] (caller-provided per call)", kern_manifest::types::Var::MIN, v.max);
     }
-    for (name, per_tok, alloc) in rt.state_sizes() {
-        if per_tok > 0 {
+    for (name, st, alloc) in rt.state_sizes() {
+        if st.bytes_per_token > 0 {
             info!(
-                "  state    {name}: opaque, {per_tok} B/token × capacity {} = {}",
+                "  state    {name}: opaque, {} B/token × capacity {} = {}",
+                st.bytes_per_token,
                 rt.capacity(),
                 human(alloc)
             );
+        } else if st.is_per_seq() {
+            info!(
+                "  state    {name}: opaque, {} per sequence × {} slots = {}",
+                human(st.bytes_per_seq),
+                rt.seq_slots(),
+                human(alloc)
+            );
         } else {
-            info!("  state    {name}: opaque, fixed {} (per-sequence)", human(alloc));
+            info!("  state    {name}: opaque, fixed {}", human(alloc));
         }
     }
     let mut by_kind: BTreeMap<String, (usize, u64)> = BTreeMap::new();

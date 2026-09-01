@@ -38,8 +38,10 @@ buffers.<name>               buffer   有类型的张量：input / output / weig
   launch 几何的标量才是 var**；别的标量（temperature 之类）是数据，走
   `[1]` 形状的 input buffer。
 - `states`：不透明持久内存。**runtime 只知道字节数**——`bytes_per_token`
-  （按 token 容量伸缩：paged KV）或 `bytes`（定长：GDN 的 conv + SSM
-  状态），二选一。内部布局是 provider 生成器里的算式，以字面量 offset
+  （按 token 容量伸缩：paged KV）、`bytes_per_seq`（每个活跃序列一个
+  slot：GDN 的 conv + SSM 递归状态；runtime 供应 `seqs.max + 2` 个 slot，
+  slot 0 永不出租，kernel 可把 line 下标 0 当 null）或 `bytes`（定长），
+  三选一。内部布局是 provider 生成器里的算式，以字面量 offset
   传给 provider 自己的 kernel。
 - `buffers`：`dtype + shape + kind`。shape 维度是常量或 var 名；kind 说
   的是"谁供应、活多久"：`input`（runtime 写入）/ `output`（runtime 读回）
@@ -126,6 +128,9 @@ impl 不必重写先验，kernel package 零改动。两种形式互斥：
 - `{"index_into": "<buffer|state>", "stride": n}`：每个元素是目标 buffer
   的**行**下标或目标 state 的 **token 槽**下标，下标 i 指向第 `i×stride`
   行/槽（默认 1；paged KV 的 block_table 一个下标覆盖 16 个 token）。
+  指向 `bytes_per_seq` state 时元素是 **line** 下标，一条 line 是
+  `stride` 字节（GDN 的一层一页）；这样的 buffer 形如 `[lines, seqs]`，
+  runtime 按租约填 `slot × (bytes_per_seq / stride) + line`。
 
 附加 `"monotone": true` 要求非递减序列（`cu_seqlens` 这类前缀和）。
 
@@ -203,7 +208,7 @@ header 重复——没有权重文件也要能 verify。冗余在 manifest 不�
 
 1. `schema_version`；
 2. var `max ≥ 1`；
-3. state 恰有 `bytes_per_token` / `bytes` 之一非零；
+3. state 恰有 `bytes_per_token` / `bytes_per_seq` / `bytes` 之一非零；
 4. buffer shape 解析、字节数在 var 上界下不溢出；domain（若有）自洽：
    界的类型对得上 dtype、`index_into` 指向存在的 buffer/state、
    `index_into` 与 min/max 互斥、`monotone` 只许一维、min ≤ max 在

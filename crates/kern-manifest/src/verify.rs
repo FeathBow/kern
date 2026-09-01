@@ -5,7 +5,7 @@
 //! Checks:
 //!   1. schema_version
 //!   2. vars: max > 0
-//!   3. states: exactly one of bytes_per_token / bytes is non-zero
+//!   3. states: exactly one of bytes_per_token / bytes / bytes_per_seq is non-zero
 //!   4. buffers: shapes resolve, byte sizes don't overflow at var upper
 //!      bounds; a declared domain is well-formed (bound kinds vs dtype,
 //!      `index_into` resolves, min <= max at the var corners)
@@ -143,12 +143,11 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
 
     // 3. states
     for (name, st) in &m.states {
-        match (st.bytes_per_token, st.bytes) {
-            (0, 0) => errs.push(format!("state `{name}`: one of bytes_per_token / bytes must be > 0")),
-            (t, f) if t > 0 && f > 0 => {
-                errs.push(format!("state `{name}`: bytes_per_token and bytes are exclusive"))
-            }
-            _ => {}
+        let set = [st.bytes_per_token, st.bytes, st.bytes_per_seq].iter().filter(|&&b| b > 0).count();
+        match set {
+            0 => errs.push(format!("state `{name}`: one of bytes_per_token / bytes / bytes_per_seq must be > 0")),
+            1 => {}
+            _ => errs.push(format!("state `{name}`: bytes_per_token, bytes and bytes_per_seq are exclusive")),
         }
     }
 
@@ -600,6 +599,12 @@ fn check_domain(
         match (m.buffers.contains_key(t), m.states.contains_key(t)) {
             (false, false) => errs.push(format!("{ctx}: `index_into` unknown buffer/state `{t}`")),
             (true, true) => errs.push(format!("{ctx}: `index_into` `{t}` is both a buffer and a state")),
+            (false, true) if m.states[t].is_per_seq() && m.states[t].bytes_per_seq % d.stride.max(1) != 0 => {
+                errs.push(format!(
+                    "{ctx}: `index_into` per-sequence state `{t}` in lines of {} bytes, which do not divide its {} bytes per sequence",
+                    d.stride, m.states[t].bytes_per_seq
+                ))
+            }
             (true, false) if t == name => errs.push(format!("{ctx}: a buffer cannot index itself")),
             _ => {}
         }

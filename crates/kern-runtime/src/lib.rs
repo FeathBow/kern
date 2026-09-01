@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use cudarc::cublaslt::CudaBlasLT;
 use cudarc::driver::{result as cu, sys, CudaContext, CudaStream, PinnedHostSlice};
-use kern_manifest::types::{BufferKind, Manifest};
+use kern_manifest::types::{BufferKind, Manifest, State};
 
 use compile::{CompiledProgram, Launch, LaunchKind, RVal, Slot};
 use device::{alloc, gemm_bf16_tn, DeviceBuf};
@@ -148,17 +148,18 @@ impl Runtime {
             manifest.modules.values().map(|md| md.sha256.to_lowercase()).collect();
         let modules = cubin::load_pinned_modules(kernels_dir, &remote, &wanted)?;
 
-        // States are paged: every `index_into` a state comes in `stride`
+        // Paged states are paged: every `index_into` one comes in `stride`
         // tokens per index (the KV block table's page). A capacity that is
         // not a whole number of pages would provision a torn last page —
         // slots the domain says are valid but a page-major kernel writes
         // past the pool for. Round down; the caller asked for "about this
-        // many tokens", not for that page.
+        // many tokens", not for that page. (A per-sequence state's stride
+        // is bytes per line, not tokens: not a page.)
         let page = manifest
             .buffers
             .values()
             .filter_map(|b| b.domain.as_ref())
-            .filter(|d| d.index_into.as_deref().is_some_and(|s| manifest.states.contains_key(s)))
+            .filter(|d| d.index_into.as_deref().and_then(|s| manifest.states.get(s)).is_some_and(|s| !s.is_per_seq()))
             .map(|d| d.stride.max(1))
             .fold(1u64, lcm);
         let max_env: BTreeMap<_, _> =
@@ -211,10 +212,7 @@ impl Runtime {
 
         let mut states = BTreeMap::new();
         for (name, s) in &manifest.states {
-            let bytes = s
-                .bytes_per_token
-                .checked_mul(state_capacity_tokens)
-                .and_then(|b| b.checked_add(s.bytes))
+            let bytes = state_bytes(s, state_capacity_tokens, manifest.seq_slots())
                 .ok_or_else(|| Error::Manifest(format!("state `{name}`: size overflow")))?;
             states.insert(name.clone(), alloc(&stream, bytes)?);
         }
@@ -222,7 +220,7 @@ impl Runtime {
         let programs = compile::compile_programs(&manifest, &resolved, &buffers, &states)?;
         let scratch = resolved.into_values().flat_map(|rk| rk.scratch.into_values()).collect();
 
-        let pool = Arc::new(pages::Pool::new(&manifest, state_capacity_tokens, page));
+        let pool = Arc::new(pages::Pool::new(&manifest, state_capacity_tokens, page)?);
         Ok(Runtime {
             manifest,
             ctx,
@@ -254,12 +252,12 @@ impl Runtime {
             .collect()
     }
 
-    /// (name, bytes_per_token, allocated bytes) for every state.
-    pub fn state_sizes(&self) -> Vec<(&str, u64, u64)> {
+    /// (name, declaration, allocated bytes) for every state.
+    pub fn state_sizes(&self) -> Vec<(&str, &State, u64)> {
         self.manifest
             .states
             .iter()
-            .map(|(n, s)| (n.as_str(), s.bytes_per_token, self.states[n].bytes))
+            .map(|(n, s)| (n.as_str(), s, self.states[n].bytes))
             .collect()
     }
 
@@ -374,11 +372,32 @@ impl Runtime {
 
     // ---- token slots: the states are addressed only through leases.
 
-    /// Lease the pages `tokens` slots need, all or nothing. The lease is the
-    /// only source of `slot_mapping` values and page-table rows for the
-    /// sequence; its pages return when it drops.
-    pub fn lease(&self, tokens: usize) -> std::result::Result<Lease, Denied> {
-        self.pool.lease(tokens)
+    /// Lease the pages `tokens` slots need and, when the manifest has
+    /// per-sequence states, a slot in each of them, all or nothing
+    /// ([`Error::Denied`] says why not). The lease is the only source of
+    /// `slot_mapping` values, page-table rows and line indices for the
+    /// sequence; the slot is zeroed on the stream (a fresh sequence's
+    /// recurrent state), and everything returns when the lease drops.
+    pub fn lease(&mut self, tokens: usize) -> Result<Lease> {
+        let lease = self.pool.lease(tokens)?;
+        for (name, st) in &self.manifest.states {
+            let Some(range) = lease.seq_bytes(st.bytes_per_seq).filter(|_| st.is_per_seq()) else { continue };
+            let s = self.states.get_mut(name).unwrap();
+            let mut view = s.slice.slice_mut(range);
+            self.stream.memset_zeros(&mut view)?;
+        }
+        Ok(lease)
+    }
+
+    /// Sequence slots every per-sequence state holds (0 without one).
+    pub fn seq_slots(&self) -> usize {
+        self.pool.slots()
+    }
+
+    /// The line-table inputs (`index_into` a per-sequence state, shaped
+    /// `[lines, ...]`), e.g. a hybrid model's `gdn.line_index`.
+    pub fn seq_tables(&self) -> impl Iterator<Item = &str> {
+        self.pool.seq_tables()
     }
 
     /// Pages the states hold in total.
@@ -787,8 +806,17 @@ fn gcd(a: u64, b: u64) -> u64 {
 /// lazy-loading, cuBLASLt algorithm state) and a margin for a neighbour.
 pub const HEADROOM: u64 = 1 << 30;
 
+/// Bytes a state takes at `capacity` tokens and `slots` sequence slots.
+fn state_bytes(s: &State, capacity: u64, slots: u64) -> Option<u64> {
+    s.bytes_per_token
+        .checked_mul(capacity)?
+        .checked_add(s.bytes)?
+        .checked_add(s.bytes_per_seq.checked_mul(slots)?)
+}
+
 /// State capacity that fits the device: free memory (after every buffer
-/// and scratch allocation) less [`HEADROOM`] and the states' fixed bytes,
+/// and scratch allocation) less [`HEADROOM`], the states' fixed bytes and
+/// their sequence slots,
 /// divided among the per-token states, in whole pages; capped at what the
 /// manifest's `seqs` bound of sequences could each hold at the page-table
 /// row limit, since no lease can reach past that.
@@ -796,7 +824,7 @@ fn fit_capacity(m: &Manifest, ctx: &CudaContext, page: u64) -> Result<u64> {
     let (free, total) = ctx.mem_get_info()?;
     let (free, total) = (free as u64, total as u64);
     let per_token: u64 = m.states.values().map(|s| s.bytes_per_token).sum();
-    let fixed: u64 = m.states.values().map(|s| s.bytes).sum();
+    let fixed: u64 = m.states.values().map(|s| state_bytes(s, 0, m.seq_slots()).unwrap_or(u64::MAX)).sum();
     let seqs = m.vars.get("seqs").map_or(1, |v| v.max.max(1));
     // One page over the row cap: a batched caller pads its decode rows
     // into a page no sequence owns.
