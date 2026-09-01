@@ -12,8 +12,8 @@ description = "OpenAI-compatible serving over a kern manifest: a continuous-batc
 kern-manifest = { path = "../kern-manifest" }
 kern-runtime = { path = "../kern-runtime" }
 kern-run = { path = "../kern-run" }
-# Sibling checkout during development (pegainfer-project/pegainfer).
-pegainfer-frontend = { path = "../../../pegainfer/pegainfer-frontend" }
+# Pinned to a pegainfer main commit; bump deliberately.
+pegainfer-frontend = { git = "https://github.com/pegainfer-project/pegainfer", rev = "1e3b6f23276b008d26b8aaba7e05fcc94857efcb" }
 
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

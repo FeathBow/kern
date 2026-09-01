@@ -10,7 +10,7 @@ target/release/kern-serve --model-path /mnt/shared/weights/Qwen3-4B --gpu 3 --po
 manifest / kernels / weights 来自 kern.toml 的 target；`--model-path` 是给
 **前端**的 HF 目录（tokenizer、chat template、`generation_config.json` 的
 eos）。前端整个来自 pegainfer（`pegainfer-frontend`，底下是 vLLM 官方的
-Rust server crates，开发期以 path dep 指向 sibling checkout `../pegainfer`），kern 只贡献引擎：`crates/kern-serve`。
+Rust server crates，git dep 钉 pegainfer main 的一个 rev），kern 只贡献引擎：`crates/kern-serve`。
 
 ## 分工
 
