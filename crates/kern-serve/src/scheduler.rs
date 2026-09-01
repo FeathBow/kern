@@ -268,10 +268,16 @@ impl KernScheduler {
         if rt.pages_used() == rt.pages_total() {
             bail!("capacity {} tokens holds one page; nothing left to serve from", rt.capacity());
         }
+        // What admit() will lease is `prompt + max_tokens` plus a
+        // speculative round's `n_drafts` rows of headroom; advertise the
+        // request-shaped remainder so the frontend clamps `max_tokens` to
+        // something admissible instead of the scheduler bouncing it (the
+        // wire turns a scheduler reject into a 500).
+        let headroom = spec.as_ref().map_or(0, |s| s.n_drafts);
         let facts = Facts {
             total_blocks: rt.pages_total() - pad.pages(),
             block_size: rt.page() as usize,
-            max_request_tokens: rt.max_seq_tokens(),
+            max_request_tokens: rt.max_seq_tokens() - headroom,
         };
         info!(
             "scheduler: {} pages × {} tokens (+1 pad page){}, ≤{} sequences, ≤{} tokens/sequence, chunk {}, buckets {:?}{}{}{}",
