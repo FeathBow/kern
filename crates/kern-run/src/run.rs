@@ -16,7 +16,7 @@ use anyhow::{bail, ensure, Context, Result};
 use clap::Args;
 
 use crate::config::{Config, Target};
-use kern_manifest::types::Dim;
+use kern_manifest::types::{Dim, Manifest};
 use crate::{
     env, i64_from_le, le_bytes_i32, le_bytes_i64, prefill_emits_next_token, Caller,
     STOP_TOKENS,
@@ -63,7 +63,8 @@ pub struct RunOpts {
     pub gpu: Option<usize>,
 
     /// State capacity in tokens (KV pages etc.); rounded down to the
-    /// manifest's page unit
+    /// manifest's page unit. Default: what one sequence can reach (the
+    /// manifest's page-table row)
     #[arg(long)]
     pub capacity: Option<u64>,
 
@@ -105,7 +106,7 @@ struct Opts {
     prompt: String,
     steps: usize,
     gpu: usize,
-    capacity: u64,
+    capacity: Option<u64>,
     chunk: u64,
     eager: bool,
     spec: bool,
@@ -125,7 +126,7 @@ impl RunOpts {
             prompt: self.prompt.or_else(|| cfg.and_then(|c| c.run.prompt.clone())).unwrap_or_else(|| "The capital of France is".into()),
             steps: self.steps.or_else(|| cfg.and_then(|c| c.run.steps)).unwrap_or(32),
             gpu: self.gpu.or_else(|| cfg.and_then(|c| c.gpu)).unwrap_or(0),
-            capacity: self.capacity.or_else(|| cfg.and_then(|c| c.capacity)).unwrap_or(4096),
+            capacity: self.capacity.or_else(|| cfg.and_then(|c| c.capacity)),
             chunk: self.chunk.or_else(|| cfg.and_then(|c| c.run.chunk)).unwrap_or(512),
             eager: self.eager,
             spec: self.spec,
@@ -162,7 +163,10 @@ fn execute(o: Opts) -> Result<()> {
     let manifest_json = std::fs::read_to_string(&o.manifest)
         .with_context(|| format!("reading manifest {}", o.manifest.display()))?;
     let t0 = Instant::now();
-    let mut rt = Runtime::load(&manifest_json, &o.kernels, o.gpu, Some(o.capacity))?;
+    // One sequence: its reach, unless told otherwise (a manifest without
+    // paged state takes the runtime's fit).
+    let capacity = o.capacity.or_else(|| kern_runtime::seq_capacity(&Manifest::from_json(&manifest_json).ok()?));
+    let mut rt = Runtime::load(&manifest_json, &o.kernels, o.gpu, capacity)?;
     let load_t = t0.elapsed();
 
     let m = &rt.manifest;
@@ -265,6 +269,12 @@ fn execute(o: Opts) -> Result<()> {
     info!("prompt: {} tokens {prompt_ids:?}", prompt_ids.len());
 
     let mut caller = Caller::new(rt)?;
+    ensure!(
+        prompt_ids.len() < caller.limit(),
+        "prompt of {} tokens does not fit the sequence's {} token slots (raise --capacity)",
+        prompt_ids.len(),
+        caller.limit()
+    );
 
     if let (Some(dir), false) = (&o.probe_dir, o.spec) {
         return probe(&mut caller, &prompt_ids, dir, o.chunk, o.probe_steps);

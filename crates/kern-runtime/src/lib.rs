@@ -155,13 +155,7 @@ impl Runtime {
         // past the pool for. Round down; the caller asked for "about this
         // many tokens", not for that page. (A per-sequence state's stride
         // is bytes per line, not tokens: not a page.)
-        let page = manifest
-            .buffers
-            .values()
-            .filter_map(|b| b.domain.as_ref())
-            .filter(|d| d.index_into.as_deref().and_then(|s| manifest.states.get(s)).is_some_and(|s| !s.is_per_seq()))
-            .map(|d| d.stride.max(1))
-            .fold(1u64, lcm);
+        let page = page_unit(&manifest);
         let max_env: BTreeMap<_, _> =
             manifest.vars.iter().map(|(s, v)| (s.clone(), v.max)).collect();
 
@@ -821,6 +815,24 @@ fn state_bytes(s: &State, capacity: u64, slots: u64) -> Option<u64> {
 /// divided among the per-token states, in whole pages; capped at what the
 /// manifest's `seqs` bound of sequences could each hold at the page-table
 /// row limit, since no lease can reach past that.
+/// The page unit: the lcm of every page table's stride (a per-sequence
+/// state's stride is bytes per line, not tokens: not a page).
+fn page_unit(m: &Manifest) -> u64 {
+    m.buffers
+        .values()
+        .filter_map(|b| b.domain.as_ref())
+        .filter(|d| d.index_into.as_deref().and_then(|s| m.states.get(s)).is_some_and(|s| !s.is_per_seq()))
+        .map(|d| d.stride.max(1))
+        .fold(1u64, lcm)
+}
+
+/// Tokens one sequence of `m` can reach — the narrowest page table's row,
+/// in whole pages — or `None` when nothing is paged per token. What a
+/// single-sequence caller wants as its state capacity.
+pub fn seq_capacity(m: &Manifest) -> Option<u64> {
+    pages::row_tokens(m, page_unit(m))
+}
+
 fn fit_capacity(m: &Manifest, ctx: &CudaContext, page: u64) -> Result<u64> {
     let (free, total) = ctx.mem_get_info()?;
     let (free, total) = (free as u64, total as u64);

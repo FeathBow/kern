@@ -85,7 +85,7 @@ KV_DIM = KV_HEADS * HEAD_DIM             # 1024
 QKV_DIM = HEADS * 2 * HEAD_DIM + 2 * KV_DIM   # 14336: per head [q | gate], then k, v
 GATE_OFF = HEAD_DIM                      # gate half inside a [q | gate] head pair
 ROT_HALF = 32                            # rotary_dim 64
-MAX_POS = 8192                           # exported rope table rows
+MAX_POS = 262144                         # the model's max_position_embeddings: rope table rows, KV pages per sequence
 # GDN
 GDN_V_HEADS = 48
 GDN_K_HEADS = 16
@@ -109,7 +109,8 @@ NT_MAX = CHUNK_MAX // FLA_CHUNK          # 32 chunks
 BLOCK_SIZE = 784                         # vLLM block_size (constexpr in the kernels)
 BLOCK_Q = 5                              # unified 2D: query rows per block
 NUM_SEGMENTS = 16                        # unified 3D: grid.z
-BLOCK_TABLE_LEN = 8                      # vLLM block_table_stride
+BLOCK_TABLE_LEN = -(-MAX_POS // BLOCK_SIZE)   # block_table row = pages a sequence can reach (335)
+CAPTURE_TABLE_LEN = 8                    # the capture's block_table_stride (vLLM max_model_len 6272)
 BLOCK_ELEMS_PER_LAYER = BLOCK_SIZE * KV_HEADS * 2 * HEAD_DIM   # 1605632
 LAYER_KV_BYTES = BLOCK_ELEMS_PER_LAYER * BF16                  # 3211264
 BLOCK_STRIDE = len(ATTN_LAYERS) * BLOCK_ELEMS_PER_LAYER        # elems
@@ -441,7 +442,7 @@ def check_prefill(by, T):
             [KV_DIM, QKV_DIM, BLOCK_ELEMS_PER_LAYER, 2 * HEAD_DIM, 0, 0, KV_HEADS * 2 * HEAD_DIM, 0, 0]
         assert un["grid"] == [T // BLOCK_Q + 1, KV_HEADS, 1], un["grid"]
         assert pv(un, 17) == pv(un, 5), "rswa_prefix_lens is not the seq_lens dup"
-        assert [pv(un, j) for j in range(11, 17)] == [BLOCK_TABLE_LEN, Q_DIM, HEAD_DIM, Q_DIM, HEAD_DIM, 0]
+        assert [pv(un, j) for j in range(11, 17)] == [CAPTURE_TABLE_LEN, Q_DIM, HEAD_DIM, Q_DIM, HEAD_DIM, 0]
         assert [pv(un, j) for j in range(18, 24)] == [BLOCK_ELEMS_PER_LAYER, KV_HEADS * 2 * HEAD_DIM, 2 * HEAD_DIM] * 2
         assert pv(un, 25) == 1 and pv(un, 7) == pv(ca, 5) and pv(un, 8) == pv(ca, 6)
     assert len(by["silu"][0]["params"]) == 6 and pv(by["silu"][0], 2) == FFN
@@ -470,7 +471,7 @@ def check_decode(by):
         assert un["grid"] == [1, KV_HEADS, NUM_SEGMENTS]
         assert [pv(rd, j) for j in (1, 2, 3)] == [pv(un, j) for j in (26, 27, 28)]
         assert pv(rd, 0) == pv(un, 0) and pv(rd, 4) == pv(un, 5) and pv(rd, 9) == pv(un, 24)
-        assert [pv(rd, j) for j in (6, 7, 8)] == [Q_DIM, HEAD_DIM, BLOCK_TABLE_LEN]
+        assert [pv(rd, j) for j in (6, 7, 8)] == [Q_DIM, HEAD_DIM, CAPTURE_TABLE_LEN]
     assert len(by["mrope"][0]["params"]) == 6, "decode mrope should be the num_tokens==1 instance"
 
 

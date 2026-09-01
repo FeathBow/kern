@@ -52,12 +52,12 @@ out_dir = pathlib.Path(sys.argv[2] if len(sys.argv) > 2 else
                        os.environ.get("KERN_WEIGHTS", "weights") + "/qwen3.8-27b")
 out_dir.mkdir(parents=True, exist_ok=True)
 
-MAX_POS = 8192          # rope tables; KV capacity is a runtime parameter
 CHUNK_MAX = 2048        # prefill chunk bound (tokens symbol max)
 FLA_CHUNK = 64
 CONV_BLOCK_M = 8
 
 cfg = json.loads((src / "config.json").read_text())["text_config"]
+MAX_POS = cfg["max_position_embeddings"]   # rope table rows (= the manifest's MAX_POS); KV capacity is a runtime parameter
 LAYERS = cfg["num_hidden_layers"]
 assert cfg["layer_types"] and len(cfg["layer_types"]) == LAYERS
 ATTN = [i for i, t in enumerate(cfg["layer_types"]) if t == "full_attention"]

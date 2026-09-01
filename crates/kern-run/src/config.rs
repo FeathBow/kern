@@ -10,7 +10,7 @@
 //!
 //! ```toml
 //! gpu = 0
-//! capacity = 4096                       # optional; kern serve fits the KV to the device without it
+//! capacity = 4096                       # optional; without it kern run takes one sequence's reach, kern serve the device
 //!
 //! [targets.a]
 //! manifest  = "examples/x.json"        # B: the manifest under work

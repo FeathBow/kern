@@ -44,7 +44,7 @@ src = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else
                    "dedf8df68adfb1afeaf7b7480c0a0243108177b4")
 out_dir = pathlib.Path(sys.argv[2] if len(sys.argv) > 2 else os.environ.get("KERN_WEIGHTS", "weights") + "/qwen3.8-27b")
 
-MAX_POS = 8192
+MAX_POS = 262144        # the target's max_position_embeddings (= the manifest's MAX_POS)
 GDN_LAYERS = 48
 SPEC_SLOTS = 8
 
