@@ -1,5 +1,10 @@
 # Qwen3.8-27B（+ DFlash2）带上 kern：时间线与证据
 
+> 这是 2026-08-31 的时间线，用的是当时的 schema v2 词汇。对照 v3
+> （见 [manifest.md](manifest.md)）：`dispatch`→call、`step`→launch、
+> `symbol`→var / entry、`State.bytes_fixed`→`bytes`、`meta.spec`→顶层 `spec`、
+> `manifest-v2.schema.json`→`manifest-v3.schema.json`。
+
 任务书：[qwen38-bringup-prompt.md](qwen38-bringup-prompt.md)。全程一个 agent
 （Claude Code）在一台 GB300 节点上做，人工介入次数在末尾统计。
 时间戳均为 UTC。

@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# Put every cubin a manifest pins into one kernel directory, by content.
+# Put every module a manifest pins into one kernel directory, by content.
 #
 #   tools/extract_kernels.sh <manifest.json> <dump_dir>[:<dump_dir>...] [out_dir=kernels]
 #
-# Every step that names a cubin pins its sha256 (the verifier insists). This
-# script finds each sha among the capture dumps, the handwritten builds
-# (tools/build_kernels.sh -> target/cubins) and the repo's kernels/, and
-# lands it as `<display name>-<sha12>.cubin` — readable in `ls`, unique per
-# version. The runtime resolves by hash, never by name, so the directory
-# only ever grows: extract A, extract B, and kern-test loads both from it.
-# Steps without a cubin (symbol-only, disambiguated at load by param
-# layout) bring every dump module that defines the symbol.
+# Every module the manifest's `modules` table names is pinned by sha256 (the
+# verifier insists). This script finds each sha among the capture dumps, the
+# handwritten builds (tools/build_kernels.sh -> target/cubins) and the repo's
+# kernels/, and lands it as `<module name>-<sha12>.cubin` — readable in `ls`,
+# unique per version. The runtime resolves by hash, never by name, so the
+# directory only ever grows: extract A, extract B, and `kern test` loads both
+# from it. Launches without a module (entry-only, disambiguated at load by
+# param layout) bring every dump module that defines the entry.
 #
 # Different models' dumps should still not share an out_dir when their
-# symbol-only instances collide (same symbol, same ABI, different constexpr).
+# entry-only instances collide (same entry, same ABI, different constexpr).
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 manifest="${1:?manifest.json}"
@@ -23,21 +23,24 @@ build="$repo/target/cubins"
 mkdir -p "$out"
 "$repo/tools/build_kernels.sh" "$build"
 
-# (display name, sha, symbol) per step; "-" when absent
+# (module source, sha, entry) per launch; "-" when absent
 mapfile -t wanted < <(python3 - "$manifest" <<'PY'
 import json, sys
 m = json.load(open(sys.argv[1]))
 keys = []
-for k in m["kernels"].values():
-    for st in k["impl"]["steps"]:
-        s = st["symbol"]
-        if s.startswith("extern:") or (st.get("cubin") or "").startswith("hf:"):
+for op in m["ops"].values():
+    for l in op["impl"]["launches"]:
+        entry = l["entry"]
+        if entry.startswith("extern:"):
             continue
-        key = (st.get("cubin") or "-", st.get("sha256") or "-", s)
+        md = m["modules"].get(l.get("module", ""), {})
+        if md.get("source", "").startswith("hf:"):
+            continue
+        key = (md.get("source") or "-", md.get("sha256") or "-", entry)
         if key not in keys:
             keys.append(key)
-# pinned first: a module that is both pinned (by name) and swept in by a
-# symbol-only step lands under its pinned name
+# pinned first: a module that is both pinned (by name) and swept in by an
+# entry-only launch lands under its pinned name
 for key in sorted(keys, key=lambda k: k[1] == "-"):
     print(*key)
 PY

@@ -5,7 +5,7 @@
 gpu = 0
 capacity = 4096
 
-# The repo's fixture: the mined silu step against the hub one.
+# The repo's fixture: the mined silu impl against the hub one.
 [targets.qwen3-4b]
 manifest  = "examples/qwen3-4b-silu-mined.json"
 reference = "examples/qwen3-4b.json"

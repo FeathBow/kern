@@ -1,14 +1,30 @@
-//! Manifest schema. Parsing is already strict: unknown fields, duplicate
-//! names and malformed type strings are rejected at deserialization time.
-//! Semantic checks (references, dtypes, dataflow, bounds) live in
-//! [`crate::verify`].
+//! Manifest schema (format 3). Parsing is already strict: unknown fields,
+//! duplicate names and malformed type strings are rejected at
+//! deserialization time. Semantic checks (references, dtypes, dataflow,
+//! bounds) live in [`crate::verify`].
+//!
+//! Vocabulary, one word per level so nothing collides:
+//!
+//! ```text
+//! programs.<name>[]          a *call* of an op            {"op": "attn", "args": [...]}
+//! ops.<name>                 an op: interface + impl      {"params": [...], "impl": {...}}
+//! ops.<name>.impl.launches[] a *launch* of a module entry {"module": "argmax", "entry": "kern_argmax_partial"}
+//! modules.<name>             an artifact the launches pin {"source": "argmax.cubin", "sha256": "..."}
+//! vars.<name>                a per-call scalar the caller supplies, bounded
+//! states.<name>              opaque persistent memory, sized by the runtime
+//! buffers.<name>             typed tensors: input / output / weight / workspace / carry
+//! ```
 
 use serde::de::{Error as DeError, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::marker::PhantomData;
 use std::str::FromStr;
+
+/// The one format this crate reads and writes.
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Deserialize a JSON object into a map, rejecting duplicate keys (plain
 /// serde silently keeps the last one).
@@ -43,17 +59,27 @@ where
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
-    pub meta: Meta,
-    #[serde(default, deserialize_with = "unique_map")]
-    pub symbols: BTreeMap<String, Symbol>,
-    #[serde(default, deserialize_with = "unique_map")]
+    /// Wire-format version. Only [`SCHEMA_VERSION`] is accepted.
+    pub schema_version: u32,
+    /// Free-form label; the runtime assigns no meaning to it.
+    pub model: String,
+    /// Caller contract of a speculative-decoding manifest (absent for plain
+    /// prefill/decode ones). The runtime assigns no meaning to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec: Option<Spec>,
+    #[serde(default, deserialize_with = "unique_map", skip_serializing_if = "BTreeMap::is_empty")]
+    pub vars: BTreeMap<String, Var>,
+    #[serde(default, deserialize_with = "unique_map", skip_serializing_if = "BTreeMap::is_empty")]
     pub states: BTreeMap<String, State>,
     #[serde(deserialize_with = "unique_map")]
     pub buffers: BTreeMap<String, Buffer>,
+    #[serde(default, deserialize_with = "unique_map", skip_serializing_if = "BTreeMap::is_empty")]
+    pub modules: BTreeMap<String, Module>,
     #[serde(deserialize_with = "unique_map")]
-    pub kernels: BTreeMap<String, Kernel>,
+    pub ops: BTreeMap<String, Op>,
+    /// Each program is a straight-line list of op calls.
     #[serde(deserialize_with = "unique_map")]
-    pub programs: BTreeMap<String, Program>,
+    pub programs: BTreeMap<String, Vec<Call>>,
 }
 
 impl Manifest {
@@ -66,65 +92,50 @@ impl Manifest {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Meta {
-    /// Manifest format version. Only 2 is accepted.
-    pub version: u32,
-    /// Free-form label; the runtime assigns no meaning to it.
-    pub model: String,
-    /// Caller contract of a speculative-decoding manifest (absent for plain
-    /// prefill/decode ones). The runtime assigns no meaning to it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spec: Option<SpecMeta>,
-}
-
 /// How a driver stages the `draft` / `verify` programs of a speculative
 /// manifest: `draft` runs over `block` rows = the anchor token followed by
 /// `block - 1` copies of `mask_token`, `verify` over `block` rows = the
 /// anchor followed by the `block - 1` drafted tokens.
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct SpecMeta {
+pub struct Spec {
     pub block: u64,
     pub mask_token: i64,
 }
 
-/// A runtime-provided scalar (e.g. token count this step). The declared
-/// bounds are what verification is performed against; the runtime rejects
-/// out-of-bounds values at dispatch time.
+/// A per-call scalar the caller supplies (e.g. the token count this step),
+/// bounded `1..=max`. Vars are the only thing that may size a shape or a
+/// launch grid; any other caller-supplied number is data and goes through an
+/// input buffer. Verification runs at the bounds; the runtime rejects an
+/// out-of-range value at call time.
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct Symbol {
+pub struct Var {
     pub max: u64,
-    #[serde(default = "default_symbol_min")]
-    pub min: u64,
 }
 
-fn default_symbol_min() -> u64 {
-    1
+impl Var {
+    /// Lower bound of every var.
+    pub const MIN: u64 = 1;
 }
 
-/// Opaque persistent state. The runtime knows only how many bytes to
+/// Opaque persistent memory. The runtime knows only how many bytes to
 /// provision — per token slot (`bytes_per_token`, scaled by the capacity:
-/// paged KV) or as one fixed block regardless of capacity (`bytes_fixed`:
+/// paged KV) or one fixed block regardless of capacity (`bytes`:
 /// per-sequence recurrent state such as a Mamba/GDN conv + SSM state).
 /// Exactly one of the two is non-zero. The internal layout belongs to the
-/// provider's kernels, which receive the base pointer as an untyped `ptr`
-/// param.
+/// provider's kernels, which receive the base pointer as a `state` param.
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct State {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub bytes_per_token: u64,
-    #[serde(default)]
-    pub bytes_fixed: u64,
-    #[serde(default = "default_align")]
-    pub align: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub bytes: u64,
 }
 
-fn default_align() -> u64 {
-    256
+fn is_zero(v: &u64) -> bool {
+    *v == 0
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -132,7 +143,7 @@ fn default_align() -> u64 {
 pub struct Buffer {
     pub dtype: DType,
     pub shape: Vec<Dim>,
-    pub class: BufferClass,
+    pub kind: BufferKind,
     /// Optional prior on the buffer's *contents*. Never required: a manifest
     /// without domains runs exactly the same. With one, the runtime rejects
     /// out-of-domain input writes, and attestation can synthesize valid
@@ -148,11 +159,11 @@ pub struct Buffer {
 /// in-domain input is a kernel bug the harness can now provoke.
 ///
 /// Two forms, mutually exclusive:
-/// - `min`/`max`: inclusive bounds (like `Symbol`), integers, floats or a
-///   symbol expression; either may be omitted. Float buffers without a
-///   domain are implicitly "any finite value".
+/// - `min`/`max`: inclusive bounds, integers, floats or a var expression;
+///   either may be omitted. Float buffers without a domain are implicitly
+///   "any finite value".
 /// - `index_into`: every element indexes a row of the named buffer or a
-///   token slot of the named state, `unit` rows/tokens per index (a paged
+///   token slot of the named state, `stride` rows/tokens per index (a paged
 ///   KV block table indexes 16 tokens at a time).
 ///
 /// `monotone` additionally requires a non-decreasing sequence (prefix sums
@@ -167,7 +178,7 @@ pub struct Domain {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_into: Option<String>,
     #[serde(default = "one", skip_serializing_if = "is_one")]
-    pub unit: u64,
+    pub stride: u64,
     #[serde(default, skip_serializing_if = "is_false")]
     pub monotone: bool,
 }
@@ -182,8 +193,8 @@ fn is_false(v: &bool) -> bool {
     !*v
 }
 
-/// A domain bound: a literal integer, a literal float, or a symbol
-/// expression (evaluated at the caller's symbol values).
+/// A domain bound: a literal integer, a literal float, or a var expression
+/// (evaluated at the caller's var values).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum Bound {
@@ -202,7 +213,7 @@ impl Bound {
     }
 }
 
-/// A domain with its bounds evaluated for one symbol environment and one
+/// A domain with its bounds evaluated for one var environment and one
 /// state capacity. `lo`/`hi` are inclusive; `None` is unbounded.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ResolvedDomain {
@@ -233,8 +244,8 @@ impl Domain {
         if let Some(b) = m.buffers.get(t) {
             return Ok(Some(match b.shape.first() {
                 Some(Dim::Const(c)) => *c,
-                Some(Dim::Sym(s)) => {
-                    *env.get(s).ok_or_else(|| EvalError::UnknownSymbol(s.clone()))?
+                Some(Dim::Var(s)) => {
+                    *env.get(s).ok_or_else(|| EvalError::UnknownVar(s.clone()))?
                 }
                 None => 0,
             }));
@@ -255,7 +266,7 @@ impl Domain {
     ) -> Result<ResolvedDomain, EvalError> {
         if self.index_into.is_some() {
             let rows = self.target_rows(m, env, state_capacity_tokens)?;
-            let hi = rows.map(|r| (r / self.unit.max(1)).saturating_sub(1) as f64);
+            let hi = rows.map(|r| (r / self.stride.max(1)).saturating_sub(1) as f64);
             return Ok(ResolvedDomain { lo: Some(0.0), hi, monotone: self.monotone });
         }
         Ok(ResolvedDomain {
@@ -266,16 +277,18 @@ impl Domain {
     }
 }
 
+/// One shape extent: a constant or the name of a var.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum Dim {
     Const(u64),
-    Sym(String),
+    Var(String),
 }
 
+/// Who provides a buffer and how long its contents live.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
-pub enum BufferClass {
+pub enum BufferKind {
     /// Written by the runtime before program execution.
     Input,
     /// Read back by the runtime after program execution.
@@ -290,14 +303,14 @@ pub enum BufferClass {
     Carry,
 }
 
-impl fmt::Display for BufferClass {
+impl fmt::Display for BufferKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            BufferClass::Input => "input",
-            BufferClass::Output => "output",
-            BufferClass::Weight => "weight",
-            BufferClass::Workspace => "workspace",
-            BufferClass::Carry => "carry",
+            BufferKind::Input => "input",
+            BufferKind::Output => "output",
+            BufferKind::Weight => "weight",
+            BufferKind::Workspace => "workspace",
+            BufferKind::Carry => "carry",
         })
     }
 }
@@ -408,7 +421,6 @@ impl fmt::Display for Dir {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScalarType {
     I32,
-    U32,
     I64,
     F32,
     /// Single-byte scalar (bool flags in mined vLLM kernel ABIs stage as
@@ -420,7 +432,6 @@ impl fmt::Display for ScalarType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             ScalarType::I32 => "i32",
-            ScalarType::U32 => "u32",
             ScalarType::I64 => "i64",
             ScalarType::F32 => "f32",
             ScalarType::U8 => "u8",
@@ -428,25 +439,34 @@ impl fmt::Display for ScalarType {
     }
 }
 
-/// One kernel parameter, written as a string in the manifest:
-/// `"in buffer<bf16>"`, `"out buffer<fp8e4m3>"`, `"inout ptr"`, `"i32"`.
-/// Buffers and ptrs require an explicit direction; scalars are by-value.
+/// One parameter, written as a string in the manifest: `"in buffer<bf16>"`,
+/// `"out buffer<fp8e4m3>"`, `"inout state"`, `"i32"`. Buffers and states
+/// require an explicit direction; scalars are by-value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParamType {
     Buf { dtype: DType, dir: Dir },
-    Ptr { dir: Dir },
+    /// An opaque state base pointer (only a `states` entry can bind here).
+    State { dir: Dir },
     Scalar(ScalarType),
 }
 
 impl ParamType {
-    /// Size of the param slot in the kernel ABI, for cross-checking against
-    /// `cuKernelGetParamInfo` when the cubin is loaded.
+    /// Size of the param slot in the kernel ABI, cross-checked against
+    /// `cuFuncGetParamInfo` when the module is loaded.
     pub fn size_bytes(self) -> u64 {
         match self {
-            ParamType::Buf { .. } | ParamType::Ptr { .. } => 8,
+            ParamType::Buf { .. } | ParamType::State { .. } => 8,
             ParamType::Scalar(ScalarType::I64) => 8,
             ParamType::Scalar(ScalarType::U8) => 1,
             ParamType::Scalar(_) => 4,
+        }
+    }
+
+    /// Direction of a pointer param; `None` for scalars.
+    pub fn dir(self) -> Option<Dir> {
+        match self {
+            ParamType::Buf { dir, .. } | ParamType::State { dir } => Some(dir),
+            ParamType::Scalar(_) => None,
         }
     }
 }
@@ -458,7 +478,6 @@ impl FromStr for ParamType {
         let s = s.trim();
         match s {
             "i32" => return Ok(ParamType::Scalar(ScalarType::I32)),
-            "u32" => return Ok(ParamType::Scalar(ScalarType::U32)),
             "i64" => return Ok(ParamType::Scalar(ScalarType::I64)),
             "f32" => return Ok(ParamType::Scalar(ScalarType::F32)),
             "u8" => return Ok(ParamType::Scalar(ScalarType::U8)),
@@ -474,8 +493,8 @@ impl FromStr for ParamType {
             _ => return Err(format!("invalid direction `{dir_s}` in param type `{s}`")),
         };
         let rest = rest.trim();
-        if rest == "ptr" {
-            return Ok(ParamType::Ptr { dir });
+        if rest == "state" {
+            return Ok(ParamType::State { dir });
         }
         if let Some(dt) = rest.strip_prefix("buffer<").and_then(|r| r.strip_suffix('>')) {
             let dtype = dt.parse::<DType>().map_err(|e| format!("{e} in param type `{s}`"))?;
@@ -489,7 +508,7 @@ impl fmt::Display for ParamType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ParamType::Buf { dtype, dir } => write!(f, "{dir} buffer<{dtype}>"),
-            ParamType::Ptr { dir } => write!(f, "{dir} ptr"),
+            ParamType::State { dir } => write!(f, "{dir} state"),
             ParamType::Scalar(st) => write!(f, "{st}"),
         }
     }
@@ -502,12 +521,12 @@ impl schemars::JsonSchema for ParamType {
 
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
-            "description": "One kernel parameter: a by-value scalar (`\"i32\"`, \
-                `\"u32\"`, `\"i64\"`, `\"f32\"`, `\"u8\"`) or a directional \
-                pointer — `\"in\"`/`\"out\"`/`\"inout\"` followed by `\"ptr\"` \
-                (untyped, e.g. opaque state) or `\"buffer<dtype>\"`.",
+            "description": "One parameter: a by-value scalar (`\"i32\"`, `\"i64\"`, \
+                `\"f32\"`, `\"u8\"`) or a directional pointer — `\"in\"`/`\"out\"`/\
+                `\"inout\"` followed by `\"state\"` (opaque state base) or \
+                `\"buffer<dtype>\"`.",
             "type": "string",
-            "pattern": "^(i32|u32|i64|f32|u8|(in|out|inout) (ptr|buffer<(bf16|f16|f32|fp8e4m3|i32|u32|i64|u8)>))$",
+            "pattern": "^(i32|i64|f32|u8|(in|out|inout) (state|buffer<(bf16|f16|f32|fp8e4m3|i32|u32|i64|u8)>))$",
         })
     }
 }
@@ -524,14 +543,27 @@ impl<'de> Deserialize<'de> for ParamType {
     }
 }
 
-/// A kernel is an **interface** (the typed params a dispatch passes — the
-/// only thing a call site knows) plus an **implementation**: how those args
-/// are lowered onto actual launches. Swapping the implementation — a faster
+/// A code artifact the launches pin: a local file name (`argmax.cubin`) or a
+/// registry ref (`hf:org/repo/path[@rev]`). The runtime never resolves by
+/// `source`: it loads every artifact in the kernel dir (plus fetched
+/// registry refs), hashes each, and matches by `sha256` — so one dir can hold
+/// every version of a kernel, and a rebuilt artifact with different bytes
+/// is a different module. `source` is a label and, for registry refs, a URL.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Module {
+    pub source: String,
+    pub sha256: String,
+}
+
+/// An op is an **interface** (the typed params a call passes — the only
+/// thing a call site knows) plus an **implementation**: how those args are
+/// lowered onto actual launches. Swapping the implementation — a faster
 /// kernel from elsewhere with the same interface — touches only `impl`;
-/// every dispatch stays untouched.
+/// every call stays untouched.
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct Kernel {
+pub struct Op {
     /// The interface: typed, directional params. Call-site semantics
     /// (what each position means) are the contract implementations must
     /// honor; the verifier can only check shape, not meaning.
@@ -541,9 +573,9 @@ pub struct Kernel {
 }
 
 /// An implementation is a micro-program: private scratch buffers (sized by
-/// expressions over the interface's symbols, provisioned by the runtime,
-/// dead outside one dispatch) and one or more launch steps. Launch geometry
-/// lives here, not at the call site — it belongs to the implementation.
+/// var expressions, provisioned by the runtime, dead outside one call) and
+/// one or more launches. Launch geometry lives here, not at the call site —
+/// it belongs to the implementation.
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Impl {
@@ -553,7 +585,7 @@ pub struct Impl {
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     pub scratch: BTreeMap<String, Scratch>,
-    pub steps: Vec<Step>,
+    pub launches: Vec<Launch>,
 }
 
 /// One scratch buffer declaration: like a workspace buffer, but private to
@@ -565,79 +597,93 @@ pub struct Scratch {
     pub shape: Vec<Dim>,
 }
 
-/// One launch inside an implementation.
+/// One launch inside an implementation. The common single-launch op whose
+/// ABI *is* the interface writes only `module`, `entry`, `block`, `grid`:
+/// `params` defaults to the op's params and `args` to forwarding them in
+/// order.
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct Step {
-    /// Display name of the cubin this step's symbol comes from — a file name
-    /// (`gemm8.cubin`) or a registry ref (`hf:org/repo/path.cubin@rev`).
-    /// The runtime never resolves by this name: it loads every module in
-    /// the kernel dir, hashes each, and matches the step by `sha256`, so
-    /// one dir can hold every version of a kernel. Absent: the runtime
-    /// searches every loaded module (disambiguating by param layout).
-    /// `extern:` symbols have no cubin.
+pub struct Launch {
+    /// Name of the `modules` entry this entry point lives in. Absent: the
+    /// runtime searches every loaded module (disambiguating by param
+    /// layout) — mined kernels that only know their symbol. `extern:`
+    /// entries have no module.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cubin: Option<String>,
-    /// sha256 of the cubin — the step's identity. Required whenever `cubin`
-    /// is set; a rebuilt cubin with different bytes is a different kernel.
+    pub module: Option<String>,
+    /// Entry point in the module, or `extern:<name>` for a runtime built-in
+    /// (no module, no geometry).
+    pub entry: String,
+    /// This launch's own ABI (what the entry actually takes). Absent: the
+    /// op's `params`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sha256: Option<String>,
-    /// Entry symbol, or `extern:<op>` for runtime built-ins.
-    pub symbol: String,
-    /// This step's own launch ABI (what the cubin function actually takes).
-    pub params: Vec<ParamType>,
-    pub block: [u32; 3],
-    pub grid: [Expr; 3],
-    /// Dynamic shared memory in bytes, if the step needs any.
+    pub params: Option<Vec<ParamType>>,
+    /// Required unless `entry` is `extern:`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block: Option<[u32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid: Option<[Expr; 3]>,
+    /// Dynamic shared memory in bytes, if the launch needs any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_mem: Option<Expr>,
-    /// Wiring: where each step param comes from — a forwarded interface
-    /// arg, a scratch buffer, or an implementation-private literal.
-    pub args: Vec<StepArg>,
+    /// Wiring: where each launch param comes from — a forwarded interface
+    /// param, a scratch buffer, or an implementation-private literal.
+    /// Absent: `[{"param": 0}, {"param": 1}, ...]` over the op's params.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<LaunchArg>>,
 }
 
-/// A step argument. `{"arg": 0}` forwards the dispatch's arg #0 verbatim;
-/// `{"scratch": "pmax"}` passes a private scratch pointer (optional byte
-/// `offset`); scalar literals are implementation constants the interface
-/// never sees (e.g. a partial-count baked into a two-stage reduction).
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(untagged)]
-pub enum StepArg {
-    Arg {
-        arg: usize,
-    },
-    Scratch {
-        scratch: String,
-        #[serde(default, skip_serializing_if = "offset_is_zero")]
-        offset: u64,
-    },
+impl Launch {
+    pub fn is_extern(&self) -> bool {
+        self.entry.starts_with("extern:")
+    }
+
+    /// The launch ABI, defaulting to the op's interface.
+    pub fn params_of<'a>(&'a self, op: &'a Op) -> &'a [ParamType] {
+        self.params.as_deref().unwrap_or(&op.params)
+    }
+
+    /// The wiring, defaulting to forwarding the op's params in order.
+    pub fn args_of(&self, op: &Op) -> Cow<'_, [LaunchArg]> {
+        match &self.args {
+            Some(a) => Cow::Borrowed(a),
+            None => Cow::Owned((0..op.params.len()).map(|param| LaunchArg::Param { param }).collect()),
+        }
+    }
+}
+
+/// A launch argument. `{"param": 0}` forwards the call's arg #0 verbatim;
+/// `{"scratch": "pmax"}` passes a private scratch pointer; scalar literals
+/// are implementation constants the interface never sees (a partial-count
+/// baked into a two-stage reduction, a mined ABI's strides and flags).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum LaunchArg {
+    Param { param: usize },
+    Scratch { scratch: String },
     I32 { i32: i32 },
-    U32 { u32: u32 },
     I64 { i64: i64 },
     F32 { f32: f32 },
     U8 { u8: u8 },
 }
 
-impl fmt::Display for StepArg {
+impl fmt::Display for LaunchArg {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            StepArg::Arg { arg } => write!(f, "interface arg #{arg}"),
-            StepArg::Scratch { scratch, offset: 0 } => write!(f, "scratch `{scratch}`"),
-            StepArg::Scratch { scratch, offset } => write!(f, "scratch `{scratch}`+{offset}"),
-            StepArg::I32 { i32: v } => write!(f, "i32 literal {v}"),
-            StepArg::U32 { u32: v } => write!(f, "u32 literal {v}"),
-            StepArg::I64 { i64: v } => write!(f, "i64 literal {v}"),
-            StepArg::F32 { f32: v } => write!(f, "f32 literal {v}"),
-            StepArg::U8 { u8: v } => write!(f, "u8 literal {v}"),
+            LaunchArg::Param { param } => write!(f, "interface param #{param}"),
+            LaunchArg::Scratch { scratch } => write!(f, "scratch `{scratch}`"),
+            LaunchArg::I32 { i32: v } => write!(f, "i32 literal {v}"),
+            LaunchArg::I64 { i64: v } => write!(f, "i64 literal {v}"),
+            LaunchArg::F32 { f32: v } => write!(f, "f32 literal {v}"),
+            LaunchArg::U8 { u8: v } => write!(f, "u8 literal {v}"),
         }
     }
 }
 
-/// A remote cubin reference in a step's `cubin` field:
+/// A remote artifact reference in a module's `source`:
 /// `hf:<org>/<repo>/<path>[@<revision>]` (revision defaults to `main`).
 /// The runtime materializes it into a content-addressed local cache at load
-/// time; the step's `sha256` — mandatory for registry refs — is the artifact's
-/// identity, so the transport needs no trust. Names are just URLs.
+/// time; the module's `sha256` is the artifact's identity, so the transport
+/// needs no trust. Names are just URLs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistryRef {
     pub org: String,
@@ -680,22 +726,25 @@ impl RegistryRef {
     }
 }
 
-/// The closed scalar-expression set. This is deliberately not a language:
-/// grid geometry and dynamic shared memory are the only runtime-dependent
-/// numbers a provider may compute, and only with these forms.
+/// The closed scalar-expression set: a constant, a var name (`"tokens"`),
+/// `{"ceil_div": [e, c]}`, `{"mul": [e, c]}`. This is deliberately not a
+/// language: grid geometry, dynamic shared memory and var-derived scalar
+/// args are the only runtime-dependent numbers a provider may compute, and
+/// only with these forms.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum Expr {
     Const(u64),
-    Sym { sym: String },
+    /// A var by name — the same bare-string form a shape uses.
+    Var(String),
     CeilDiv { ceil_div: (Box<Expr>, u64) },
     Mul { mul: (Box<Expr>, u64) },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EvalError {
-    #[error("unknown symbol `{0}`")]
-    UnknownSymbol(String),
+    #[error("unknown var `{0}`")]
+    UnknownVar(String),
     #[error("arithmetic overflow")]
     Overflow,
     #[error("division by zero")]
@@ -706,10 +755,10 @@ impl Expr {
     pub fn eval(&self, env: &BTreeMap<String, u64>) -> Result<u64, EvalError> {
         match self {
             Expr::Const(c) => Ok(*c),
-            Expr::Sym { sym } => env
-                .get(sym)
+            Expr::Var(var) => env
+                .get(var)
                 .copied()
-                .ok_or_else(|| EvalError::UnknownSymbol(sym.clone())),
+                .ok_or_else(|| EvalError::UnknownVar(var.clone())),
             Expr::CeilDiv { ceil_div: (inner, c) } => {
                 if *c == 0 {
                     return Err(EvalError::DivByZero);
@@ -724,26 +773,20 @@ impl Expr {
     }
 }
 
+/// A call site: which op, with which args. No geometry — grid/block belong
+/// to the op's implementation. `label` is for humans and diagnostics only.
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct Program {
-    pub dispatches: Vec<Dispatch>,
-}
-
-/// A call site: which kernel interface, with which args. No geometry —
-/// grid/block belong to the kernel's implementation.
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Dispatch {
+pub struct Call {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    pub kernel: String,
+    pub op: String,
     pub args: Vec<Arg>,
 }
 
-/// A dispatch argument. Explicitly tagged so a buffer name can never be
-/// mistaken for a symbol name: `{"buf": "hidden"}`, `{"state": "kv"}`,
-/// `{"sym": "tokens"}`, `{"i32": 2560}`, `{"i64": 4096}`, `{"f32": 1e-6}`.
+/// A call argument. Explicitly tagged so a buffer name can never be
+/// mistaken for a var name: `{"buf": "hidden"}`, `{"state": "kv"}`,
+/// `{"var": "tokens"}`, `{"i32": 2560}`, `{"i64": 4096}`, `{"f32": 1e-6}`.
 ///
 /// Buffer and state args carry an optional byte `offset` (default 0): the
 /// kernel receives base + offset. This is how a provider addresses a view
@@ -751,32 +794,26 @@ pub struct Dispatch {
 /// per-layer region inside an opaque state — the offset is a literal from
 /// the provider's own layout arithmetic, the runtime just adds it.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(untagged)]
+#[serde(untagged, deny_unknown_fields)]
 pub enum Arg {
     Buf {
         buf: String,
-        #[serde(default, skip_serializing_if = "offset_is_zero")]
+        #[serde(default, skip_serializing_if = "is_zero")]
         offset: u64,
     },
     State {
         state: String,
-        #[serde(default, skip_serializing_if = "offset_is_zero")]
+        #[serde(default, skip_serializing_if = "is_zero")]
         offset: u64,
     },
-    Sym { sym: String },
-    /// Symbol-derived integer scalar, e.g. `{"expr": {"mul": ["tokens", 32]}}`.
-    /// Same closed expression language as launch grids; f32 params cannot
-    /// bind one.
+    Var { var: String },
+    /// Var-derived integer scalar, e.g. `{"expr": {"mul": ["tokens", 32]}}`.
+    /// Same closed expression set as launch grids; f32 params cannot bind one.
     Expr { expr: Expr },
     I32 { i32: i32 },
-    U32 { u32: u32 },
     I64 { i64: i64 },
     F32 { f32: f32 },
     U8 { u8: u8 },
-}
-
-fn offset_is_zero(v: &u64) -> bool {
-    *v == 0
 }
 
 impl fmt::Display for Arg {
@@ -786,10 +823,9 @@ impl fmt::Display for Arg {
             Arg::Buf { buf, offset } => write!(f, "buffer `{buf}`+{offset}"),
             Arg::State { state, offset: 0 } => write!(f, "state `{state}`"),
             Arg::State { state, offset } => write!(f, "state `{state}`+{offset}"),
-            Arg::Sym { sym } => write!(f, "symbol `{sym}`"),
+            Arg::Var { var } => write!(f, "var `{var}`"),
             Arg::Expr { .. } => write!(f, "expression"),
             Arg::I32 { i32: v } => write!(f, "i32 literal {v}"),
-            Arg::U32 { u32: v } => write!(f, "u32 literal {v}"),
             Arg::I64 { i64: v } => write!(f, "i64 literal {v}"),
             Arg::F32 { f32: v } => write!(f, "f32 literal {v}"),
             Arg::U8 { u8: v } => write!(f, "u8 literal {v}"),

@@ -4,7 +4,7 @@
 //! Found by walking up from the cwd (or given with `--config`). Relative
 //! paths are relative to the file; a leading `~` expands. Targets are
 //! names the user picks; kern does not interpret them. Everything the
-//! manifest already knows (page size, programs, buffer classes, cubin
+//! manifest already knows (page size, programs, buffer kinds, module
 //! hashes) stays out of here. No `kern.toml` → every command takes its
 //! inputs from flags, as before.
 //!

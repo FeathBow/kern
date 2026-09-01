@@ -5,11 +5,12 @@
 | # | 工具 | 输入 → 输出 |
 |---|------|-------------|
 | 1 | `capture_qwen3.sh` | vLLM 0.28（TRITON_ATTN，enforce_eager）跑 4 条递增 prompt → `dumped-kernels/pid<N>/`：全部 module cubin + `launches.jsonl`（每次 launch 的符号/grid/block/shmem/逐参数值 + `t_ns`） |
-| 2 | `mine_capture.py` | `launches.jsonl` → 分析报告：按时间隙切 pass / 按核爆发切 forward、(range,offset) 指针稳定性分类、grid 表达式拟合（const/sym/mul/ceil_div）。纯分析，无模型知识 |
+| 2 | `mine_capture.py` | `launches.jsonl` → 分析报告：按时间隙切 pass / 按核爆发切 forward、(range,offset) 指针稳定性分类、grid 表达式拟合（const/var/mul/ceil_div）。纯分析，无模型知识 |
 | 2b | `capture_qwen3_spec.sh` | 同上但开 DSpark 投机（draft `weights/dspark_qwen3_4b_block7`，7 draft token，固定 k 验证）→ 第二个 dump：draft 的 non-causal unified 实例、context-KV precompute、verify pass |
 | 3 | `gen_qwen3_decode.py` | 两个 `launches.jsonl` → `examples/qwen3-4b.json`（silu 用 HF hub 包）+ `qwen3-4b-silu-mined.json`（kern-test 的 A/B fixture，silu 用挖矿实例）+ `qwen3-4b-dspark.json`：真实 ABI + 手写连线，发射前用挖矿地址逐项断言证伪（q/k/v 视图偏移、KV 池布局、权重指针互异、precompute 的 K-only rope 与 grouped k_norm…）；顺带按 num_regs + cuobjdump 消歧两个同 ABI 的 unified 实例并钉哈希 |
-| 4 | `build_kernels.sh` + `handwritten.py` | `kernels-src/*.cu` → `target/cubins/`（nvcc，sm_103a）；生成器通过 `**hw("name")` 把当前 build 的 sha256 钉进 step——换 nvcc / 换 flag / 改源码就是另一个核 |
-| 5 | `extract_kernels.sh` | manifest + dump 目录 → `kernels/`：每个钉了 sha256 的 step 按哈希在 dump / `target/cubins` 里找到文件，落地为 `<显示名>-<sha12>.cubin`；只增不减，同一目录可放每个版本，A/B 两份 manifest 共用 |
+| 3b | `kern_manifest.py` | 生成器共用的 `normalize()` 后处理：把 launch 内联的 cubin/sha256 提升到 `modules` 表、把每次 call 都相同的接口标量折进 impl 的 launch 字面量、抹掉恒等连线与重复 `params`、规范键序。生成器写长，wire form 写短 |
+| 4 | `build_kernels.sh` + `handwritten.py` | `kernels-src/*.cu` → `target/cubins/`（nvcc，sm_103a）；生成器通过 `**hw("name")` 把当前 build 的 sha256 钉进 launch 的 module——换 nvcc / 换 flag / 改源码就是另一个核 |
+| 5 | `extract_kernels.sh` | manifest + dump 目录 → `kernels/`：`modules` 表里每个 module 按 sha256 在 dump / `target/cubins` 里找到文件，落地为 `<module>-<sha12>.cubin`；只增不减，同一目录可放每个版本，A/B 两份 manifest 共用 |
 | 6 | `export_weights.py` | HF checkpoint（+ draft checkpoint）→ `weights/`：qkv/gate_up 合并、rope cos_sin_cache 预计算、kv_scales 全 1、tied lm_head clone + tokenizer 文件；draft 侧另做 fc 按列切 5 块、融合 KV 权重 cat、markov 头原样 → `qwen3-4b-dspark.safetensors` |
 
 支撑件：

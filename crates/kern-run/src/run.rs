@@ -70,7 +70,7 @@ pub struct RunOpts {
     #[arg(long)]
     pub chunk: Option<u64>,
 
-    /// Skip CUDA graph capture, launch every dispatch eagerly
+    /// Skip CUDA graph capture, launch every call eagerly
     #[arg(long)]
     pub eager: bool,
 
@@ -84,8 +84,8 @@ pub struct RunOpts {
 
     /// Debug: dump per-layer activations (`y` after every `*.down_proj`,
     /// embedding, logits) of the first prefill chunk and two decode steps
-    /// into this directory, then exit. Programs run dispatch-range by
-    /// dispatch-range so nothing executes twice.
+    /// into this directory, then exit. Programs run call-range by
+    /// call-range so nothing executes twice.
     #[arg(long)]
     pub probe_dir: Option<PathBuf>,
 }
@@ -159,13 +159,13 @@ fn execute(o: Opts) -> Result<()> {
 
     let m = &rt.manifest;
     info!(
-        "manifest `{}` (format v{}, {}): verified",
-        m.meta.model,
-        m.meta.version,
+        "manifest `{}` (schema v{}, {}): verified",
+        m.model,
+        m.schema_version,
         o.manifest.display()
     );
-    for (name, s) in &m.symbols {
-        info!("  symbol   {name} ∈ [{}, {}] (runtime-provided per step)", s.min, s.max);
+    for (name, v) in &m.vars {
+        info!("  var      {name} ∈ [{}, {}] (caller-provided per call)", kern_manifest::types::Var::MIN, v.max);
     }
     for (name, per_tok, alloc) in rt.state_sizes() {
         if per_tok > 0 {
@@ -178,51 +178,46 @@ fn execute(o: Opts) -> Result<()> {
             info!("  state    {name}: opaque, fixed {} (per-sequence)", human(alloc));
         }
     }
-    let mut by_class: BTreeMap<&str, (usize, u64)> = BTreeMap::new();
-    for (_, class, bytes) in rt.buffer_sizes() {
-        let e = by_class.entry(match class {
-            kern_manifest::types::BufferClass::Input => "input",
-            kern_manifest::types::BufferClass::Output => "output",
-            kern_manifest::types::BufferClass::Weight => "weight",
-            kern_manifest::types::BufferClass::Workspace => "workspace",
-            kern_manifest::types::BufferClass::Carry => "carry",
-        }).or_default();
+    let mut by_kind: BTreeMap<String, (usize, u64)> = BTreeMap::new();
+    for (_, kind, bytes) in rt.buffer_sizes() {
+        let e = by_kind.entry(kind.to_string()).or_default();
         e.0 += 1;
         e.1 += bytes;
     }
-    let classes = ["weight", "workspace", "carry", "input", "output"]
+    let kinds = ["weight", "workspace", "carry", "input", "output"]
         .iter()
-        .filter_map(|c| by_class.get(c).map(|(n, b)| format!("{c} {n} ({})", human(*b))))
+        .filter_map(|c| by_kind.get(*c).map(|(n, b)| format!("{c} {n} ({})", human(*b))))
         .collect::<Vec<_>>()
         .join(" | ");
-    info!("  buffers  {classes}");
-    for (name, p) in &m.programs {
-        info!("  program  `{name}`: {} dispatches", p.dispatches.len());
+    info!("  buffers  {kinds}");
+    for (name, calls) in &m.programs {
+        info!("  program  `{name}`: {} calls", calls.len());
     }
 
     info!(
-        "kernel resolution: {} cubin modules in {}, matched by cuFuncGetParamInfo \
-         layout vs declared params ({:?}):",
+        "op resolution: {} artifacts loaded from {} ({} pinned by `modules`), entries matched by \
+         cuFuncGetParamInfo layout vs declared params ({:?}):",
         rt.module_count(),
         o.kernels.display(),
+        m.modules.len(),
         load_t
     );
-    for (name, modules) in rt.kernel_resolution() {
-        let k = &rt.manifest.kernels[&name];
-        for (si, (st, module)) in k.imp.steps.iter().zip(&modules).enumerate() {
-            let label = if si == 0 { name.clone() } else { format!("  ·step{si}") };
-            let sm = match &st.shared_mem {
+    for (name, modules) in rt.op_resolution() {
+        let op = &rt.manifest.ops[&name];
+        for (li, (l, module)) in op.imp.launches.iter().zip(&modules).enumerate() {
+            let label = if li == 0 { name.clone() } else { format!("  ·launch{li}") };
+            let sm = match &l.shared_mem {
                 Some(e) => format!(
                     ", shmem {:?}",
                     e.eval(&BTreeMap::from([("tokens".into(), 1)])).unwrap_or(0)
                 ),
                 None => String::new(),
             };
+            let block = l.block.map_or(String::new(), |b| format!(", block {b:?}"));
             info!(
-                "  {label:<18} {:<44} {:>2} params, block {:?}{sm} <- {module}",
-                ellipsize(&st.symbol, 44),
-                st.params.len(),
-                st.block,
+                "  {label:<18} {:<44} {:>2} params{block}{sm} <- {module}",
+                ellipsize(&l.entry, 44),
+                l.params_of(op).len(),
             );
         }
     }
@@ -236,7 +231,7 @@ fn execute(o: Opts) -> Result<()> {
     let blob_len: usize = blobs.iter().map(Vec::len).sum();
     rt.load_weights(&blobs.iter().map(Vec::as_slice).collect::<Vec<_>>())?;
     drop(blobs);
-    let n_weights = by_class.get("weight").map_or(0, |e| e.0);
+    let n_weights = by_kind.get("weight").map_or(0, |e| e.0);
     info!(
         "weights: {n_weights} tensors bound by name from {} ({}) in {:?}",
         o.weights.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(" + "),
@@ -272,7 +267,7 @@ fn execute(o: Opts) -> Result<()> {
     //   models need this — their chunked prefill kernels are a different
     //   arithmetic from the decode kernel, and the reference runs the last
     //   prompt token through the former.
-    let chunk = o.chunk.min(caller.rt.manifest.symbols["tokens"].max).max(1);
+    let chunk = o.chunk.min(caller.rt.manifest.vars["tokens"].max).max(1);
     let n_prompt = prompt_ids.len();
     let prefill_all = prefill_emits_next_token(&caller.rt.manifest);
     let n_pre = if prefill_all { n_prompt } else { n_prompt - 1 };
@@ -338,9 +333,9 @@ fn execute(o: Opts) -> Result<()> {
         let t = Instant::now();
         caller.rt.capture("decode", &env)?;
         info!(
-            "CUDA graph: `decode` stream-captured at tokens=1, {} dispatches -> \
+            "CUDA graph: `decode` stream-captured at tokens=1, {} calls -> \
              1 graph launch/step ({:?})",
-            caller.rt.manifest.programs["decode"].dispatches.len(),
+            caller.rt.manifest.programs["decode"].len(),
             t.elapsed()
         );
     }
@@ -391,17 +386,17 @@ fn execute(o: Opts) -> Result<()> {
 }
 
 /// Activation probe for reference comparison (`--probe-dir`): the first
-/// prefill chunk and two decode steps, each run as consecutive dispatch
+/// prefill chunk and two decode steps, each run as consecutive call
 /// ranges cut after `embed` and every `l<i>.down_proj`, dumping `residual`
 /// / `y` (live `tokens` rows) and the final logits as raw little-endian
 /// files `<tag>.<point>.bin`.
 fn probe(caller: &mut Caller, prompt_ids: &[i64], dir: &std::path::Path, chunk: u64) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     match caller.rt.manifest.buffers["y"].shape.as_slice() {
-        [Dim::Sym(_), Dim::Const(_)] => {}
+        [Dim::Var(_), Dim::Const(_)] => {}
         s => bail!("unexpected `y` shape {s:?}"),
     }
-    // KERN_PROBE_LAYER=<i>: additionally dump, after every dispatch of layer
+    // KERN_PROBE_LAYER=<i>: additionally dump, after every call of layer
     // `l<i>.`, the buffer its first `out` param writes (live `tokens` rows).
     let fine: Option<String> = std::env::var("KERN_PROBE_LAYER").ok().map(|l| format!("l{l}."));
     let row_bytes = |rt: &Runtime, name: &str| -> usize {
@@ -416,8 +411,8 @@ fn probe(caller: &mut Caller, prompt_ids: &[i64], dir: &std::path::Path, chunk: 
             * b.dtype.bytes() as usize
     };
     let run_probed = |rt: &Runtime, program: &str, env: &BTreeMap<String, u64>, tokens: usize, tag: &str| -> Result<()> {
-        let prog = &rt.manifest.programs[program];
-        let labels: Vec<String> = prog.dispatches.iter().map(|d| d.label.clone().unwrap_or_default()).collect();
+        let calls = &rt.manifest.programs[program];
+        let labels: Vec<String> = calls.iter().map(|c| c.label.clone().unwrap_or_default()).collect();
         let mut lo = 0;
         for (i, l) in labels.iter().enumerate() {
             let mut dumps: Vec<(String, String)> = Vec::new();
@@ -427,9 +422,9 @@ fn probe(caller: &mut Caller, prompt_ids: &[i64], dir: &std::path::Path, chunk: 
                 dumps.push((layer.to_string(), "y".into()));
             }
             if fine.as_deref().is_some_and(|p| l.starts_with(p)) {
-                let d = &prog.dispatches[i];
-                let k = &rt.manifest.kernels[&d.kernel];
-                for (arg, p) in d.args.iter().zip(&k.params) {
+                let c = &calls[i];
+                let op = &rt.manifest.ops[&c.op];
+                for (arg, p) in c.args.iter().zip(&op.params) {
                     if let (kern_manifest::types::Arg::Buf { buf, .. }, kern_manifest::types::ParamType::Buf { dir, .. }) = (arg, p) {
                         if matches!(dir, kern_manifest::types::Dir::Out | kern_manifest::types::Dir::InOut) {
                             dumps.push((format!("{l}.{buf}"), buf.clone()));
@@ -457,7 +452,7 @@ fn probe(caller: &mut Caller, prompt_ids: &[i64], dir: &std::path::Path, chunk: 
         std::fs::write(dir.join(format!("{tag}.next_token.bin")), rt.read_output("next_token")?)?;
         Ok(())
     };
-    let chunk = chunk.min(caller.rt.manifest.symbols["tokens"].max).max(1) as usize;
+    let chunk = chunk.min(caller.rt.manifest.vars["tokens"].max).max(1) as usize;
     let prefill_all = prefill_emits_next_token(&caller.rt.manifest);
     let n_pre = if prefill_all { prompt_ids.len() } else { prompt_ids.len() - 1 };
     let c = n_pre.min(chunk);
@@ -515,7 +510,7 @@ fn spec_decode(
         s => bail!("unexpected draft_tokens shape {s:?}"),
     };
     let verify_n = n_drafts + 1;
-    let (draft_rows, mask_token) = match &rt.manifest.meta.spec {
+    let (draft_rows, mask_token) = match &rt.manifest.spec {
         Some(s) => (s.block as usize, s.mask_token),
         None => (DRAFT_TOKENS, MASK_TOKEN),
     };

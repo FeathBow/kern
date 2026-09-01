@@ -25,9 +25,9 @@ pub const STOP_TOKENS: [i64; 2] = [151643, 151645];
 /// to match the reference; the driver then prefills every prompt token and
 /// takes the first generated token from the prefill call.
 pub fn prefill_emits_next_token(m: &Manifest) -> bool {
-    m.programs.get("prefill").is_some_and(|p| {
-        p.dispatches.iter().any(|d| {
-            d.args.iter().any(|a| matches!(a, Arg::Buf { buf, .. } if buf == "next_token"))
+    m.programs.get("prefill").is_some_and(|calls| {
+        calls.iter().any(|c| {
+            c.args.iter().any(|a| matches!(a, Arg::Buf { buf, .. } if buf == "next_token"))
         })
     })
 }
@@ -35,7 +35,7 @@ pub fn prefill_emits_next_token(m: &Manifest) -> bool {
 /// Programs this driver knows how to stage. A manifest may declare others;
 /// the driver can't produce a workload for them.
 pub const DRIVEN: [&str; 2] = ["prefill", "decode"];
-/// The symbol a prefill call is sized by.
+/// The var a prefill call is sized by.
 pub const TOKENS: &str = "tokens";
 
 pub fn le_bytes_i64(v: &[i64]) -> Vec<u8> {
@@ -82,8 +82,8 @@ impl Caller {
                 [Dim::Const(n)] => *n as i64,
                 s => bail!("unexpected {name} shape {s:?}"),
             };
-            let unit = b.domain.as_ref().map_or(16, |d| d.unit) as i64;
-            let n_pages = (rt.capacity() as i64 / unit).max(1);
+            let stride = b.domain.as_ref().map_or(16, |d| d.stride) as i64;
+            let n_pages = (rt.capacity() as i64 / stride).max(1);
             let table: Vec<i32> = (0..n_entries).map(|i| i.min(n_pages - 1) as i32).collect();
             rt.write_input(&name, &le_bytes_i32(&table))?;
         }
@@ -96,7 +96,7 @@ impl Caller {
     }
 
     /// Stage the inputs for a `prefill` call over `ids` at the cursor; does
-    /// not advance. Returns the symbol env for the call.
+    /// not advance. Returns the var env for the call.
     pub fn stage_prefill(&mut self, ids: &[i64]) -> Result<BTreeMap<String, u64>> {
         let c = ids.len() as u64;
         let positions: Vec<i64> = (self.pos..self.pos + c as i64).collect();
@@ -131,7 +131,7 @@ impl Caller {
     /// `next_token` (see [`prefill_emits_next_token`]), in which case the
     /// last chunk's output is the first generated token.
     pub fn prefill(&mut self, ids: &[i64], chunk: u64, eager: bool) -> Result<bool> {
-        let chunk = chunk.min(self.rt.manifest.symbols["tokens"].max).max(1);
+        let chunk = chunk.min(self.rt.manifest.vars["tokens"].max).max(1);
         let mut captured = false;
         let mut i = 0usize;
         while i < ids.len() {

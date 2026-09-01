@@ -59,6 +59,9 @@ import struct
 import subprocess
 import sys
 
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
+from kern_manifest import normalize  # noqa: E402
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import mine_capture as mc
 from handwritten import hw  # tools/handwritten.py: build + pin handwritten cubins
@@ -320,16 +323,21 @@ def find_unified_module(dump_dir, want_regs):
     return mod.name, sha, mod
 
 
-def sym(s):
-    return {"sym": s}
+def var(s):
+    return {"var": s}
+
+
+def _e(e):
+    """Expression form of a var arg: shapes/grids name a var bare."""
+    return e["var"] if isinstance(e, dict) and "var" in e else e
 
 
 def mul(e, c):
-    return {"mul": [e, c]}
+    return {"mul": [_e(e), c]}
 
 
 def cdiv(e, c):
-    return {"ceil_div": [e, c]}
+    return {"ceil_div": [_e(e), c]}
 
 
 def expr(e):
@@ -360,22 +368,22 @@ def u8(v):
     return {"u8": v}
 
 
-def d(label, kernel, args):
-    return {"label": label, "kernel": kernel, "args": args}
+def d(label, op, args):
+    return {"label": label, "op": op, "args": args}
 
 
 def a(i):
-    return {"arg": i}
+    return {"param": i}
 
 
-def scr(name, off=0):
-    return {"scratch": name, "offset": off} if off else {"scratch": name}
+def scr(name):
+    return {"scratch": name}
 
 
 def step(symbol, params, block, grid, args, shared_mem=None, cubin=None,
          sha256=None):
-    s = {"symbol": symbol, "params": params, "block": block, "grid": grid,
-         "args": args}
+    s = {"entry": symbol, "params": params, "block": block,
+         "grid": [_e(g) for g in grid], "args": args}
     if shared_mem is not None:
         s["shared_mem"] = shared_mem
     if cubin is not None:
@@ -389,7 +397,7 @@ def single(symbol, params, block, grid, shared_mem=None, cubin=None,
            sha256=None):
     """单步实现，恒等布线：接口即该核的 launch ABI。"""
     return {"params": params,
-            "impl": {"steps": [step(symbol, params, block, grid,
+            "impl": {"launches": [step(symbol, params, block, grid,
                                     [a(i) for i in range(len(params))],
                                     shared_mem, cubin, sha256)]}}
 
@@ -401,9 +409,9 @@ DOMAINS = {
     "token_ids": TOKEN_DOMAIN,
     "positions": {"index_into": "rope.cos_sin_cache"},
     "slot_mapping": {"index_into": "kv"},
-    "block_table": {"index_into": "kv", "unit": 16},  # vLLM block_size
+    "block_table": {"index_into": "kv", "stride": 16},  # vLLM block_size
     "seq_lens": {"min": 1},
-    "cu_seqlens_q": {"min": 0, "max": {"sym": "tokens"}, "monotone": True},
+    "cu_seqlens_q": {"min": 0, "max": "tokens", "monotone": True},
     "next_token": TOKEN_DOMAIN,
     "kv_scales": {"min": 0.0},
     "anchor_token": TOKEN_DOMAIN,
@@ -419,7 +427,7 @@ HUB_SILU = {
     "cubin": "hf:kernels-community/activation/build/torch29-cxx11-cu130-aarch64-linux/"
              "activation/_activation_320b408.abi3.so",
     "sha256": "73748b54059552f5983322f7dedc36ed349b38ad6fb9318301bb4965b1fe49aa",
-    "symbol": "_ZN4vllm18act_and_mul_kernelIN3c108BFloat16EXadL_ZNS_11silu_kernelIS2_EET_RKS4_EELb1EEEvPS4_PS5_i",
+    "entry": "_ZN4vllm18act_and_mul_kernelIN3c108BFloat16EXadL_ZNS_11silu_kernelIS2_EET_RKS4_EELb1EEEvPS4_PS5_i",
     "params": ["out buffer<bf16>", "in buffer<bf16>", "i32"],
 }
 
@@ -428,18 +436,18 @@ def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
     pf_sym, pf_block, pf_smem = pf
     causal_cubin, causal_sha = pins["causal"]
     buffers = {
-        "token_ids": {"dtype": "i64", "shape": ["tokens"], "class": "input"},
-        "positions": {"dtype": "i64", "shape": ["tokens"], "class": "input"},
-        "slot_mapping": {"dtype": "i64", "shape": ["tokens"], "class": "input"},
-        "block_table": {"dtype": "i32", "shape": [MAX_BLOCKS], "class": "input"},
+        "token_ids": {"dtype": "i64", "shape": ["tokens"], "kind": "input"},
+        "positions": {"dtype": "i64", "shape": ["tokens"], "kind": "input"},
+        "slot_mapping": {"dtype": "i64", "shape": ["tokens"], "kind": "input"},
+        "block_table": {"dtype": "i32", "shape": [MAX_BLOCKS], "kind": "input"},
         # bs=1：seq_lens 内容 = 已见 token 数，cu_seqlens_q = [0, 本次 q 数]，
         # caller 每次调用前填
-        "seq_lens": {"dtype": "i32", "shape": [1], "class": "input"},
-        "cu_seqlens_q": {"dtype": "i32", "shape": [2], "class": "input"},
+        "seq_lens": {"dtype": "i32", "shape": [1], "kind": "input"},
+        "cu_seqlens_q": {"dtype": "i32", "shape": [2], "kind": "input"},
         # logits/next_token 只属于 decode（tokens=1），定常形状——否则按
         # CHUNK_MAX 上界分配要多付 ~600MB
-        "logits": {"dtype": "bf16", "shape": [1, VOCAB], "class": "workspace"},
-        "next_token": {"dtype": "i64", "shape": [1], "class": "output"},
+        "logits": {"dtype": "bf16", "shape": [1, VOCAB], "kind": "workspace"},
+        "next_token": {"dtype": "i64", "shape": [1], "kind": "output"},
     }
     for name, shape in {
         "residual": ["tokens", HIDDEN],
@@ -452,10 +460,10 @@ def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
         "gate_up": ["tokens", 2 * FFN],
         "ffn_act": ["tokens", FFN],
     }.items():
-        buffers[name] = {"dtype": "bf16", "shape": shape, "class": "workspace"}
+        buffers[name] = {"dtype": "bf16", "shape": shape, "kind": "workspace"}
 
     def weight(name, shape, dtype="bf16"):
-        buffers[name] = {"dtype": dtype, "shape": shape, "class": "weight"}
+        buffers[name] = {"dtype": dtype, "shape": shape, "kind": "weight"}
 
     weight("model.embed_tokens.weight", [VOCAB, HIDDEN])
     weight("model.norm.weight", [HIDDEN])
@@ -478,20 +486,20 @@ def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
         # 专属的交换面。fc_out 是 carry：verify/prefill/decode_spec 的 tap 写，
         # draft_precompute 读——跨 program 的交接棒，顺序是 caller 契约。
         buffers["anchor_token"] = {"dtype": "i64", "shape": [1],
-                                   "class": "input"}
+                                   "kind": "input"}
         buffers["draft_tokens"] = {"dtype": "i64", "shape": [BLOCK_TOKENS],
-                                   "class": "output"}
+                                   "kind": "output"}
         buffers["verify_tokens"] = {"dtype": "i64", "shape": [VERIFY_TOKENS],
-                                    "class": "output"}
+                                    "kind": "output"}
         buffers["logits_blk"] = {"dtype": "bf16",
                                  "shape": [VERIFY_TOKENS, VOCAB],
-                                 "class": "workspace"}
+                                 "kind": "workspace"}
         buffers["fc_out"] = {"dtype": "bf16", "shape": ["tokens", HIDDEN],
-                             "class": "carry"}
+                             "kind": "carry"}
         buffers["kv_flat"] = {"dtype": "bf16", "shape": ["tokens", DRAFT_KV_DIM],
-                              "class": "workspace"}
+                              "kind": "workspace"}
         buffers["membed"] = {"dtype": "bf16", "shape": [1, MARKOV_RANK],
-                             "class": "workspace"}
+                             "kind": "workspace"}
         weight("draft.embed_tokens.weight", [VOCAB, HIDDEN])
         weight("draft.lm_head.weight", [VOCAB, HIDDEN])
         weight("draft.norm.weight", [HIDDEN])
@@ -518,14 +526,14 @@ def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
     def smem(tag):
         return by[tag][0]["dynamic_shared_mem_bytes"]
 
-    T = sym("tokens")
+    T = var("tokens")
     RMS_PARAMS = ["out buffer<bf16>", "in buffer<bf16>", "i64", "i64", "i64",
                   "i64", "i64", "in buffer<bf16>", "i64", "f32", "i32", "i32"]
     # unified 的完整 launch ABI（31 参数）；接口砍掉三个 segm 分部和缓冲
     # （26/27/28），它们是实现细节，降为 impl scratch
     UNIFIED_PARAMS = [
         "out buffer<bf16>",  # 3D 实例不写它，ABI 要求非空指针；reduce 写
-        "in buffer<bf16>", "inout ptr", "inout ptr",
+        "in buffer<bf16>", "inout state", "inout state",
         "in buffer<i32>", "in buffer<i32>", "f32",
         "in buffer<f32>", "in buffer<f32>", "f32", "f32",
         "i64", "i64", "i64", "i64", "i64", "i64",
@@ -556,8 +564,8 @@ def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
             blk("rope"), [T, 1, 1]),
         "reshape_and_cache": single(
             by["cache"][0]["symbol"],
-            ["in buffer<bf16>", "in buffer<bf16>", "inout ptr",
-             "inout ptr", "in buffer<i64>", "in buffer<f32>",
+            ["in buffer<bf16>", "in buffer<bf16>", "inout state",
+             "inout state", "in buffer<i64>", "in buffer<f32>",
              "in buffer<f32>", "i64", "i64", "i64", "i64", "i64", "i64",
              "i64", "i64", "i64"],
             blk("cache"), [T, 1, 1]),
@@ -574,7 +582,7 @@ def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
                     "segm_expsum": {"dtype": "f32",
                                     "shape": [1, HEADS, NUM_SEGMENTS]},
                 },
-                "steps": [
+                "launches": [
                     step(by["unified"][0]["symbol"], UNIFIED_PARAMS,
                          blk("unified"), [1, KV_HEADS, NUM_SEGMENTS],
                          [a(i) for i in range(26)]
@@ -605,7 +613,7 @@ def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
             # same interface, hub impl: (out, in, d) — the caller's extra
             # scalars (stride/offset/scale) are dropped on the floor
             "params": ["out buffer<bf16>", "in buffer<bf16>", "i32", "i32", "f32", "i32"],
-            "impl": {"steps": [dict(HUB_SILU, block=[1024, 1, 1], grid=[T, 1, 1],
+            "impl": {"launches": [dict(HUB_SILU, block=[1024, 1, 1], grid=[_e(T), 1, 1],
                                     args=[a(0), a(1), a(2)])]}},
         "fused_add_rms_norm": single(
             by["fused"][0]["symbol"],
@@ -634,7 +642,7 @@ def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
                     "pmax": {"dtype": "f32", "shape": ["tokens", 64]},
                     "pidx": {"dtype": "i32", "shape": ["tokens", 64]},
                 },
-                "steps": [
+                "launches": [
                     step("kern_argmax_partial_bf16",
                          ["in buffer<bf16>", "out buffer<f32>",
                           "out buffer<i32>", "i32"],
@@ -668,7 +676,7 @@ def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
                     "pmax": {"dtype": "f32", "shape": [1, 64]},
                     "pidx": {"dtype": "i32", "shape": [1, 64]},
                 },
-                "steps": [
+                "launches": [
                     step("kern_argmax_partial_bf16",
                          ["in buffer<bf16>", "out buffer<f32>",
                           "out buffer<i32>", "i32"],
@@ -875,39 +883,38 @@ def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
 
     states = {"kv": {"bytes_per_token": KV_BYTES_PER_TOKEN}}
     programs = {
-        "prefill": {"dispatches": forward("attn_prefill", None, taps=spec)},
-        "decode": {"dispatches": forward("attn", "decode")},
+        "prefill": forward("attn_prefill", None, taps=spec),
+        "decode": forward("attn", "decode"),
     }
     if spec:
         states["draft_kv"] = {"bytes_per_token": DRAFT_KV_BYTES_PER_TOKEN}
         # decode_spec = decode + tap（最后一个 prompt token/anchor 也要出 aux）；
         # decode 保持无 tap，非投机路径不多付 5 个 GEMV
-        programs["decode_spec"] = {
-            "dispatches": forward("attn", "decode", taps=True)}
-        programs["verify"] = {
-            "dispatches": forward("attn_prefill", "verify", taps=True)}
-        programs["draft"] = {
-            "dispatches": forward(
-                "attn_draft", "draft", mp="draft.", layers=DRAFT_LAYERS,
-                kv_state="draft_kv", block_stride=DRAFT_BLOCK_STRIDE,
-                scales="draft.kv_scales", lm_head_w="draft.lm_head.weight",
-                final_norm_w="draft.norm.weight")}
-        programs["draft_precompute"] = {"dispatches": draft_precompute()}
+        programs["decode_spec"] = forward("attn", "decode", taps=True)
+        programs["verify"] = forward("attn_prefill", "verify", taps=True)
+        programs["draft"] = forward(
+            "attn_draft", "draft", mp="draft.", layers=DRAFT_LAYERS,
+            kv_state="draft_kv", block_stride=DRAFT_BLOCK_STRIDE,
+            scales="draft.kv_scales", lm_head_w="draft.lm_head.weight",
+            final_norm_w="draft.norm.weight")
+        programs["draft_precompute"] = draft_precompute()
     for name, dom in DOMAINS.items():
         if name in buffers:
             buffers[name]["domain"] = dom
-    return {
-        "meta": {"version": 2,
-                 "model": "qwen3-4b-dspark" if spec else "qwen3-4b"},
+    # normalize: hoist inline cubin/sha256 into `modules`, fold the ABI
+    # constants every call repeats into the impls, default identity wiring
+    return normalize({
+        "schema_version": 3,
+        "model": "qwen3-4b-dspark" if spec else "qwen3-4b",
         # bs=1；prefill 按 chunk 调用（tokens ≤ CHUNK_MAX），decode 恒 tokens=1；
         # spec 附加契约：draft 以 tokens=7、verify 以 tokens=8、
         # draft_precompute 以 tokens=有效行数 调用
-        "symbols": {"tokens": {"max": CHUNK_MAX}},
+        "vars": {"tokens": {"max": CHUNK_MAX}},
         "states": states,
         "buffers": buffers,
-        "kernels": kernels,
+        "ops": kernels,
         "programs": programs,
-    }
+    })
 
 
 def main():
@@ -936,9 +943,9 @@ def main():
         manifest = build(by, eps, scale, pf, pins, spec=spec, silu=silu)
         out = repo / "examples" / name
         out.write_text(json.dumps(manifest, indent=1) + "\n")
-        counts = {p: len(v["dispatches"]) for p, v in manifest["programs"].items()}
+        counts = {p: len(v) for p, v in manifest["programs"].items()}
         print(f"wrote {out} ({out.stat().st_size // 1024} KiB, "
-              f"{len(manifest['buffers'])} buffers, dispatches {counts})")
+              f"{len(manifest['buffers'])} buffers, calls {counts})")
     print(f"topology checks passed (eps={eps!r}, attn scale={scale!r}, "
           f"prefill fwds={[t for t, _ in prefills]}; unified pins: "
           f"causal={cfile} {csha[:12]} regs={causal_regs}, "

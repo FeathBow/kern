@@ -3,13 +3,13 @@
 //! The runtime knows nothing about models. It loads a verified manifest,
 //! resolves each declared kernel against the cubins in a directory, allocates
 //! every buffer/state, binds weight buffers by name from a safetensors blob,
-//! and replays the program's dispatch list. The only kernels it understands
+//! and replays the program's call list. The only kernels it understands
 //! natively are `extern:` ops (currently `extern:cublaslt_bf16_tn`).
 //!
 //! Names stop at load time: device pointers are static once buffers, states
 //! and scratch are allocated, so [`Runtime::load`] lowers every program into
 //! a flat launch list (see `compile`) whose slots are finished values or
-//! symbol-indexed expressions. The name-keyed maps that remain exist only on
+//! var-indexed expressions. The name-keyed maps that remain exist only on
 //! the caller API surface (`write_input("token_ids")`, `run("decode")`);
 //! the execution path performs no name lookups.
 //!
@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use cudarc::cublaslt::CudaBlasLT;
 use cudarc::driver::{result as cu, sys, CudaContext, CudaStream, PinnedHostSlice};
-use kern_manifest::types::{BufferClass, Manifest};
+use kern_manifest::types::{BufferKind, Manifest};
 
 use compile::{CompiledProgram, Launch, LaunchKind, RVal, Slot};
 use device::{alloc, gemm_bf16_tn, DeviceBuf};
@@ -67,7 +67,7 @@ pub struct Runtime {
     /// Per kernel: the module each impl step resolved to (introspection).
     resolution: Vec<(String, Vec<String>)>,
     n_modules: usize,
-    /// Program name -> instantiated CUDA graph + the dense symbol values it
+    /// Program name -> instantiated CUDA graph + the dense var values it
     /// was captured with (grid dims and scalar args are baked in at capture).
     graphs: BTreeMap<String, (sys::CUgraphExec, Vec<u64>)>,
 }
@@ -118,9 +118,9 @@ impl Drop for Events {
 
 impl Runtime {
     /// Verify the manifest, load every `*.cubin` under `kernels_dir`, resolve
-    /// kernels, allocate all buffers and states, and lower every program.
+    /// ops, allocate all buffers and states, and lower every program.
     /// `state_capacity_tokens` scales each declared state by its
-    /// `bytes_per_token` (a `bytes_fixed` state is allocated as declared).
+    /// `bytes_per_token` (a fixed-`bytes` state is allocated as declared).
     pub fn load(
         manifest_json: &str,
         kernels_dir: &std::path::Path,
@@ -140,7 +140,7 @@ impl Runtime {
         let remote = cubin::fetch_registry_cubins(&manifest)?;
         let modules = cubin::load_all_modules(kernels_dir, &remote)?;
 
-        // States are paged: every `index_into` a state comes in `unit`
+        // States are paged: every `index_into` a state comes in `stride`
         // tokens per index (the KV block table's page). A capacity that is
         // not a whole number of pages would provision a torn last page —
         // slots the domain says are valid but a page-major kernel writes
@@ -151,7 +151,7 @@ impl Runtime {
             .values()
             .filter_map(|b| b.domain.as_ref())
             .filter(|d| d.index_into.as_deref().is_some_and(|s| manifest.states.contains_key(s)))
-            .map(|d| d.unit.max(1))
+            .map(|d| d.stride.max(1))
             .fold(1u64, lcm);
         let state_capacity_tokens = if state_capacity_tokens % page == 0 {
             state_capacity_tokens
@@ -169,9 +169,9 @@ impl Runtime {
         };
 
         let max_env: BTreeMap<_, _> =
-            manifest.symbols.iter().map(|(s, v)| (s.clone(), v.max)).collect();
+            manifest.vars.iter().map(|(s, v)| (s.clone(), v.max)).collect();
 
-        // Buffer sizes are static: shapes only reference symbols, sized at max.
+        // Buffer sizes are static: shapes only reference vars, sized at max.
         let mut buffers = BTreeMap::new();
         for (name, b) in &manifest.buffers {
             let bytes = compile::shaped_bytes(
@@ -187,13 +187,13 @@ impl Runtime {
             let bytes = s
                 .bytes_per_token
                 .checked_mul(state_capacity_tokens)
-                .and_then(|b| b.checked_add(s.bytes_fixed))
+                .and_then(|b| b.checked_add(s.bytes))
                 .ok_or_else(|| Error::Manifest(format!("state `{name}`: size overflow")))?;
             states.insert(name.clone(), alloc(&stream, bytes)?);
         }
         let mut staging = BTreeMap::new();
         for (name, b) in &manifest.buffers {
-            if b.class == BufferClass::Input {
+            if b.kind == BufferKind::Input {
                 let mut pinned =
                     unsafe { ctx.alloc_pinned::<u8>(buffers[name].bytes.max(1) as usize)? };
                 pinned.as_mut_slice()?.fill(0);
@@ -201,8 +201,8 @@ impl Runtime {
             }
         }
 
-        let resolved = compile::resolve_kernels(&manifest, &modules, kernels_dir, &stream, &max_env)?;
-        let resolution = resolved.iter().map(|(n, rk)| (n.clone(), rk.step_modules())).collect();
+        let resolved = compile::resolve_ops(&manifest, &modules, kernels_dir, &stream, &max_env)?;
+        let resolution = resolved.iter().map(|(n, rk)| (n.clone(), rk.launch_modules())).collect();
         let programs = compile::compile_programs(&manifest, &resolved, &buffers, &states)?;
         let scratch = resolved.into_values().flat_map(|rk| rk.scratch.into_values()).collect();
 
@@ -229,11 +229,11 @@ impl Runtime {
     }
 
     /// (name, class, allocated bytes) for every buffer.
-    pub fn buffer_sizes(&self) -> Vec<(&str, BufferClass, u64)> {
+    pub fn buffer_sizes(&self) -> Vec<(&str, BufferKind, u64)> {
         self.manifest
             .buffers
             .iter()
-            .map(|(n, b)| (n.as_str(), b.class, self.buffers[n].bytes))
+            .map(|(n, b)| (n.as_str(), b.kind, self.buffers[n].bytes))
             .collect()
     }
 
@@ -247,7 +247,7 @@ impl Runtime {
     }
 
     /// Per kernel: the module each impl step resolved to, in step order.
-    pub fn kernel_resolution(&self) -> Vec<(String, Vec<String>)> {
+    pub fn op_resolution(&self) -> Vec<(String, Vec<String>)> {
         self.resolution.clone()
     }
 
@@ -261,7 +261,7 @@ impl Runtime {
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| Error::WeightArtifact(format!("unparseable safetensors: {e}")))?;
         for (name, b) in &self.manifest.buffers {
-            if b.class != BufferClass::Weight {
+            if b.kind != BufferKind::Weight {
                 continue;
             }
             let found: Vec<_> = sts.iter().filter_map(|st| st.tensor(name).ok()).collect();
@@ -286,7 +286,7 @@ impl Runtime {
     }
 
     /// Check `data` (a prefix of buffer `name`) against the buffer's declared
-    /// domain, if any, at the given symbol values. Symbol-dependent bounds
+    /// domain, if any, at the given var values. Symbol-dependent bounds
     /// need `env`; pass the values the next run will use.
     pub fn check_domain(&self, name: &str, data: &[u8], env: &BTreeMap<String, u64>) -> Result<()> {
         let Some(b) = self.manifest.buffers.get(name) else {
@@ -314,12 +314,12 @@ impl Runtime {
         Ok(())
     }
 
-    /// Write an input buffer. The domain check needs the symbol values the
-    /// next run will use; `write_input` checks against symbol upper bounds
+    /// Write an input buffer. The domain check needs the var values the
+    /// next run will use; `write_input` checks against var upper bounds
     /// (the loosest valid reading), `write_input_at` against exact values.
     pub fn write_input(&mut self, name: &str, data: &[u8]) -> Result<()> {
         let max_env: BTreeMap<_, _> =
-            self.manifest.symbols.iter().map(|(s, v)| (s.clone(), v.max)).collect();
+            self.manifest.vars.iter().map(|(s, v)| (s.clone(), v.max)).collect();
         self.write_input_at(name, data, &max_env)
     }
 
@@ -327,8 +327,8 @@ impl Runtime {
         let Some(b) = self.manifest.buffers.get(name) else {
             bail!(Api, "no buffer `{name}`");
         };
-        if b.class != BufferClass::Input {
-            bail!(Api, "buffer `{name}` is {}, not input", b.class);
+        if b.kind != BufferKind::Input {
+            bail!(Api, "buffer `{name}` is {}, not input", b.kind);
         }
         if data.len() as u64 > self.buffers[name].bytes {
             bail!(Api, "input `{name}`: got {} bytes, buffer is {}", data.len(), self.buffers[name].bytes);
@@ -339,7 +339,7 @@ impl Runtime {
         // Waits on the pinned slice's event: the previous step's DMA from
         // this staging must finish before we overwrite it. A prefix write
         // (variable-length inputs) still DMAs the whole buffer — the stale
-        // tail is never read, grids are bounded by the symbols.
+        // tail is never read, grids are bounded by the vars.
         pinned.as_mut_slice()?[..data.len()].copy_from_slice(data);
         self.stream.memcpy_htod(pinned, &mut dst.slice)?;
         Ok(())
@@ -349,8 +349,8 @@ impl Runtime {
         let Some(b) = self.manifest.buffers.get(name) else {
             bail!(Api, "no buffer `{name}`");
         };
-        if b.class != BufferClass::Output {
-            bail!(Api, "buffer `{name}` is {}, not output", b.class);
+        if b.kind != BufferKind::Output {
+            bail!(Api, "buffer `{name}` is {}, not output", b.kind);
         }
         Ok(self.stream.clone_dtoh(&self.buffers[name].slice)?)
     }
@@ -367,9 +367,9 @@ impl Runtime {
         self.page
     }
 
-    pub fn dispatch_count(&self, program: &str) -> Result<usize> {
+    pub fn call_count(&self, program: &str) -> Result<usize> {
         match self.programs.get(program) {
-            Some(p) => Ok(p.dispatch_ranges.len()),
+            Some(p) => Ok(p.call_ranges.len()),
             None => bail!(Api, "no program `{program}`"),
         }
     }
@@ -382,7 +382,7 @@ impl Runtime {
         Ok(self.stream.clone_dtoh(&b.slice)?)
     }
 
-    /// The first `bytes` of any buffer (the live prefix at a symbol value
+    /// The first `bytes` of any buffer (the live prefix at a var value
     /// below the allocation bound).
     pub fn read_buffer_prefix(&self, name: &str, bytes: usize) -> Result<Vec<u8>> {
         let Some(b) = self.buffers.get(name) else {
@@ -444,7 +444,7 @@ impl Runtime {
         Ok(self.stream.clone_dtoh(&s.slice)?)
     }
 
-    /// Execute dispatches `[lo, hi)` of a program eagerly, then synchronize.
+    /// Execute calls `[lo, hi)` of a program eagerly, then synchronize.
     pub fn run_range(
         &self,
         program: &str,
@@ -455,17 +455,17 @@ impl Runtime {
         let Some(prog) = self.programs.get(program) else {
             bail!(Api, "no program `{program}`");
         };
-        let n = prog.dispatch_ranges.len();
+        let n = prog.call_ranges.len();
         if lo > hi || hi > n {
-            bail!(Api, "program `{program}`: dispatch range [{lo}, {hi}) outside 0..{n}");
+            bail!(Api, "program `{program}`: call range [{lo}, {hi}) outside 0..{n}");
         }
         let env = self.dense_env(env)?;
         self.ctx.bind_to_thread()?;
         if lo < hi {
-            let (l0, _) = prog.dispatch_ranges[lo];
-            let (_, l1) = prog.dispatch_ranges[hi - 1];
+            let (l0, _) = prog.call_ranges[lo];
+            let (_, l1) = prog.call_ranges[hi - 1];
             for l in &prog.launches[l0..l1] {
-                self.launch(l, &env).map_err(|e| Error::Dispatch {
+                self.launch(l, &env).map_err(|e| Error::Call {
                     context: l.ctx.clone(),
                     source: Box::new(e),
                 })?;
@@ -475,20 +475,20 @@ impl Runtime {
         Ok(())
     }
 
-    /// Per-dispatch GPU time in ms (eager, event-bracketed), minimum over
+    /// Per-call GPU time in ms (eager, event-bracketed), minimum over
     /// `iters` replays of the whole program. Note this attributes launch
-    /// gaps to the dispatch that follows them.
-    pub fn time_dispatches(
+    /// gaps to the call that follows them.
+    pub fn time_calls(
         &self,
         program: &str,
         env: &BTreeMap<String, u64>,
         iters: usize,
     ) -> Result<Vec<f32>> {
-        let n = self.dispatch_count(program)?;
+        let n = self.call_count(program)?;
         self.time_range(program, env, 0, n, iters)
     }
 
-    /// Same, for dispatches `[lo, hi)` only — replaying just that range, so
+    /// Same, for calls `[lo, hi)` only — replaying just that range, so
     /// a cut can be timed without the rest of the program.
     pub fn time_range(
         &self,
@@ -501,8 +501,8 @@ impl Runtime {
         let Some(prog) = self.programs.get(program) else {
             bail!(Api, "no program `{program}`");
         };
-        if lo > hi || hi > prog.dispatch_ranges.len() {
-            bail!(Api, "program `{program}`: dispatch range [{lo}, {hi}) outside 0..{}", prog.dispatch_ranges.len());
+        if lo > hi || hi > prog.call_ranges.len() {
+            bail!(Api, "program `{program}`: call range [{lo}, {hi}) outside 0..{}", prog.call_ranges.len());
         }
         let env = self.dense_env(env)?;
         self.ctx.bind_to_thread()?;
@@ -511,9 +511,9 @@ impl Runtime {
         let mut best = vec![f32::INFINITY; n];
         for _ in 0..iters.max(1) {
             events.record(0, &self.stream)?;
-            for (di, &(l0, l1)) in prog.dispatch_ranges[lo..hi].iter().enumerate() {
+            for (di, &(l0, l1)) in prog.call_ranges[lo..hi].iter().enumerate() {
                 for l in &prog.launches[l0..l1] {
-                    self.launch(l, &env).map_err(|e| Error::Dispatch {
+                    self.launch(l, &env).map_err(|e| Error::Call {
                         context: l.ctx.clone(),
                         source: Box::new(e),
                     })?;
@@ -541,7 +541,7 @@ impl Runtime {
         };
         let env = self.dense_env(env)?;
         if *captured != env {
-            bail!(Api, "graph for `{program}` was captured with different symbol values");
+            bail!(Api, "graph for `{program}` was captured with different var values");
         }
         self.ctx.bind_to_thread()?;
         let iters = iters.max(1);
@@ -560,28 +560,28 @@ impl Runtime {
         Ok(ts[iters / 2])
     }
 
-    /// Validate the caller's symbol values and densify them into manifest
-    /// symbol order — the index space every compiled expression uses.
+    /// Validate the caller's var values and densify them into manifest var
+    /// order — the index space every compiled expression uses.
     fn dense_env(&self, env: &BTreeMap<String, u64>) -> Result<Vec<u64>> {
         self.manifest
-            .symbols
+            .vars
             .iter()
-            .map(|(sym, decl)| {
-                let Some(&v) = env.get(sym) else {
-                    bail!(Api, "symbol `{sym}` not provided");
+            .map(|(var, decl)| {
+                let Some(&v) = env.get(var) else {
+                    bail!(Api, "var `{var}` not provided");
                 };
-                if v < decl.min || v > decl.max {
-                    bail!(Api, "symbol `{sym}` = {v} outside declared [{}, {}]", decl.min, decl.max);
+                if v < kern_manifest::types::Var::MIN || v > decl.max {
+                    bail!(Api, "var `{var}` = {v} outside declared [{}, {}]", kern_manifest::types::Var::MIN, decl.max);
                 }
                 Ok(v)
             })
             .collect()
     }
 
-    /// `sym=value` in manifest symbol order, for error messages.
+    /// `var=value` in manifest var order, for error messages.
     fn fmt_env(&self, env: &[u64]) -> String {
         self.manifest
-            .symbols
+            .vars
             .keys()
             .zip(env)
             .map(|(s, v)| format!("{s}={v}"))
@@ -589,7 +589,7 @@ impl Runtime {
             .join(", ")
     }
 
-    /// Execute one program with the given symbol values, then synchronize.
+    /// Execute one program with the given var values, then synchronize.
     pub fn run(&self, program: &str, env: &BTreeMap<String, u64>) -> Result<()> {
         let Some(prog) = self.programs.get(program) else {
             bail!(Api, "no program `{program}`");
@@ -602,9 +602,9 @@ impl Runtime {
     }
 
     /// Capture one program into an instantiated CUDA graph. Grid dims and
-    /// scalar args (symbol values included) are baked in at capture; input
+    /// scalar args (var values included) are baked in at capture; input
     /// buffer *contents* are read at replay, so per-step H2D writes stay
-    /// outside the graph and `run_captured` replays the whole dispatch list
+    /// outside the graph and `run_captured` replays the whole call list
     /// with one launch.
     pub fn capture(&mut self, program: &str, env: &BTreeMap<String, u64>) -> Result<()> {
         let Some(prog) = self.programs.get(program) else {
@@ -669,7 +669,7 @@ impl Runtime {
     /// Issue every launch of a compiled program onto the stream (no sync).
     fn replay(&self, prog: &CompiledProgram, env: &[u64]) -> Result<()> {
         for l in &prog.launches {
-            self.launch(l, env).map_err(|e| Error::Dispatch {
+            self.launch(l, env).map_err(|e| Error::Call {
                 context: l.ctx.clone(),
                 source: Box::new(e),
             })?;
@@ -678,7 +678,7 @@ impl Runtime {
     }
 
     fn launch(&self, l: &Launch, env: &[u64]) -> Result<()> {
-        // Materialize the slots; only symbol-dependent scalars are left to
+        // Materialize the slots; only var-dependent scalars are left to
         // compute, everything else was finished at load.
         let mut vals = Vec::with_capacity(l.slots.len());
         for s in &l.slots {

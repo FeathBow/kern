@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import schemaRaw from "../../../schema/manifest-v2.schema.json?raw";
+import schemaRaw from "../../../schema/manifest-v3.schema.json?raw";
 
 const schema: any = JSON.parse(schemaRaw);
 const defs: Record<string, any> = schema.$defs ?? {};
@@ -108,16 +108,16 @@ function fmtDefault(v: any): string {
 /* ------------------------------------------------------------- reference */
 
 const GROUPS: { label: string; names: string[] }[] = [
-  { label: "root", names: ["Manifest", "Meta"] },
+  { label: "root", names: ["Manifest", "Spec", "Module"] },
   {
     label: "declarations",
-    names: ["Symbol", "State", "Buffer", "Dim", "DType", "BufferClass"],
+    names: ["Var", "State", "Buffer", "Dim", "DType", "BufferKind", "Domain", "Bound"],
   },
   {
-    label: "kernels",
-    names: ["Kernel", "ParamType", "Impl", "Scratch", "Step", "StepArg"],
+    label: "ops",
+    names: ["Op", "ParamType", "Impl", "Scratch", "Launch", "LaunchArg"],
   },
-  { label: "programs", names: ["Program", "Dispatch", "Arg", "Expr"] },
+  { label: "programs", names: ["Call", "Arg", "Expr"] },
 ];
 
 // Future-proof: anything the schema gains that the curated groups don't
@@ -267,27 +267,27 @@ function WireDiagram() {
           className="wire-diagram"
           viewBox="0 0 1060 610"
           role="img"
-          aria-label="Structure of a kern manifest: one file containing symbols, states, buffers, kernels and programs; dispatches bind to kernel interfaces; implementations point at local or registry cubins."
+          aria-label="Structure of a kern manifest: one file containing vars, states, buffers, modules, ops and programs; calls bind to op interfaces; implementations launch entries of modules pinned by sha256, local or from a registry."
         >
           {/* manifest file */}
           <path className="box" d={sketch(42, 92, 230, 330)} />
           <text className="t-title" x={46} y={76}>
             manifest.json
           </text>
-          <text className="t-row" x={66} y={136}>
-            meta
+          <text className="t-row" x={66} y={130}>
+            vars
           </text>
-          <text className="t-row" x={66} y={176}>
-            symbols
-          </text>
-          <text className="t-row" x={66} y={216}>
+          <text className="t-row" x={66} y={166}>
             states
           </text>
-          <text className="t-row" x={66} y={256}>
+          <text className="t-row" x={66} y={202}>
             buffers
           </text>
-          <text className="t-row t-strong" x={66} y={296}>
-            kernels
+          <text className="t-row" x={66} y={238}>
+            modules
+          </text>
+          <text className="t-row t-strong" x={66} y={292}>
+            ops
           </text>
           <text className="t-row t-strong" x={66} y={336}>
             programs
@@ -299,7 +299,7 @@ function WireDiagram() {
           {/* kernel */}
           <path className="box" d={sketch(402, 72, 280, 230)} />
           <text className="t-title" x={420} y={102}>
-            kernel
+            op
           </text>
           <text className="t-row t-blue" x={420} y={136}>
             interface — typed params
@@ -312,10 +312,10 @@ function WireDiagram() {
             scratch — private
           </text>
           <text className="t-row-sm" x={434} y={232}>
-            steps[] · symbol · block · grid
+            launches[] · entry · block · grid
           </text>
           <text className="t-row-sm" x={434} y={258}>
-            cubin @ sha256
+            module @ sha256
           </text>
 
           {/* program */}
@@ -324,7 +324,7 @@ function WireDiagram() {
             program
           </text>
           <text className="t-row" x={790} y={186}>
-            dispatches[] — in order
+            calls[] — in order
           </text>
           <text className="t-row-sm t-blue" x={790} y={216}>
             attn(q, kv, out, tokens)
@@ -346,33 +346,33 @@ function WireDiagram() {
             hf:org/repo/path
           </text>
           <text className="t-note" x={432} y={556}>
-            impl sources · sha256 = identity, transport untrusted
+            modules · sha256 = identity, transport untrusted
           </text>
 
-          {/* containment: kernels -> kernel, programs -> program */}
+          {/* containment: ops -> op, programs -> program */}
           <path className="wire" d="M 274 292 C 320 280, 350 230, 398 196" />
           <path className="wire" d={head(400, 194, -34)} />
           <path className="wire" d="M 274 336 C 440 400, 620 396, 766 240" />
           <path className="wire" d={head(769, 236, -44)} />
 
-          {/* dispatch binds to interface */}
+          {/* call binds to interface */}
           <path className="wire wire-blue" d="M 786 210 C 740 190, 724 160, 690 138" />
           <path className="wire wire-blue" d={head(686, 136, -145)} />
           <text className="t-note t-blue" x={696} y={110}>
             binds to the interface
           </text>
 
-          {/* args reference buffers/symbols (over the top) */}
+          {/* args reference buffers/vars (over the top) */}
           <path
             className="wire wire-blue wire-dash"
             d="M 800 118 C 640 30, 420 26, 278 226"
           />
           <path className="wire wire-blue" d={head(276, 230, 125)} />
           <text className="t-note t-blue" x={330} y={40}>
-            args reference buffers &amp; symbols
+            args reference buffers &amp; vars
           </text>
 
-          {/* step cubin -> sources */}
+          {/* launch module -> sources */}
           <path className="wire" d="M 520 286 C 512 340, 508 400, 508 464" />
           <path className="wire" d={head(508, 468, 92)} />
           <path className="wire" d="M 560 286 C 640 350, 700 400, 736 464" />
@@ -391,7 +391,7 @@ function WireDiagram() {
 
 /* ------------------------------------------------------------------ page */
 
-const RAW_URL = "/schema/manifest-v2.schema.json";
+const RAW_URL = "/schema/manifest-v3.schema.json";
 const TYPES_URL =
   "https://github.com/pegainfer-project/kern/blob/master/crates/kern-manifest/src/types.rs";
 
@@ -421,7 +421,7 @@ export default function SchemaPage() {
         <section className="schema-hero">
           <p className="kicker">WIRE FORMAT · JSON SCHEMA 2020-12</p>
           <h1>
-            manifest <span className="v-chip">v2</span>
+            manifest <span className="v-chip">v3</span>
           </h1>
           <p className="hero-line">
             One JSON file is the entire contract between a model provider and the

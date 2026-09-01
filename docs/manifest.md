@@ -1,70 +1,139 @@
-# Manifest 格式（version 2）与 Verifier
+# Manifest 格式（schema_version 3）与 Verifier
 
-Model provider 交付 `manifest.json + kernels.cubin + weights`，runtime 负责：
+Model provider 交付 `manifest.json + kernels/ + weights`，runtime 负责：
 加载时像 rustc 一样苛刻地校验 manifest，运行时按声明闭眼执行。runtime
-不感知任何模型语义——它只会调度不透明的 kernel dispatch、按字节数供应不
-透明的 state、以及对一个封闭的标量表达式集合求值算 launch 几何。
+不感知任何模型语义——它只会调度不透明的 op 调用、按字节数供应不透明
+的 state、以及对一个封闭的标量表达式集合求值算 launch 几何。
+
+## 词汇表：每一层一个词，互不撞
+
+```
+programs.<name>[]            call     调用一个 op        {"op": "attn", "args": [...]}
+ops.<name>                   op       接口 + 实现        {"params": [...], "impl": {...}}
+ops.<name>.impl.launches[]   launch   起一次 module 入口 {"module": "argmax", "entry": "kern_argmax_partial"}
+modules.<name>               module   launch 钉住的工件  {"source": "argmax.cubin", "sha256": "…"}
+vars.<name>                  var      caller 每次调用供应的标量，有上界
+states.<name>                state    不透明持久内存，runtime 按字节供应
+buffers.<name>               buffer   有类型的张量：input / output / weight / workspace / carry
+```
+
+`call` 调 `op`，`op` 由若干 `launch` 实现，`launch` 起 `module` 里的
+`entry`。"kernel"这个词在 manifest 里不出现——它留给 CUDA 意义上的
+`__global__`（`kernels/` 目录、`kern kernels` 子命令说的都是 cubin）。
 
 ## 顶层结构
 
-顶层五段，全部名字唯一、引用必须解析、不允许未知字段：
+顶层平铺，全部名字唯一、引用必须解析、不允许未知字段：
 
-- `meta`：格式版本、模型标签（runtime 不赋予含义）。
-- `symbols`：runtime 每次调用时提供的标量（如 `tokens`、`pos`），声明
-  `min`/`max` 上下界，所有静态校验在界上进行，运行时拒绝越界值。
-- `states`：不透明持久状态。**runtime 只知道 `bytes_per_token` 和对齐**；
-  内部布局（每层偏移等）是 provider 生成器里的算式，以字面量参数传给
-  provider 自己的 kernel。
-- `buffers`：`dtype + shape + class`。shape 维度是常量或 symbol 名；
-  class 为 `input`（runtime 写入）/ `output`（runtime 读回）/ `weight`
-  （按名从权重文件绑定）/ `workspace`（runtime 规划，跨次执行不保留）/
-  `carry`（一个 program 写、另一个 program 读的交接棒，跨次执行保留；
-  谁先跑是 caller 契约，verifier 只要求它被某个 program 写到——投机解码
-  的 aux 隐状态逼出来的）。
-- `kernels`：**接口 + 实现分离**（v2 的核心，为 kernel 可插拔）。
+```json
+{ "schema_version": 3, "model": "qwen3.8-27b", "spec": {"block": 8, "mask_token": 248070},
+  "vars": …, "states": …, "buffers": …, "modules": …, "ops": …, "programs": … }
+```
+
+- `schema_version`：wire format 版本，只认 3。`model`：标签，runtime
+  不赋予含义。`spec`（可选）：投机解码的 caller 契约（draft 行数、mask
+  token），runtime 不解释，driver 读。
+- `vars`：caller 每次调用时提供的标量（如 `tokens`），声明 `max`，下界
+  恒为 1；所有静态校验在界上进行，运行时拒绝越界值。**会改变内存尺寸或
+  launch 几何的标量才是 var**；别的标量（temperature 之类）是数据，走
+  `[1]` 形状的 input buffer。
+- `states`：不透明持久内存。**runtime 只知道字节数**——`bytes_per_token`
+  （按 token 容量伸缩：paged KV）或 `bytes`（定长：GDN 的 conv + SSM
+  状态），二选一。内部布局是 provider 生成器里的算式，以字面量 offset
+  传给 provider 自己的 kernel。
+- `buffers`：`dtype + shape + kind`。shape 维度是常量或 var 名；kind 说
+  的是"谁供应、活多久"：`input`（runtime 写入）/ `output`（runtime 读回）
+  / `weight`（按名从权重文件绑定）/ `workspace`（runtime 规划，跨次执行
+  不保留）/ `carry`（一个 program 写、另一个 program 读的交接棒，跨次
+  执行保留；谁先跑是 caller 契约，verifier 只要求它被某个 program 写到
+  ——投机解码的 aux 隐状态逼出来的）。
+- `modules`：manifest 的依赖清单——每个 launch 钉住的代码工件：
+  `source`（本地文件名 `argmax.cubin`，或 registry ref
+  `hf:<org>/<repo>/<path>[@revision]`）+ `sha256`。**身份是 sha256，
+  source 只是标签**（registry ref 时兼做 URL）。
+- `ops`：**接口 + 实现分离**（为 kernel 可插拔）。
   - **接口**是调用点契约：类型化参数列表——`"in buffer<bf16>"` /
-    `"out buffer<fp8e4m3>"` / `"inout ptr"`（state 用）/ `"i32"`/`"u8"`
-    等；buffer/ptr 必须声明方向，方向驱动数据流校验。
+    `"out buffer<fp8e4m3>"` / `"inout state"` / `"i32"`/`"u8"` 等；
+    buffer/state 必须声明方向，方向驱动数据流校验。
   - **实现（`impl`）是可整体替换的微程序**：`scratch`（impl 私有工作区，
-    dtype+shape 声明，调用方看不见）+ `steps` 顺序 launch 列表。每个
-    step 有自己的 cubin 符号、launch ABI（`params`）、block/grid 几何
-    （grid 用下述表达式集合；可选 `shared_mem`，上限 227KB opt-in）、
-    可选 `cubin`（显示名）+ `sha256`（身份，写了 cubin 就必填），以及 `args` 连线：`{"arg": i}`
-    转发接口第 i 参 / `{"scratch": name, offset}` 接私有工作区 /
-    字面量标量（impl 私有常量）。多数 kernel 是单 step 恒等连线；
-    两段式 argmax、vLLM attention（unified + reduce_segments）这类
-    "一个逻辑核 = 多次 launch + 私有中间缓冲"整体折叠成一个 impl，
-    不再向调用方泄漏。
-- `programs`：每个 program（如 `prefill`/`decode`）是一段顺序 dispatch
-  列表：`kernel` 名 + 接口实参（buffer/state 实参可带字节 `offset`，
-  默认 0：kernel 收到 base+offset——provider 用它寻址融合 buffer 里的
-  视图如 qkv 的 q/k/v 切片、state 里的逐层区域，offset 是 provider
-  布局算术的字面量，runtime 只做加法）。launch 几何在 impl 里，不在
-  dispatch 里。grid 表达式是封闭集合：常量、`{"sym": s}`、
-  `{"ceil_div": [e, c]}`、`{"mul": [e, c]}`——这不是语言，是填空模板，
-  永远不会加控制流。
+    dtype+shape 声明，调用方看不见）+ `launches` 顺序 launch 列表。每个
+    launch：`module`（`modules` 表里的名字；挖矿来的只知道符号的 launch
+    可不写，runtime 在全部已装载模块里按参数布局消歧）、`entry`（module
+    里的入口点，或 `extern:<name>` 表示 runtime 内置——此时没有 module
+    也没有几何）、`params`（该 launch 自己的 ABI；**不写 = 同接口**）、
+    `block`/`grid`（grid 用下述表达式集合；可选 `shared_mem`，上限 227KB
+    opt-in）、`args` 连线：`{"param": i}` 转发接口第 i 参 /
+    `{"scratch": name}` 接私有工作区 / 字面量标量（impl 私有常量）；
+    **不写 = 按序转发接口参数**。所以一个"ABI 即接口"的单 launch op 只
+    需要 `module`、`entry`、`block`、`grid` 四个字段；两段式 argmax、
+    vLLM attention（unified + reduce_segments）这类"一个逻辑算子 = 多次
+    launch + 私有中间缓冲"整体折叠成一个 impl，不向调用方泄漏。
+- `programs`：每个 program（如 `prefill`/`decode`）是一段顺序 call 列表：
+  `op` 名 + 接口实参（buffer/state 实参可带字节 `offset`，默认 0：kernel
+  收到 base+offset——provider 用它寻址融合 buffer 里的视图如 qkv 的
+  q/k/v 切片、state 里的逐层区域，offset 是 provider 布局算术的字面量，
+  runtime 只做加法；`label` 只给人看）。launch 几何在 impl 里，不在 call
+  里。
+
+**表达式**是封闭集合：常量、var 名（裸字符串，和 shape 一个写法）、
+`{"ceil_div": [e, c]}`、`{"mul": [e, c]}`——这不是语言，是填空模板，永远
+不会加控制流。grid、`shared_mem`、domain 的界都用它；call 的标量实参
+除 `{"var": "tokens"}` 和字面量外还可以是 `{"expr": {"mul": ["tokens", 32]}}`
+（prefill 逼出来的：head-norm 的"总 head 数"参数 = tokens×heads）。call
+实参里 var 要带 `var` 标签，因为它和 buffer 名混在一起。
+
+```json
+"ops": {
+  "gemm":       { "params": ["in buffer<bf16>", "in buffer<bf16>", "out buffer<bf16>", "i32", "i32", "i32"],
+                  "impl": { "launches": [{ "entry": "extern:cublaslt_bf16_tn" }] } },
+  "argmax_row": { "params": ["in buffer<bf16>", "out buffer<i64>"],
+                  "impl": { "scratch": { "pmax": {"dtype": "f32", "shape": [1, 64]}, "pidx": {"dtype": "i32", "shape": [1, 64]} },
+                            "launches": [
+                              { "module": "argmax", "entry": "kern_argmax_partial_bf16",
+                                "params": ["in buffer<bf16>", "out buffer<f32>", "out buffer<i32>", "i32"],
+                                "block": [1024, 1, 1], "grid": [1, 64, 1],
+                                "args": [{"param": 0}, {"scratch": "pmax"}, {"scratch": "pidx"}, {"i32": 248320}] },
+                              { "module": "argmax", "entry": "kern_argmax_final_i64",
+                                "params": ["in buffer<f32>", "in buffer<i32>", "out buffer<i64>", "i32"],
+                                "block": [64, 1, 1], "grid": [1, 1, 1],
+                                "args": [{"scratch": "pmax"}, {"scratch": "pidx"}, {"param": 1}, {"i32": 64}] } ] } }
+},
+"programs": {
+  "decode": [
+    { "label": "embed", "op": "embedding", "args": [{"buf": "token_ids"}, {"buf": "model.embed_tokens.weight"}, {"buf": "residual"}, {"var": "tokens"}, {"i32": 5120}] },
+    …
+    { "label": "sample", "op": "argmax_row", "args": [{"buf": "logits"}, {"buf": "next_token"}] } ] }
+```
+
+**ABI 常量属于 impl，不属于接口。** 挖矿来的 kernel 带着一堆
+stride/flag/eps 参数；它们对一个模型是常量。生成器的 `normalize` 后处理
+（`tools/kern_manifest.py`）把"每一次 call 都传同一个字面量"的接口标量
+折进 impl 的 launch 字面量，接口只剩会变的东西：qwen3.8 的 `attn` 从 28
+参降到 10 参（全是 buffer/state），`silu_mul` 只剩 `(out, in)`。这让接口
+真正是契约——换 impl 的人自带自己的常量，调用点一字不动。同一个后处理
+也把 launch 里的内联 `cubin/sha256` 提升到 `modules` 表、抹掉恒等连线和
+重复的 `params`。
 
 **Domain（buffer 内容的先验，可选）**：`buffers.<name>.domain` 声明"这个
-buffer 里的值合法长什么样"。挂在 buffer 上而不是 kernel 接口上——知道
+buffer 里的值合法长什么样"。挂在 buffer 上而不是 op 接口上——知道
 `buffer<i32>` 是页表而不是激活的是接模型的人，不是写 kernel 的人；换
 impl 不必重写先验，kernel package 零改动。两种形式互斥：
 
-- `{"min": lo, "max": hi}`：闭区间（和 `symbols` 的 min/max 同一口径），
-  端点可以是整数、浮点或同一封闭表达式集合（`{"sym": "tokens"}`），任一
-  端可省略；
-- `{"index_into": "<buffer|state>", "unit": n}`：每个元素是目标 buffer
-  的**行**下标或目标 state 的 **token 槽**下标，`unit`（默认 1）是每个
-  下标覆盖的行/槽数（paged KV 的 block_table 一个下标覆盖 16 个 token）。
+- `{"min": lo, "max": hi}`：闭区间，端点可以是整数、浮点或同一封闭表达式
+  集合（`"tokens"`），任一端可省略；
+- `{"index_into": "<buffer|state>", "stride": n}`：每个元素是目标 buffer
+  的**行**下标或目标 state 的 **token 槽**下标，下标 i 指向第 `i×stride`
+  行/槽（默认 1；paged KV 的 block_table 一个下标覆盖 16 个 token）。
 
 附加 `"monotone": true` 要求非递减序列（`cu_seqlens` 这类前缀和）。
 
 ```json
-"token_ids":    {"dtype": "i64", "shape": ["tokens"], "class": "input",
+"token_ids":    {"dtype": "i64", "shape": ["tokens"], "kind": "input",
                  "domain": {"index_into": "model.embed_tokens.weight"}},
-"block_table":  {"dtype": "i32", "shape": [256], "class": "input",
-                 "domain": {"index_into": "kv", "unit": 16}},
-"cu_seqlens_q": {"dtype": "i32", "shape": [2], "class": "input",
-                 "domain": {"min": 0, "max": {"sym": "tokens"}, "monotone": true}}
+"block_table":  {"dtype": "i32", "shape": [256], "kind": "input",
+                 "domain": {"index_into": "kv", "stride": 16}},
+"cu_seqlens_q": {"dtype": "i32", "shape": [2], "kind": "input",
+                 "domain": {"min": 0, "max": "tokens", "monotone": true}}
 ```
 
 它是一元的（只说一个 buffer，不表达 buffer 之间的关系）、是先验不是行为
@@ -76,80 +145,99 @@ host 写入（O(n)，免费），`kern test` 据此为整数 buffer 合成合法
 有限值，attest 自己决定分布。整数 buffer 不写 = attest 跳过它的 fuzz 并
 在报告里列为 unfuzzed。
 
-**可插拔**：换一个 kernel 的实现 = 只改它的 `impl` 块（可能带上新 cubin
-文件），接口、程序连线、其余 manifest 一字不动；verifier 静态把关新
+**可插拔**：换一个 op 的实现 = 只改它的 `impl` 块（可能在 `modules` 里
+多一行），接口、程序连线、其余 manifest 一字不动；verifier 静态把关新
 impl 与接口的自洽（方向、dtype、scratch 数据流），runtime 加载时用
-`cuFuncGetParamInfo` 比对每个 step 声明的 ABI，`sha256` 钉住工件。这
+`cuFuncGetParamInfo` 比对每个 launch 声明的 ABI，`sha256` 钉住工件。这
 就是"kernel 市场"的交换单元。
 
-**cubin 的身份是 sha256，名字只是标签。** step 写了 `cubin` 就必须带
-`sha256`；runtime 把 kernel 目录里的每个 `.cubin` 都装载并算哈希，按
-哈希给 step 找模块，**从不按文件名找**。所以一个目录可以同时放一个核的
-每一个版本（`gemm8-3f9a1c2d4e5b.cubin`、`gemm8-9b0c….cubin`，
-`tools/extract_kernels.sh` 就这么落地：显示名 + sha 前 12 位），上一个
-commit 的 manifest 和这一个都能从同一个目录解析——kern-test 的 A/B 正
-是靠这个。推论：**换编译器、换 flag、改一行源码 = 换核**，哈希不同就是
-另一个工件，manifest 钉的是生成它时在场的那一次 build，两个 build 数值
-上是否等价由 kern-test 说了算，不由名字说了算。没写 `cubin` 的 step
-（挖矿来的、只给符号）在全部已装载模块里按参数布局消歧。
+**module 的身份是 sha256，source 只是标签。** runtime 把 kernel 目录里的
+每个工件都装载并算哈希，按哈希给 launch 找模块，**从不按文件名找**。所以
+一个目录可以同时放一个核的每一个版本（`gemm8-3f9a1c2d4e5b.cubin`、
+`gemm8-9b0c….cubin`，`tools/extract_kernels.sh` 就这么落地：module 名 +
+sha 前 12 位），上一个 commit 的 manifest 和这一个都能从同一个目录解析
+——`kern test` 的 A/B 正是靠这个。推论：**换编译器、换 flag、改一行源码
+= 换核**，哈希不同就是另一个工件，manifest 钉的是生成它时在场的那一次
+build，两个 build 数值上是否等价由 `kern test` 说了算，不由名字说了算。
 
-**Registry ref**：step 的 `cubin` 除本地文件名外可写
-`hf:<org>/<repo>/<path>[@revision]`（revision 默认 `main`），此时
-`sha256` 必填——runtime 加载时把它物化进内容寻址缓存
+**Registry ref**：`source` 写 `hf:<org>/<repo>/<path>[@revision]`
+（revision 默认 `main`）时 runtime 加载时把它物化进内容寻址缓存
 （`$KERN_CACHE_DIR` 或 `~/.cache/kern` 下 `blobs/<sha256>`，命中免网
 络），下载后先验哈希再落盘，**传输通道零信任**：名字只是 URL，身份是
 哈希。工件可以是裸 cubin，也可以是 host 共享库（如 HF kernel hub 的
 torch 扩展 .so）：runtime 剖开 ELF 取 `.nv_fatbin` 里的设备代码逐容器
-装载，torch/python 绑定整个丢弃，符号 + ABI 逐位核对照旧。实证：
-`examples/qwen3-4b.json` 的 `silu_mul` impl 直接指向
+装载，torch/python 绑定整个丢弃，entry + ABI 逐位核对照旧。实证：
+`examples/qwen3-4b.json` 的 `silu_mul` impl 指向 module `activation` =
 `hf:kernels-community/activation`（PyTorch 生态在用的原装包），输出与
 挖矿基线逐字节一致。
 
 **Wire format 的 ground truth 是 `kern-manifest` 的 Rust 类型**（parser
-即法律）；`schema/manifest-v2.schema.json` 是它生成的可发布投影
+即法律）；`schema/manifest-v3.schema.json` 是它生成的可发布投影
 （`cargo run -p kern-manifest --example gen_schema`，CI golden 检查防
 漂移），给生成器/agent 当形状契约用。
 
 Manifest 是**生成产物**（类比 `Cargo.lock`）：provider 手写的是生成器，
-不是 manifest。样例见 `tools/gen_qwen3_decode.py` →
-`examples/qwen3-4b.json`（Qwen3-4B，两个 program：`prefill` 433 dispatch
-/ `decode` 436 dispatch，真实挖矿 ABI）与 `examples/qwen3-4b-dspark.json`
-（同上 + DSpark 投机解码：六个 program，target+draft 权重同处一份
-manifest，见 [spec-decode.md](spec-decode.md)）。
+不是 manifest。生成器把一切写长（每个 launch 带完整 ABI 和连线、每次
+call 带 kernel 要的全部标量、工件内联），最后过 `normalize`
+（`tools/kern_manifest.py`）得到最小的 wire form——像 linker 一样，不改变
+运行的东西。样例见 `tools/gen_qwen3_decode.py` → `examples/qwen3-4b.json`
+（Qwen3-4B，两个 program：`prefill` 433 call / `decode` 436 call，真实
+挖矿 ABI）与 `examples/qwen3-4b-dspark.json`（同上 + DSpark 投机解码：
+六个 program，target+draft 权重同处一份 manifest，见
+[spec-decode.md](spec-decode.md)）。
 
-标量实参除 symbol 和字面量外还可以是表达式（`{"expr": {"mul":
-["tokens", 32]}}`，同一封闭表达式语言）——prefill 逼出来的：head-norm
-的"总 head 数"参数 = tokens×heads，decode 恒 tokens=1 时它伪装成字面量。
+**故意留下的重复**：64 层展开成 64×26 个 call（decode 742 个 call 里
+737 个是逐层模板）——加 `repeat` 就是加控制流，attest 按 call 切、
+verifier 按 call 查都靠展开；weight buffer 的 dtype/shape 与 safetensors
+header 重复——没有权重文件也要能 verify。冗余在 manifest 不在 schema，
+"源码"是生成器。
 
 ## Verifier（`kern-manifest`）
 
 `verify()` 收集全部错误一次报告（`VerifyErrors`）：
 
-1. 格式版本；
-2. symbol 界自洽；
-3. state 尺寸非零、对齐为 2 的幂；
-4. buffer shape 解析、字节数在 symbol 上界下不溢出；domain（若有）自洽：
+1. `schema_version`；
+2. var `max ≥ 1`；
+3. state 恰有 `bytes_per_token` / `bytes` 之一非零；
+4. buffer shape 解析、字节数在 var 上界下不溢出；domain（若有）自洽：
    界的类型对得上 dtype、`index_into` 指向存在的 buffer/state、
    `index_into` 与 min/max 互斥、`monotone` 只许一维、min ≤ max 在
-   symbol 两端成立；
-5. kernel impl 逐 step：block 不超 CUDA 限制、grid 在 symbol 上界不超
-   CUDA 限制/下界不为零、`sha256` 形状且必须伴随 `cubin`、step args 与
-   step params 数量/逐位类型匹配；
-6. impl 与接口的自洽：step 不得写穿接口 `in` 参、接口 `out` 参必须被某个
-   step 写到、scratch dtype/offset 对界检查 + 跨 step 数据流（禁止读未写
-   的 scratch）、未使用的 scratch 拒绝；
-7. dispatch：kernel 引用、实参与**接口**参数逐位匹配（dtype 精确匹配、
-   state 只能接 `ptr`、symbol/表达式的取值范围必须装进标量参数类型、
-   offset 对齐且在界内）；
-8. 逐 program 数据流：禁止读未写（read-before-write）、禁止写 input/
+   var 两端成立；
+5. module：`sha256` 64 位 hex、`source` 非空、registry ref 语法；
+6. op impl 逐 launch：`module` 可解析；`extern:` 入口没有 module 也没有
+   几何，其余必须有 block/grid；block 不超 CUDA 限制、grid 在 var 上界
+   不超 CUDA 限制/下界不为零；launch args 与 launch params（缺省 = 接口）
+   数量/逐位类型匹配；
+7. impl 与接口的自洽：launch 不得写穿接口 `in` 参、接口 `out` 参必须被
+   某个 launch 写到、scratch dtype + 跨 launch 数据流（禁止读未写的
+   scratch）、未使用的 scratch 拒绝；
+8. call：op 引用、实参与**接口**参数逐位匹配（dtype 精确匹配、state 只
+   能接 `state`、var/表达式的取值范围必须装进标量参数类型、offset 对齐
+   且在界内）；
+9. 逐 program 数据流：禁止读未写（read-before-write）、禁止写 input/
    weight；output / carry 必须被**某个** program 写到（prefill 这类只落
    state 的 program 合法地不写任何 output；carry 在每个 program 内视为
    已写——它的生产者是另一个 program）；
-9. 拒绝一切未使用的声明。
+10. 拒绝一切未使用的声明（buffer / op / module / state / var）。
 
-反序列化层已拒绝：未知字段、重复名字、非法参数类型串。
+反序列化层已拒绝：未知字段（包括实参对象里的未知键）、重复名字、非法
+参数类型串。
 
 **信任边界**：verifier 证明的是"声明自洽"，不是 kernel 行为。谎报自己
 读写范围的 cubin 在边界之内被信任（debug 路径可用 compute-sanitizer 兜
 底）。加载 cubin 后用 `cuFuncGetParamInfo` 比对参数个数/字节布局属于
-runtime crate 的 phase-2 校验（`ParamType::size_bytes` 为此预留）。
+runtime crate 的 phase-2 校验。
+
+## 从 v2 到 v3
+
+命名：每一层一个词（上表）；`symbols`→`vars`（它每次调用都变，不是
+const，也不是 shape 意义上的 dim）、`kernels`→`ops`、`steps`→`launches`、
+`symbol`→`entry`、`cubin`→`module`（可以是 .so）、`dispatches`→`calls`、
+`{"arg"}`→`{"param"}`、`{"sym"}`→`{"var"}`、`class`→`kind`、
+`inout ptr`→`inout state`、`unit`→`stride`、`bytes_fixed`→`bytes`、`meta`
+拆平到顶层、`version`→`schema_version`。
+
+结构：`modules` 表取代逐 launch 的 `cubin+sha256`；`Program` 单字段包装
+拆掉；launch 的 `params`/`args` 有缺省；`extern:` 不写几何；ABI 常量折进
+impl。删掉从没被读过的字段：`states.*.align`、`symbols.*.min`、scratch
+实参的 `offset`、`u32` 标量。

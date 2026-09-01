@@ -21,7 +21,7 @@ It was never supposed to work this way.
 A model ships as three files:
 
 ```
-manifest.json     one typed declaration — buffers, kernels, programs
+manifest.json     one typed declaration — buffers, ops, programs
 kernels/          compiled device code, from anywhere
 weights
 ```
@@ -41,13 +41,18 @@ One line of the manifest points at a kernel package on the Hugging Face
 hub — the stock torch extension the PyTorch ecosystem uses:
 
 ```diff
-- "symbol": "_ZN4vllm18act_and_mul_kernel…"
-+ "cubin":  "hf:kernels-community/activation/…/_activation_320b408.abi3.so",
-+ "sha256": "73748b54…b1fe49aa",
+  "silu_mul": { "params": ["out buffer<bf16>", "in buffer<bf16>"],
+    "impl": { "launches": [{
+-     "entry": "_ZN4vllm18act_and_mul_kernel…packed_silu_kernel…",
++     "module": "activation",
++     "entry": "_ZN4vllm18act_and_mul_kernel…",
+  "modules": {
++   "activation": { "source": "hf:kernels-community/activation/…/_activation_320b408.abi3.so",
++                   "sha256": "73748b54…b1fe49aa" }
 ```
 
 A runtime with no torch and no Python fetched it, verified it, ran it.
-Output: byte-identical. Dispatches touched: zero.
+Output: byte-identical. Calls touched: zero.
 
 And:
 
@@ -102,7 +107,7 @@ it from `kern.toml`); what `kern test` measures and how it decides is in
 
 The wire format is one JSON Schema, generated from the code and
 golden-checked in CI:
-[`schema/manifest-v2.schema.json`](schema/manifest-v2.schema.json)
+[`schema/manifest-v3.schema.json`](schema/manifest-v3.schema.json)
 · [rendered](https://kern-baa.pages.dev/schema/).
 
 | Path | What it is |

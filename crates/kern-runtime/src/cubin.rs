@@ -27,35 +27,28 @@ pub(crate) fn param_sizes(func: sys::CUfunction) -> Result<Vec<usize>> {
     }
 }
 
-/// Materialize every registry ref named by a manifest step into the local
-/// cache. The returned map is keyed by the full ref string, so per-step
-/// cubin pinning matches registry artifacts like any local file name.
+/// Materialize every registry ref in the manifest's `modules` table into the
+/// local cache. The returned map is keyed by the full ref string, so module
+/// pinning matches registry artifacts like any local file name.
 pub(crate) fn fetch_registry_cubins(manifest: &Manifest) -> Result<BTreeMap<String, PathBuf>> {
     let mut remote = BTreeMap::new();
-    for (name, k) in &manifest.kernels {
-        for (si, st) in k.imp.steps.iter().enumerate() {
-            let Some(reg) = st.cubin.as_deref().and_then(RegistryRef::parse) else {
-                continue;
-            };
-            let reg = reg.map_err(|e| Error::Manifest(format!("kernel `{name}` step #{si}: {e}")))?;
-            let cb = st.cubin.as_deref().unwrap();
-            if remote.contains_key(cb) {
-                continue;
-            }
-            // The verifier enforces sha256 on registry refs.
-            let sha = st.sha256.as_deref().ok_or_else(|| {
-                Error::Manifest(format!("kernel `{name}` step #{si}: registry cubin without sha256"))
-            })?;
-            let path = fetch_registry_cubin(&reg, sha)?;
-            remote.insert(cb.to_string(), path);
+    for (name, md) in &manifest.modules {
+        let Some(reg) = RegistryRef::parse(&md.source) else {
+            continue;
+        };
+        let reg = reg.map_err(|e| Error::Manifest(format!("module `{name}`: {e}")))?;
+        if remote.contains_key(&md.source) {
+            continue;
         }
+        let path = fetch_registry_cubin(&reg, &md.sha256)?;
+        remote.insert(md.source.clone(), path);
     }
     Ok(remote)
 }
 
 /// One loaded device module: the hash that identifies it (what a manifest
-/// step pins), a label for humans (the file name it came from, or the
-/// registry ref), and the driver handle.
+/// `modules` entry pins), a label for humans (the file name it came from, or
+/// the registry ref), and the driver handle.
 pub(crate) struct LoadedModule {
     pub sha: String,
     pub label: String,
@@ -66,7 +59,7 @@ pub(crate) struct LoadedModule {
 /// File names are labels only: a kernel dir may hold every version of a
 /// kernel ever built (`gemm8-3f9a1c2d4e5b.cubin`, `gemm8-9b0c…`) and each
 /// manifest resolves to the one it pins. Two files with the same bytes load
-/// once. Local files load in name order so unpinned-symbol resolution is
+/// once. Local files load in name order so unpinned-entry resolution is
 /// deterministic; registry artifacts follow.
 pub(crate) fn load_all_modules(
     kernels_dir: &Path,
@@ -227,7 +220,7 @@ const EM_CUDA: u16 = 190;
 /// from the HF kernel hub — has its device code embedded in `.nv_fatbin`;
 /// the host half of the .so (torch/python bindings) is dead weight to kern,
 /// so each embedded fatbin container is loaded on its own and the usual
-/// symbol + param-layout resolution picks the right function out.
+/// entry + param-layout resolution picks the right function out.
 fn load_device_modules(path: &Path) -> Result<Vec<sys::CUmodule>> {
     let bytes = std::fs::read(path)
         .map_err(|e| Error::KernelArtifact(format!("reading {}: {e}", path.display())))?;

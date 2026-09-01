@@ -67,6 +67,9 @@ import re
 import struct
 import subprocess
 import sys
+
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
+from kern_manifest import normalize  # noqa: E402
 from handwritten import hw  # tools/handwritten.py: build + pin handwritten cubins
 
 # --- model geometry (config.json; asserted against the capture below)
@@ -460,16 +463,21 @@ def check_decode(by):
 
 
 # ---------------------------------------------------------------- builders
-def sym(s):
-    return {"sym": s}
+def var(s):
+    return {"var": s}
+
+
+def _e(e):
+    """Expression form of a var arg: shapes/grids name a var bare."""
+    return e["var"] if isinstance(e, dict) and "var" in e else e
 
 
 def mul(e, c):
-    return {"mul": [e, c]}
+    return {"mul": [_e(e), c]}
 
 
 def cdiv(e, c):
-    return {"ceil_div": [e, c]}
+    return {"ceil_div": [_e(e), c]}
 
 
 def expr(e):
@@ -500,20 +508,20 @@ def u8(v):
     return {"u8": v}
 
 
-def d(label, kernel, args):
-    return {"label": label, "kernel": kernel, "args": args}
+def d(label, op, args):
+    return {"label": label, "op": op, "args": args}
 
 
 def a(i):
-    return {"arg": i}
+    return {"param": i}
 
 
-def scr(name, off=0):
-    return {"scratch": name, "offset": off} if off else {"scratch": name}
+def scr(name):
+    return {"scratch": name}
 
 
 def step(symbol, params, block, grid, args, shared_mem=None, cubin=None, sha256=None):
-    s = {"symbol": symbol, "params": params, "block": block, "grid": grid, "args": args}
+    s = {"entry": symbol, "params": params, "block": block, "grid": [_e(g) for g in grid], "args": args}
     if shared_mem is not None:
         s["shared_mem"] = shared_mem
     if cubin is not None:
@@ -525,7 +533,7 @@ def step(symbol, params, block, grid, args, shared_mem=None, cubin=None, sha256=
 
 def single(symbol, params, block, grid, shared_mem=None, cubin=None, sha256=None):
     return {"params": params,
-            "impl": {"steps": [step(symbol, params, block, grid, [a(i) for i in range(len(params))],
+            "impl": {"launches": [step(symbol, params, block, grid, [a(i) for i in range(len(params))],
                                     shared_mem, cubin, sha256)]}}
 
 
@@ -534,9 +542,9 @@ DOMAINS = {
     "token_ids": TOKEN_DOMAIN,
     "positions": {"index_into": "rope.cos"},
     "slot_mapping": {"index_into": "kv"},
-    "block_table": {"index_into": "kv", "unit": BLOCK_SIZE},
+    "block_table": {"index_into": "kv", "stride": BLOCK_SIZE},
     "seq_lens": {"min": 1},
-    "cu_seqlens_q": {"min": 0, "max": {"sym": "tokens"}, "monotone": True},
+    "cu_seqlens_q": {"min": 0, "max": "tokens", "monotone": True},
     "next_token": TOKEN_DOMAIN,
     "kv_scales": {"min": 0.0},
 }
@@ -548,7 +556,7 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
     """`spec` (from --spec): {"src": bs=1 launch records of the speculative
     path, "pins": {tag: (cubin, sha)}, "attn_draft": DSpark's pinned
     non-causal unified-attention step} — adds the DFlash2 programs."""
-    T = sym("tokens")
+    T = var("tokens")
     # GDN state layout: one page per layer (Stage 1) or 8 checkpoint pages
     # per layer under speculation; the kernels' page stride is a constexpr
     if spec:
@@ -563,14 +571,14 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
         g = GDN_LAYERS.index(i)
         return SPEC_BLOCK * g + 1 if spec else g + 1
     buffers = {
-        "token_ids": {"dtype": "i64", "shape": ["tokens"], "class": "input"},
-        "positions": {"dtype": "i64", "shape": ["tokens"], "class": "input"},
-        "slot_mapping": {"dtype": "i64", "shape": ["tokens"], "class": "input"},
-        "block_table": {"dtype": "i32", "shape": [BLOCK_TABLE_LEN], "class": "input"},
-        "seq_lens": {"dtype": "i32", "shape": [1], "class": "input"},
-        "cu_seqlens_q": {"dtype": "i32", "shape": [2], "class": "input"},
-        "logits": {"dtype": "bf16", "shape": [1, VOCAB], "class": "workspace"},
-        "next_token": {"dtype": "i64", "shape": [1], "class": "output"},
+        "token_ids": {"dtype": "i64", "shape": ["tokens"], "kind": "input"},
+        "positions": {"dtype": "i64", "shape": ["tokens"], "kind": "input"},
+        "slot_mapping": {"dtype": "i64", "shape": ["tokens"], "kind": "input"},
+        "block_table": {"dtype": "i32", "shape": [BLOCK_TABLE_LEN], "kind": "input"},
+        "seq_lens": {"dtype": "i32", "shape": [1], "kind": "input"},
+        "cu_seqlens_q": {"dtype": "i32", "shape": [2], "kind": "input"},
+        "logits": {"dtype": "bf16", "shape": [1, VOCAB], "kind": "workspace"},
+        "next_token": {"dtype": "i64", "shape": [1], "kind": "output"},
     }
     ws = {
         "residual": ["tokens", HIDDEN], "x": ["tokens", HIDDEN], "y": ["tokens", HIDDEN],
@@ -590,13 +598,13 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
         "gate_up": ["tokens", 2 * FFN], "act": ["tokens", FFN],
     }
     for name, shape in ws.items():
-        buffers[name] = {"dtype": "bf16", "shape": shape, "class": "workspace"}
+        buffers[name] = {"dtype": "bf16", "shape": shape, "kind": "workspace"}
     for name, shape in {"g": ["tokens", GDN_V_HEADS], "beta": ["tokens", GDN_V_HEADS],
                         "g_cum": ["tokens", GDN_V_HEADS], "A": ["tokens", GDN_V_HEADS, FLA_CHUNK]}.items():
-        buffers[name] = {"dtype": "f32", "shape": shape, "class": "workspace"}
+        buffers[name] = {"dtype": "f32", "shape": shape, "kind": "workspace"}
 
     def weight(name, shape, dtype="bf16"):
-        buffers[name] = {"dtype": dtype, "shape": shape, "class": "weight"}
+        buffers[name] = {"dtype": dtype, "shape": shape, "kind": "weight"}
 
     weight("model.embed_tokens.weight", [VOCAB, HIDDEN])
     weight("lm_head.weight", [VOCAB, HIDDEN])
@@ -634,17 +642,17 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
         buffers.update({
             # caller contract: accepted tokens of the previous round (anchor
             # + accepted drafts), selects the SSM slot / conv offset to resume from
-            "num_accepted_tokens": {"dtype": "i32", "shape": [1], "class": "input"},
-            "draft_block_table": {"dtype": "i32", "shape": [D_TABLE_LEN], "class": "input"},
-            "anchor_token": {"dtype": "i64", "shape": [1], "class": "input"},
+            "num_accepted_tokens": {"dtype": "i32", "shape": [1], "kind": "input"},
+            "draft_block_table": {"dtype": "i32", "shape": [D_TABLE_LEN], "kind": "input"},
+            "anchor_token": {"dtype": "i64", "shape": [1], "kind": "input"},
             # target hidden states at the 5 taps, projected by fc: written by
             # prefill / decode_spec / verify, read by draft_precompute
-            "fc_out": {"dtype": "bf16", "shape": ["tokens", HIDDEN], "class": "carry"},
-            "verify_tokens": {"dtype": "i64", "shape": [SPEC_BLOCK], "class": "output"},
-            "draft_tokens": {"dtype": "i64", "shape": [DRAFT_TOKENS], "class": "output"},
-            "logits_blk": {"dtype": "bf16", "shape": [SPEC_BLOCK, VOCAB], "class": "workspace"},
-            "cand_ids": {"dtype": "i64", "shape": [DRAFT_TOKENS, SEL_K], "class": "workspace"},
-            "cand_vals": {"dtype": "f32", "shape": [DRAFT_TOKENS, SEL_K], "class": "workspace"},
+            "fc_out": {"dtype": "bf16", "shape": ["tokens", HIDDEN], "kind": "carry"},
+            "verify_tokens": {"dtype": "i64", "shape": [SPEC_BLOCK], "kind": "output"},
+            "draft_tokens": {"dtype": "i64", "shape": [DRAFT_TOKENS], "kind": "output"},
+            "logits_blk": {"dtype": "bf16", "shape": [SPEC_BLOCK, VOCAB], "kind": "workspace"},
+            "cand_ids": {"dtype": "i64", "shape": [DRAFT_TOKENS, SEL_K], "kind": "workspace"},
+            "cand_vals": {"dtype": "f32", "shape": [DRAFT_TOKENS, SEL_K], "kind": "workspace"},
         })
         for name, shape in {
             "a_c": ["tokens", GDN_V_HEADS], "b_c": ["tokens", GDN_V_HEADS],   # contiguous a/b for the T=8 recurrent kernel
@@ -654,7 +662,7 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
             "hidden_r": [DRAFT_TOKENS, SEL_RANK], "succ_g": [DRAFT_TOKENS * SEL_K, SEL_RANK],
             "pred_g": [DRAFT_TOKENS * SEL_K, SEL_RANK], "pred_anchor": [1, SEL_RANK],
         }.items():
-            buffers[name] = {"dtype": "bf16", "shape": shape, "class": "workspace"}
+            buffers[name] = {"dtype": "bf16", "shape": shape, "kind": "workspace"}
         weight("gdn.spec_line_index", [64], "i32")
         weight("gdn.spec_slots", [len(GDN_LAYERS), SPEC_BLOCK], "i32")
         weight("gdn.one", [1], "i32")
@@ -711,7 +719,7 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
                  "out buffer<f32>", "i32", "i32", "i32", "i32", "f32"] + I2
     LN_IFACE = LN_PARAMS[:4] + LN_PARAMS[5:]
     UNIFIED_PARAMS = [
-        "out buffer<bf16>", "in buffer<bf16>", "inout ptr", "inout ptr",
+        "out buffer<bf16>", "in buffer<bf16>", "inout state", "inout state",
         "in buffer<i32>", "in buffer<i32>", "f32",
         "in buffer<f32>", "in buffer<f32>", "f32", "f32",
         "i64", "i64", "i64", "i64", "i64", "i64",
@@ -729,7 +737,7 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
             "params": LN_IFACE,
             "impl": {
                 "scratch": {"rstd": {"dtype": "f32", "shape": rows_shape}},
-                "steps": [step(TRITON["layer_norm"], LN_PARAMS, blk("layer_norm", src), grid,
+                "launches": [step(TRITON["layer_norm"], LN_PARAMS, blk("layer_norm", src), grid,
                                [a(0), a(1), a(2), a(3), scr("rstd")] + [a(i) for i in range(4, 11)],
                                cubin=cubin, sha256=sha)],
             },
@@ -772,7 +780,7 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
             "impl": {
                 "scratch": {"pmax": {"dtype": "f32", "shape": [1, 64]},
                             "pidx": {"dtype": "i32", "shape": [1, 64]}},
-                "steps": [
+                "launches": [
                     step("kern_argmax_partial_bf16",
                          ["in buffer<bf16>", "out buffer<f32>", "out buffer<i32>", "i32"],
                          [1024, 1, 1], [1, 64, 1], [a(0), scr("pmax"), scr("pidx"), a(2)],
@@ -786,7 +794,7 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
         },
         # --- GDN prefill chain (vLLM triton backend, FLA chunk kernels)
         "conv_fwd": tri("conv_fwd",
-                        ["in buffer<bf16>", "in buffer<bf16>", "inout ptr", "in buffer<i32>",
+                        ["in buffer<bf16>", "in buffer<bf16>", "inout state", "in buffer<i32>",
                          "in buffer<u8>", "in buffer<i32>", "in buffer<i32>", "in buffer<i32>",
                          "out buffer<bf16>", "i32", "i64", "i64"] + I2,
                         [cdiv(T, CONV_BLOCK_M), CONV_DIM // 256, 1]),
@@ -816,7 +824,7 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
         # tile first and stores ht last, so in-place is race-free
         "chunk_h": tri("chunk_h",
                        ["in buffer<bf16>", "in buffer<bf16>", "in buffer<bf16>", "out buffer<bf16>",
-                        "in buffer<f32>", "out buffer<bf16>", "inout ptr", "inout ptr",
+                        "in buffer<f32>", "out buffer<bf16>", "inout state", "inout state",
                         "in buffer<i32>", "in buffer<i64>", "i32"] + I2,
                        [GDN_D // 32, GDN_V_HEADS, 1]),
         "chunk_o": tri("chunk_o",
@@ -828,12 +836,12 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
                                         ["tokens", GDN_V_HEADS]),
         # --- GDN decode
         "conv_update": tri("conv_update",
-                           ["in buffer<bf16>", "in buffer<bf16>", "inout ptr", "in buffer<i32>",
+                           ["in buffer<bf16>", "in buffer<bf16>", "inout state", "in buffer<i32>",
                             "out buffer<bf16>", "i32", "i32", "i64", "i64"] + I2,
                            [1, CONV_DIM // 256, 1], src=dec),
         "recurrent": tri("recurrent",
                          ["in buffer<bf16>", "in buffer<bf16>", "in buffer<bf16>", "in buffer<f32>",
-                          "in buffer<bf16>", "out buffer<bf16>", "inout ptr", "inout ptr",
+                          "in buffer<bf16>", "out buffer<bf16>", "inout state", "inout state",
                           "in buffer<i32>", "f32"] + I2,
                          [GDN_D // 32, GDN_V_HEADS, 1], src=dec),
         "gated_norm_decode": layer_norm_kernel(dec, [GDN_V_HEADS, 1, 1], [1, GDN_V_HEADS]),
@@ -843,7 +851,7 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
         "mrope": tri("mrope", ["inout buffer<bf16>", "inout buffer<bf16>", "in buffer<bf16>",
                                "in buffer<bf16>", "i32"] + I2, [T, 1, 1]),
         "reshape_and_cache": tri("cache",
-                                 ["in buffer<bf16>", "in buffer<bf16>", "inout ptr", "inout ptr",
+                                 ["in buffer<bf16>", "in buffer<bf16>", "inout state", "inout state",
                                   "in buffer<i64>", "in buffer<f32>", "in buffer<f32>"] + ["i64"] * 9,
                                  [T, 1, 1]),
         "attn_prefill": tri("unified", ATTN_IFACE, [cdiv(T, BLOCK_Q), KV_HEADS, 1]),
@@ -855,7 +863,7 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
                     "segm_max": {"dtype": "f32", "shape": [1, HEADS, NUM_SEGMENTS]},
                     "segm_expsum": {"dtype": "f32", "shape": [1, HEADS, NUM_SEGMENTS]},
                 },
-                "steps": [
+                "launches": [
                     step(TRITON["unified"], UNIFIED_PARAMS, blk("unified", dec),
                          [1, KV_HEADS, NUM_SEGMENTS],
                          [a(i) for i in range(26)]
@@ -888,7 +896,7 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
             # history taps at conv-line offset num_accepted-1, writes the
             # new 10-wide window (in place on the qkvz rows)
             "conv_update_spec": spec_kernel("conv_update_spec",
-                                            ["in buffer<bf16>", "in buffer<bf16>", "inout ptr", "in buffer<i32>",
+                                            ["in buffer<bf16>", "in buffer<bf16>", "inout state", "in buffer<i32>",
                                              "in buffer<i32>", "in buffer<i32>", "out buffer<bf16>",
                                              "i32", "i32", "i64", "i64"] + I2,
                                             [1, CONV_DIM // 256, 1]),
@@ -898,7 +906,7 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
             "recurrent_spec": spec_kernel("recurrent_spec",
                                           ["in buffer<f32>", "in buffer<bf16>", "in buffer<bf16>", "in buffer<bf16>",
                                            "f32", "f32", "in buffer<bf16>", "in buffer<bf16>", "in buffer<bf16>",
-                                           "out buffer<bf16>", "inout ptr", "inout ptr", "in buffer<i32>",
+                                           "out buffer<bf16>", "inout state", "inout state", "in buffer<i32>",
                                            "in buffer<i32>", "in buffer<i32>", "f32", "i64", "i64"] + I2,
                                           [1, GDN_D // 32, GDN_V_HEADS]),
             "argmax": {
@@ -906,7 +914,7 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
                 "impl": {
                     "scratch": {"pmax": {"dtype": "f32", "shape": [SPEC_BLOCK, 64]},
                                 "pidx": {"dtype": "i32", "shape": [SPEC_BLOCK, 64]}},
-                    "steps": [
+                    "launches": [
                         step("kern_argmax_partial_bf16",
                              ["in buffer<bf16>", "out buffer<f32>", "out buffer<i32>", "i32"],
                              [1024, 1, 1], [T, 64, 1], [a(0), scr("pmax"), scr("pidx"), a(2)],
@@ -929,7 +937,7 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
                                   ["in buffer<i64>", "inout buffer<bf16>", "inout buffer<bf16>", "in buffer<bf16>",
                                    "i32", "i64", "i64", "i64", "i32", "i32", "i32", "i64", "u8"], [T, 1, 1]),
             "d_cache": spec_kernel("d_cache",
-                                   ["in buffer<bf16>", "in buffer<bf16>", "inout ptr", "inout ptr", "in buffer<i64>",
+                                   ["in buffer<bf16>", "in buffer<bf16>", "inout state", "inout state", "in buffer<i64>",
                                     "i64", "i64", "i64", "i64", "i64", "i32", "i32", "i32",
                                     "in buffer<f32>", "in buffer<f32>", "i32"], [T, 1, 1]),
             "attn_draft": single("kernel_unified_attention", ATTN_IFACE, ad["block"],
@@ -1276,61 +1284,62 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
             ]
         return ds
 
-    states = {"kv": {"bytes_per_token": KV_BYTES_PER_TOKEN}, "gdn": {"bytes_fixed": gdn_state_bytes}}
-    meta = {"version": 2, "model": "qwen3.8-27b"}
+    states = {"kv": {"bytes_per_token": KV_BYTES_PER_TOKEN}, "gdn": {"bytes": gdn_state_bytes}}
+    head = {"schema_version": 3, "model": "qwen3.8-27b"}
     if spec:
         one = buf("gdn.one")
         programs = {
-            "prefill": {"dispatches": forward(False, taps=True)},
+            "prefill": forward(False, taps=True),
             # non-speculative decode on the speculative state layout: the
             # spec kernels at tokens=1, resuming from SSM slot 0 / conv
             # offset 0 (where prefill and every previous tokens=1 step leave
             # the state)
-            "decode": {"dispatches": forward(True, nacc=one)},
-            "decode_spec": {"dispatches": forward(True, taps=True, nacc=one)},
+            "decode": forward(True, nacc=one),
+            "decode_spec": forward(True, taps=True, nacc=one),
             # verify = the target over [anchor, d0..d6] (tokens=8): 2D
             # attention, spec GDN resuming from num_accepted_tokens-1
-            "verify": {"dispatches": forward(False, taps=True, nacc=buf("num_accepted_tokens"), tail="verify")},
-            "draft": {"dispatches": draft()},
-            "draft_precompute": {"dispatches": draft_precompute()},
+            "verify": forward(False, taps=True, nacc=buf("num_accepted_tokens"), tail="verify"),
+            "draft": draft(),
+            "draft_precompute": draft_precompute(),
         }
         states["draft_kv"] = {"bytes_per_token": D_KV_BYTES_PER_TOKEN}
-        meta = {"version": 2, "model": "qwen3.8-27b-dflash2",
+        head = {"schema_version": 3, "model": "qwen3.8-27b-dflash2",
                 # caller contract: draft rows = [anchor] + [mask] * (block-1) at
                 # tokens=block; verify at tokens=block; num_accepted_tokens =
                 # 1 + accepted drafts of the previous round (1 after prefill)
                 "spec": {"block": SPEC_BLOCK, "mask_token": MASK_TOKEN}}
         DOMAINS.update({
             "num_accepted_tokens": {"min": 1, "max": SPEC_BLOCK},
-            "draft_block_table": {"index_into": "draft_kv", "unit": D_BLOCK},
+            "draft_block_table": {"index_into": "draft_kv", "stride": D_BLOCK},
             "anchor_token": TOKEN_DOMAIN, "verify_tokens": TOKEN_DOMAIN, "draft_tokens": TOKEN_DOMAIN,
             "cand_ids": {"index_into": "draft.selector.successor"},
             "draft.kv_scales": {"min": 0.0},
         })
     else:
         programs = {
-            "prefill": {"dispatches": forward(False)},
-            "decode": {"dispatches": forward(True)},
+            "prefill": forward(False),
+            "decode": forward(True),
         }
     for name, dom in DOMAINS.items():
         if name in buffers:
             buffers[name]["domain"] = dom
     # the runtime rejects dead kernels / buffers (a manifest describes only
     # what runs): the spec layout leaves Stage 1's packed decode chain unused
-    used_k = {dd["kernel"] for pr in programs.values() for dd in pr["dispatches"]}
-    used_b = {a["buf"] for pr in programs.values() for dd in pr["dispatches"] for a in dd["args"] if "buf" in a}
+    used_k = {c["op"] for calls in programs.values() for c in calls}
+    used_b = {a["buf"] for calls in programs.values() for c in calls for a in c["args"] if "buf" in a}
     kernels = {k: v for k, v in kernels.items() if k in used_k}
     buffers = {k: v for k, v in buffers.items() if k in used_b}
-    return {
-        "meta": meta,
+    # normalize: hoist inline cubin/sha256 into `modules`, fold the ABI
+    # constants every call repeats into the impls, default identity wiring
+    return normalize(head | {
         # bs=1; prefill per chunk (tokens <= CHUNK_MAX) over *all* prompt
         # tokens (it emits next_token), decode at tokens=1
-        "symbols": {"tokens": {"max": CHUNK_MAX}},
+        "vars": {"tokens": {"max": CHUNK_MAX}},
         "states": states,
         "buffers": buffers,
-        "kernels": kernels,
+        "ops": kernels,
         "programs": programs,
-    }
+    })
 
 
 def main():
@@ -1402,8 +1411,10 @@ def main():
         assert pv(src["conv_update_spec"], 9) == pv(src["conv_update_spec"], 10), "conv update not in place"
         assert pf(src["d_rms_norm"], 9) == eps and pf(src["d_fused_norm"], 4) == eps
         dspark = json.loads((repo / "examples" / "qwen3-4b-dspark.json").read_text())
-        ad = dspark["kernels"]["attn_draft"]["impl"]["steps"][0]
-        assert ad["symbol"] == TRITON["unified"] and ad["cubin"] == "unified_noncausal.cubin"
+        ad = dict(dspark["ops"]["attn_draft"]["impl"]["launches"][0])
+        ad_mod = dspark["modules"][ad["module"]]
+        ad["cubin"], ad["sha256"] = ad_mod["source"], ad_mod["sha256"]
+        assert ad["entry"] == TRITON["unified"] and ad["cubin"] == "unified_noncausal.cubin"
         for tag, (mod, sha) in sorted(spins.items()):
             print(f"  spec pin {SPEC_SYMS[tag][:52]:<52} -> {mod} {sha[:12]}", file=sys.stderr)
         print(f"  spec pin conv_fwd (page stride rebaked) -> {pins[('conv_fwd', True)][0]}", file=sys.stderr)
@@ -1411,9 +1422,9 @@ def main():
 
     m = build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec)
     out.write_text(json.dumps(m, indent=1) + "\n")
-    n_disp = {k: len(v["dispatches"]) for k, v in m["programs"].items()}
-    print(f"wrote {out}: {len(m['buffers'])} buffers, {len(m['kernels'])} kernels, "
-          f"dispatches {n_disp}", file=sys.stderr)
+    n_calls = {k: len(v) for k, v in m["programs"].items()}
+    print(f"wrote {out}: {len(m['buffers'])} buffers, {len(m['ops'])} ops, {len(m['modules'])} modules, "
+          f"calls {n_calls}", file=sys.stderr)
 
 
 if __name__ == "__main__":

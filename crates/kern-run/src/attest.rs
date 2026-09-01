@@ -3,7 +3,7 @@
 //! Given two manifests A (the reference — assumed correct) and B (the
 //! candidate), attest:
 //!   1. diffs them structurally: which kernels changed (interface / impl /
-//!      added / removed) and, per program, the aligned dispatch segments
+//!      added / removed) and, per program, the aligned call segments
 //!      that differ ("cuts") — everything else is shared;
 //!   2. taps a seeded workload once (random tokens; prefill length, chunk
 //!      and decode steps drawn from the seed, biased to page/chunk/max
@@ -23,7 +23,7 @@
 //!      tested in the distribution it was built for; both sides run,
 //!      outputs compared and checked against declared domains;
 //!   5. times the cuts in isolation (plus, opt-in, graph-level step time
-//!      and a prefill symbol sweep) and computes a static bytes-moved
+//!      and a prefill var sweep) and computes a static bytes-moved
 //!      roofline for the changed kernels.
 //!
 //! Everything after the tap is cut-local: cost scales with the cut, not the
@@ -36,7 +36,7 @@ use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use clap::Args;
-use kern_manifest::types::{Arg, BufferClass, DType, Dim, Dir, Manifest, ParamType, Program};
+use kern_manifest::types::{Arg, BufferKind, Call, DType, Dim, Dir, Manifest, ParamType};
 use kern_manifest::verify;
 use crate::config::{Config, Target};
 use crate::{env, Caller, DRIVEN, TOKENS};
@@ -102,7 +102,7 @@ pub struct TestOpts {
     /// Skip capturing both decode programs as CUDA graphs for the step time
     #[arg(long)]
     pub no_graph_step: bool,
-    /// Skip sweeping prefill over the `tokens` symbol range
+    /// Skip sweeping prefill over the `tokens` var range
     #[arg(long)]
     pub no_sweep: bool,
     /// Device peak memory bandwidth in GB/s, for the roofline column
@@ -212,7 +212,7 @@ struct Workload {
 
 fn sample_workload(o: &Opts, m: &Manifest, capacity: u64, page: u64, prompt: Option<Vec<i64>>) -> Result<Workload> {
     let mut rng = Rng(o.seed ^ 0x776f_726b_6c6f_6164);
-    let tmax = m.symbols[TOKENS].max.max(1);
+    let tmax = m.vars[TOKENS].max.max(1);
     let vocab = m
         .buffers
         .get("token_ids")
@@ -234,7 +234,7 @@ fn sample_workload(o: &Opts, m: &Manifest, capacity: u64, page: u64, prompt: Opt
         None if rng.below(2) == 0 => (1 + rng.below(hi), "uniform"),
         None => {
             // where kernels break: the last partial chunk, the first token
-            // of a new page, exactly the symbol max
+            // of a new page, exactly the var max
             let mut c: Vec<u64> = vec![1, page - 1, page, page + 1, 2 * page + 1, chunk - 1, chunk, chunk + 1, 2 * chunk + 1, 3 * chunk - 1, tmax, tmax + 1, hi];
             c.retain(|&x| (1..=hi).contains(&x));
             c.sort_unstable();
@@ -322,11 +322,11 @@ struct Segment {
     b: (usize, usize),
 }
 
-fn kernel_changes(ma: &Manifest, mb: &Manifest) -> BTreeMap<String, &'static str> {
+fn op_changes(ma: &Manifest, mb: &Manifest) -> BTreeMap<String, &'static str> {
     let mut out = BTreeMap::new();
-    let names: BTreeSet<&String> = ma.kernels.keys().chain(mb.kernels.keys()).collect();
+    let names: BTreeSet<&String> = ma.ops.keys().chain(mb.ops.keys()).collect();
     for n in names {
-        let kind = match (ma.kernels.get(n), mb.kernels.get(n)) {
+        let kind = match (ma.ops.get(n), mb.ops.get(n)) {
             (Some(_), None) => "removed",
             (None, Some(_)) => "added",
             (Some(x), Some(y)) => {
@@ -345,18 +345,18 @@ fn kernel_changes(ma: &Manifest, mb: &Manifest) -> BTreeMap<String, &'static str
     out
 }
 
-/// Align two dispatch lists (LCS over canonical dispatch keys; a dispatch of
-/// a changed kernel never matches across sides) into Same/Changed segments.
-fn align(pa: &Program, pb: &Program, changed: &BTreeMap<String, &str>) -> Vec<Segment> {
-    let key = |d: &kern_manifest::types::Dispatch, side: &str| {
-        if changed.contains_key(&d.kernel) {
-            format!("{}@{side}#{}", d.kernel, json!(d.args))
+/// Align two call lists (LCS over canonical call keys; a call of a changed
+/// op never matches across sides) into Same/Changed segments.
+fn align(pa: &[Call], pb: &[Call], changed: &BTreeMap<String, &str>) -> Vec<Segment> {
+    let key = |c: &Call, side: &str| {
+        if changed.contains_key(&c.op) {
+            format!("{}@{side}#{}", c.op, json!(c.args))
         } else {
-            format!("{}#{}", d.kernel, json!(d.args))
+            format!("{}#{}", c.op, json!(c.args))
         }
     };
-    let ka: Vec<String> = pa.dispatches.iter().map(|d| key(d, "A")).collect();
-    let kb: Vec<String> = pb.dispatches.iter().map(|d| key(d, "B")).collect();
+    let ka: Vec<String> = pa.iter().map(|c| key(c, "A")).collect();
+    let kb: Vec<String> = pb.iter().map(|c| key(c, "B")).collect();
     let (n, m) = (ka.len(), kb.len());
     let mut lcs = vec![vec![0u32; m + 1]; n + 1];
     for i in (0..n).rev() {
@@ -415,9 +415,9 @@ struct Access {
 
 fn access(m: &Manifest, prog: &str, lo: usize, hi: usize) -> Access {
     let mut acc = Access::default();
-    for d in &m.programs[prog].dispatches[lo..hi] {
-        let k = &m.kernels[&d.kernel];
-        for (arg, p) in d.args.iter().zip(&k.params) {
+    for c in &m.programs[prog][lo..hi] {
+        let op = &m.ops[&c.op];
+        for (arg, p) in c.args.iter().zip(&op.params) {
             match (arg, p) {
                 (Arg::Buf { buf, .. }, ParamType::Buf { dir, .. }) => {
                     if matches!(dir, Dir::In | Dir::InOut) {
@@ -427,7 +427,7 @@ fn access(m: &Manifest, prog: &str, lo: usize, hi: usize) -> Access {
                         acc.writes.insert(buf.clone());
                     }
                 }
-                (Arg::State { state, .. }, ParamType::Ptr { dir }) => {
+                (Arg::State { state, .. }, ParamType::State { dir }) => {
                     if matches!(dir, Dir::In | Dir::InOut) {
                         acc.state_reads.insert(state.clone());
                     }
@@ -447,9 +447,9 @@ fn access(m: &Manifest, prog: &str, lo: usize, hi: usize) -> Access {
 fn frontier_inputs(m: &Manifest, prog: &str, lo: usize, hi: usize) -> BTreeSet<String> {
     let mut written = BTreeSet::new();
     let mut inputs = BTreeSet::new();
-    for d in &m.programs[prog].dispatches[lo..hi] {
-        let k = &m.kernels[&d.kernel];
-        for (arg, p) in d.args.iter().zip(&k.params) {
+    for c in &m.programs[prog][lo..hi] {
+        let op = &m.ops[&c.op];
+        for (arg, p) in c.args.iter().zip(&op.params) {
             if let (Arg::Buf { buf, .. }, ParamType::Buf { dir, .. }) = (arg, p) {
                 if matches!(dir, Dir::In | Dir::InOut) && !written.contains(buf) {
                     inputs.insert(buf.clone());
@@ -469,7 +469,7 @@ fn live_elems(m: &Manifest, name: &str, e: &BTreeMap<String, u64>) -> usize {
         .iter()
         .map(|d| match d {
             Dim::Const(c) => *c as usize,
-            Dim::Sym(s) => e[s] as usize,
+            Dim::Var(s) => e[s] as usize,
         })
         .product()
 }
@@ -661,7 +661,7 @@ fn row_elems(m: &Manifest, name: &str, e: &BTreeMap<String, u64>) -> usize {
         .iter()
         .map(|d| match d {
             Dim::Const(c) => *c as usize,
-            Dim::Sym(s) => e[s] as usize,
+            Dim::Var(s) => e[s] as usize,
         })
         .product::<usize>()
         .max(1)
@@ -1118,30 +1118,31 @@ fn execute(o: Opts) -> Result<i32> {
 
     // ---- 1. static diff
     let mut sec = Section::new("DIFF", "").untimed();
-    let changed = kernel_changes(&ma, &mb);
+    let changed = op_changes(&ma, &mb);
     let mut rows: Vec<Vec<Cell>> = Vec::new();
     if changed.is_empty() {
-        rows.push(row!["kernels", "no interface or implementation differs"]);
+        rows.push(row!["ops", "no interface or implementation differs"]);
     }
-    let step_desc = |k: &kern_manifest::types::Kernel| -> String {
-        let s = &k.imp.steps;
-        let mut names: Vec<String> = s
+    let launch_desc = |m: &Manifest, op: &kern_manifest::types::Op| -> String {
+        let ls = &op.imp.launches;
+        let mut names: Vec<String> = ls
             .iter()
-            .map(|st| match &st.cubin {
-                Some(c) => c.rsplit('/').next().unwrap_or(c).to_string(),
+            .map(|l| match l.module.as_deref().and_then(|n| m.modules.get(n)) {
+                Some(md) => md.source.rsplit('/').next().unwrap_or(&md.source).to_string(),
+                None if l.is_extern() => l.entry.clone(),
                 None => "(unpinned module)".to_string(),
             })
             .collect();
         names.dedup();
         let n = names.join(" + ");
-        if s.len() > 1 { format!("{} steps: {n}", s.len()) } else { n }
+        if ls.len() > 1 { format!("{} launches: {n}", ls.len()) } else { n }
     };
     for (k, kind) in &changed {
         let detail = match *kind {
-            "interface" => format!("{} → {} params", ma.kernels[k].params.len(), mb.kernels[k].params.len()),
-            "impl" => format!("{}  →  {}", step_desc(&ma.kernels[k]), step_desc(&mb.kernels[k])),
-            "added" => step_desc(&mb.kernels[k]),
-            _ => step_desc(&ma.kernels[k]),
+            "interface" => format!("{} → {} params", ma.ops[k].params.len(), mb.ops[k].params.len()),
+            "impl" => format!("{}  →  {}", launch_desc(&ma, &ma.ops[k]), launch_desc(&mb, &mb.ops[k])),
+            "added" => launch_desc(&mb, &mb.ops[k]),
+            _ => launch_desc(&ma, &ma.ops[k]),
         };
         rows.push(row![Cell::bold(k), Cell::warn(*kind), detail]);
     }
@@ -1164,14 +1165,14 @@ fn execute(o: Opts) -> Result<i32> {
         let segs = align(pa, pb, &changed);
         let cuts: Vec<&Segment> = segs.iter().filter(|s| s.kind == Kind::Changed).collect();
         if cuts.is_empty() {
-            rows.push(row![pname.clone(), Cell::dim("identical"), format!("{} dispatches", pa.dispatches.len())]);
+            rows.push(row![pname.clone(), Cell::dim("identical"), format!("{} calls", pa.len())]);
             continue;
         }
-        // Group cuts by shape: (A kernels, B kernels, reads, writes).
+        // Group cuts by shape: (A ops, B ops, reads, writes).
         let mut groups: BTreeMap<(String, String, String, String), usize> = BTreeMap::new();
         for s in &cuts {
-            let ka = pa.dispatches[s.a.0..s.a.1].iter().map(|d| d.kernel.as_str()).collect::<Vec<_>>().join("+");
-            let kb = pb.dispatches[s.b.0..s.b.1].iter().map(|d| d.kernel.as_str()).collect::<Vec<_>>().join("+");
+            let ka = pa[s.a.0..s.a.1].iter().map(|c| c.op.as_str()).collect::<Vec<_>>().join("+");
+            let kb = pb[s.b.0..s.b.1].iter().map(|c| c.op.as_str()).collect::<Vec<_>>().join("+");
             let ia = frontier_inputs(&ma, pname, s.a.0, s.a.1);
             let ib = frontier_inputs(&mb, pname, s.b.0, s.b.1);
             let wa = access(&ma, pname, s.a.0, s.a.1).writes;
@@ -1183,14 +1184,14 @@ fn execute(o: Opts) -> Result<i32> {
             let writes = wa.iter().cloned().collect::<Vec<_>>().join(", ");
             *groups.entry((ka, kb, reads, writes)).or_default() += 1;
         }
-        let shared = pa.dispatches.len() - cuts.iter().map(|s| s.a.1 - s.a.0).sum::<usize>();
+        let shared = pa.len() - cuts.iter().map(|s| s.a.1 - s.a.0).sum::<usize>();
         for (gi, ((ka, kb, reads, writes), n)) in groups.iter().enumerate() {
             let what = if ka == kb { ka.clone() } else if ka.is_empty() { format!("∅ → {kb}") } else if kb.is_empty() { format!("{ka} → ∅") } else { format!("{ka} → {kb}") };
             rows.push(row![
                 if gi == 0 { pname.clone() } else { String::new() },
                 Cell::bold(format!("{n} cut{}", if *n == 1 { "" } else { "s" })),
                 format!("{what}   {reads} → {writes}"),
-                Cell::dim(if gi == 0 { format!("{} dispatches, {shared} shared", pa.dispatches.len()) } else { String::new() }),
+                Cell::dim(if gi == 0 { format!("{} calls, {shared} shared", pa.len()) } else { String::new() }),
             ]);
         }
         segments.insert(pname.clone(), segs);
@@ -1278,7 +1279,7 @@ fn execute(o: Opts) -> Result<i32> {
                 .collect();
             let mut inputs = Vec::new();
             for n in &input_names {
-                if ma.buffers[n].class != BufferClass::Weight {
+                if ma.buffers[n].kind != BufferKind::Weight {
                     inputs.push((n.clone(), s.a.rt.read_buffer_prefix(n, live_bytes(&ma, n, e))?));
                 }
             }
@@ -1382,7 +1383,7 @@ fn execute(o: Opts) -> Result<i32> {
     };
     // `logits*` buffers a program writes: the end-to-end oracle.
     let logits_of = |prog: &str| -> Vec<String> {
-        access(&ma, prog, 0, ma.programs[prog].dispatches.len()).writes.into_iter().filter(|n| n.starts_with("logits") && mb.buffers.contains_key(n)).collect()
+        access(&ma, prog, 0, ma.programs[prog].len()).writes.into_iter().filter(|n| n.starts_with("logits") && mb.buffers.contains_key(n)).collect()
     };
     // (run label, buffer, env, bytes)
     let read_logits = |c: &Caller, prog: &str, e: &BTreeMap<String, u64>, label: &str| -> Result<Vec<(String, String, BTreeMap<String, u64>, Vec<u8>)>> {
@@ -1504,7 +1505,7 @@ fn execute(o: Opts) -> Result<i32> {
     let mut e2e_differs: Vec<String> = Vec::new();
     let mut first = true;
     for (name, b) in &ma.buffers {
-        if b.class == BufferClass::Output && mb.buffers.contains_key(name) {
+        if b.kind == BufferKind::Output && mb.buffers.contains_key(name) {
             let bytes = live_bytes(&ma, name, &e1);
             let c = compare(b.dtype, &s.a.rt.read_buffer_prefix(name, bytes)?, &s.b.rt.read_buffer_prefix(name, bytes)?);
             if !c.value_identical() {
@@ -1791,7 +1792,7 @@ fn execute(o: Opts) -> Result<i32> {
     // ---- 5. perf: eager step attribution, graph step, sweep, roofline
     if !o.no_perf {
         let sweep_iters = o.iters.min(10);
-        let mut sec = Section::new("PERF", &format!("eager per-dispatch timing, min of {} (sweep: {sweep_iters}){}", o.iters, if o.no_graph_step { "" } else { " · graph step median of 100" }));
+        let mut sec = Section::new("PERF", &format!("eager per-call timing, min of {} (sweep: {sweep_iters}){}", o.iters, if o.no_graph_step { "" } else { " · graph step median of 100" }));
         let mut rows = vec![row!["", "", "A", "B measured", "B derived", "Δ measured (B − A)"]];
         let mut per_kernel: BTreeMap<String, [(usize, f32, usize); 2]> = BTreeMap::new(); // kernel -> per side (bytes, ms, count)
         let mut state_traffic = false;
@@ -1799,8 +1800,8 @@ fn execute(o: Opts) -> Result<i32> {
         // Time a whole program on both sides at `e`; returns (step, Σ cuts)
         // per side and feeds the roofline accumulator.
         let mut step = |s: &mut Sides, pname: &str, e: &BTreeMap<String, u64>, iters: usize, roof: bool| -> Result<[(f32, f32); 2]> {
-            let ta = s.a.rt.time_range(pname, e, 0, s.a.rt.dispatch_count(pname)?, iters)?;
-            let tb = s.b.rt.time_range(pname, e, 0, s.b.rt.dispatch_count(pname)?, iters)?;
+            let ta = s.a.rt.time_range(pname, e, 0, s.a.rt.call_count(pname)?, iters)?;
+            let tb = s.b.rt.time_range(pname, e, 0, s.b.rt.call_count(pname)?, iters)?;
             let mut out = [(ta.iter().sum::<f32>(), 0f32), (tb.iter().sum::<f32>(), 0f32)];
             for sg in cuts_of(pname) {
                 for (si, m, r, t) in [(0usize, &ma, sg.a, &ta), (1, &mb, sg.b, &tb)] {
@@ -1813,7 +1814,7 @@ fn execute(o: Opts) -> Result<i32> {
                         let bytes: usize = acc.reads.iter().map(|n| live_bytes(m, n, e)).sum::<usize>()
                             + acc.writes.iter().map(|n| live_bytes(m, n, e)).sum::<usize>();
                         state_traffic |= !(acc.state_reads.is_empty() && acc.state_writes.is_empty());
-                        let ent = per_kernel.entry(format!("{pname} · {}", m.programs[pname].dispatches[i].kernel)).or_default();
+                        let ent = per_kernel.entry(format!("{pname} · {}", m.programs[pname][i].op)).or_default();
                         ent[si].0 += bytes;
                         ent[si].1 += t[i];
                         ent[si].2 += 1;
@@ -1855,9 +1856,9 @@ fn execute(o: Opts) -> Result<i32> {
             }
             perf_json.insert("decode".into(), j);
         }
-        // prefill: the tapped chunk length plus a sweep over the symbol range
+        // prefill: the tapped chunk length plus a sweep over the var range
         if n_cuts("prefill") > 0 && !undriven.iter().any(|u| u == "prefill") {
-            let max = ma.symbols[TOKENS].max;
+            let max = ma.vars[TOKENS].max;
             let tap_len = pre.len().min(chunk) as u64;
             let mut points: BTreeSet<u64> = [tap_len].into();
             if !o.no_sweep {
@@ -1898,7 +1899,7 @@ fn execute(o: Opts) -> Result<i32> {
         if !rows.is_empty() {
             sec.table_h(rows);
         }
-        let mut rows = vec![row!["roofline", "moved / dispatch", "A", "B"]];
+        let mut rows = vec![row!["roofline", "moved / call", "A", "B"]];
         let mut roof = Vec::new();
         for (k, sides) in &per_kernel {
             let fmt = |(bytes, ms, n): (usize, f32, usize)| -> String {
@@ -1911,7 +1912,7 @@ fn execute(o: Opts) -> Result<i32> {
             let n = sides[0].2.max(sides[1].2);
             let per = sides.iter().find(|s| s.2 > 0).map_or(0, |s| s.0 / s.2);
             rows.push(row![Cell::bold(format!("{k} ×{n}")), format!("{}{}", kb(per), if state_traffic { " + opaque state" } else { "" }), fmt(sides[0]), fmt(sides[1])]);
-            roof.push(json!({"kernel": k, "bytes_per_dispatch": per, "a": {"ms": sides[0].1, "n": sides[0].2}, "b": {"ms": sides[1].1, "n": sides[1].2}}));
+            roof.push(json!({"op": k, "bytes_per_call": per, "a": {"ms": sides[0].1, "n": sides[0].2}, "b": {"ms": sides[1].1, "n": sides[1].2}}));
         }
         sec.table_h(rows);
         perf_json.insert("roofline".into(), json!(roof));

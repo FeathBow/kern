@@ -15,7 +15,7 @@ pub enum Error {
     ManifestVerify(#[from] kern_manifest::VerifyErrors),
 
     /// A manifest inconsistency only detectable past static verification
-    /// (size overflow at symbol bounds, unsupported extern op, expression
+    /// (size overflow at var bounds, unsupported extern op, expression
     /// evaluation, wiring arity). Provider-side bug the verifier missed.
     #[error("manifest: {0}")]
     Manifest(String),
@@ -33,9 +33,9 @@ pub enum Error {
     WeightArtifact(String),
 
     /// The caller broke the runtime API contract: unknown buffer/program
-    /// name, wrong buffer class, oversized input write, symbol value
+    /// name, wrong buffer kind, oversized input write, var value
     /// outside declared bounds, or replaying a program that wasn't captured
-    /// (or captured with different symbol values). Caller-side bug.
+    /// (or captured with different var values). Caller-side bug.
     #[error("caller contract: {0}")]
     Api(String),
 
@@ -46,9 +46,9 @@ pub enum Error {
     Domain(String),
 
     /// One launch of a program failed; `context` locates it in the
-    /// program's dispatch list, `source` is the underlying failure.
+    /// program's call list, `source` is the underlying failure.
     #[error("{context}: {source}")]
-    Dispatch {
+    Call {
         context: String,
         #[source]
         source: Box<Error>,

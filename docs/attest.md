@@ -26,17 +26,17 @@
 `examples/qwen3-4b-silu-mined.json` 是自带的 A/B fixture：和
 `qwen3-4b.json` 唯一的区别是 `silu_mul` 的 impl 从 HF hub 的
 `kernels-community/activation` 包换回挖矿得到的 vLLM cubin，接口与全部
-dispatch 一字不动——纯 impl 替换。两份 manifest 共用一个 `--kernels`
-目录：step 按 sha256 解析，目录里放着两边各自钉的版本即可（`tools/
+call 一字不动——纯 impl 替换。两份 manifest 共用一个 `--kernels`
+目录：module 按 sha256 解析，目录里放着两边各自钉的版本即可（`tools/
 extract_kernels.sh` 对 A、B 各跑一次，只增不减）。`--capacity` 会向下
 对齐到 manifest 的页单位，fuzz 的 `slot_mapping` 不会落进半页。
 
 ## 设计：tap 一次，之后全是 cut 级
 
 整条流水线只有 **tap** 这一步跑完整 program；之后每一段都只重放 cut：
-把快照里的 frontier 输入写回去、`run_range` 跑那几个 dispatch、读写出的
+把快照里的 frontier 输入写回去、`run_range` 跑那几个 call、读写出的
 buffer。成本随 cut 大小走，不随模型走——TP8 的大 MoE 换一个 kernel，
-harness 付的是"模型装载一次 + 一次 prefill/decode + N × 几个 dispatch"。
+harness 付的是"模型装载一次 + 一次 prefill/decode + N × 几个 call"。
 
 **端到端只看 logits，不生成。** 每个 cut bit 相同 ⇒ 整体必相同，不需要
 再证；cut 有差异时，oracle 是 B 自由跑同一 workload 后每一步的 `logits`
@@ -48,7 +48,7 @@ logits 的 program、A 自己不确定）报 INCONCLUSIVE（退出码 2）。
 
 1. **DIFF（静态）**：逐 kernel 比接口（`params`）和实现（`impl`），分
    interface / impl / added / removed；逐 program 用 LCS 对齐两边的
-   dispatch 列表（变了的 kernel 两边永不对齐），切成 Same / Changed 段，
+   call 列表（变了的 op 两边永不对齐），切成 Same / Changed 段，
    Changed 段就是 **cut**。每个 cut 由数据流图给出 frontier：读了哪些
    外部 buffer、写了哪些——`a+b → c` 的中间 buffer 不在 frontier 上，自动
    略过。两边 frontier 不等会标 ⚠（表示不是 cut 内替换）。
@@ -64,7 +64,7 @@ logits 的 program、A 自己不确定）报 INCONCLUSIVE（退出码 2）。
    写进报告钉成回归。
    A、B lockstep：Same 段两边各自跑；**每个 program run 之前 B 的 state 整
    体拷成 A 的**，每个 Changed 段跑之前从 A 读 frontier 输入（按当前
-   symbol 值取活跃前缀）**并写进 B**，跑完读 A 的输出做参考、比 B 写出的
+   var 值取活跃前缀）**并写进 B**，跑完读 A 的输出做参考、比 B 写出的
    buffer。所以每一行 cut 结果都是 **cut-local**：B 拿 A 的输入、A 的
    state 跑这一刀，差多少就是这一刀自己的事，不混前面层漂移下来的误差
    （早先不注入时，c7 那种 state 差会让下游每个 buffer 都显示 47/48 cuts
@@ -111,7 +111,7 @@ logits 的 program、A 自己不确定）报 INCONCLUSIVE（退出码 2）。
    比写出的 buffer；写出的 buffer 若声明了 domain，则检查每个元素落在域内
    （后置条件；A 违反说明参考本身有问题）。写出的 state 也比（A、B 全
    量，两边此时起点相同）。B 崩溃（IMA）直接 FAIL。
-5. **PERF**：每个变了的 program 整步 eager 跑 N 次，逐 dispatch event 计时
+5. **PERF**：每个变了的 program 整步 eager 跑 N 次，逐 call event 计时
    取最小——同一份数据既给**整步**（Σ 全部）又给 **Σ cuts**（换掉的那
    块）。表里 `B measured` 旁边就是 **`B derived`** = `A − Σcut_A +
    Σcut_B`（只看 cut 就能推出的整步预估），实测与推导的差就是换 kernel
@@ -176,8 +176,8 @@ runtime，PERF 1.8 s。
 - 静态 diff、frontier、快照、fuzz、比较全在
   `crates/kern-run/src/attest.rs`（caller 契约在
   `crates/kern-run/src/lib.rs`，和 `kern run` 共用）。
-- runtime 只加了不在服务路径上的原语：`run_range`（按 dispatch 区间
+- runtime 只加了不在服务路径上的原语：`run_range`（按 call 区间
   eager 执行）、`read_buffer_prefix` / `write_buffer` / `read_state`（任意
-  class）、`time_range`（区间内逐 dispatch event 计时）、`time_captured`
+  kind）、`time_range`（区间内逐 call event 计时）、`time_captured`
   （graph 中位数）、`check_domain`。元素编解码在
   `kern_runtime::values`（bf16/f16/f32/fp8e4m3/整数 ↔ f64，ulp 距离）。

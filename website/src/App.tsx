@@ -154,8 +154,8 @@ function TheSwap() {
         <div className="swap-header-side">
           <p className="swap-note">Nothing else changes.</p>
           <p className="swap-story">
-            Three diff lines point one dispatch at a kernel from the
-            Hugging&nbsp;Face hub. The old symbol is erased, the new impl is
+            Three diff lines point one op at a kernel from the
+            Hugging&nbsp;Face hub. The old entry is erased, the new module is
             verified into its slot — the rest of the program never moves.
           </p>
           <a className="swap-schema-link" href="/schema/">
@@ -166,33 +166,37 @@ function TheSwap() {
 
       <div
         className="swap-stage"
-        aria-label="A three-line JSON diff swaps one implementation: the old engine symbol is erased from the silu_mul slot of the dispatch pipeline, a verified Hugging Face kernel drops in, and no other dispatch is touched"
+        aria-label="A three-line JSON diff swaps one implementation: the old engine entry is erased from the silu_mul op, a verified Hugging Face module drops in, and no other call is touched"
       >
         <div className="diff-window swap-diff">
           <div className="swap-diff-title">examples/qwen3-4b.json</div>
           <div className="diff-line context">
             <b> </b>
-            <code>"silu_mul": {"{"} "impl": {"{"} "steps": [{"{"}</code>
+            <code>"silu_mul": {"{"} "impl": {"{"} "launches": [{"{"}</code>
           </div>
           <div className="diff-line removed">
             <b>-</b>
-            <code>"symbol": "_ZN4vllm18act_and_mul_kernel…"</code>
+            <code>"entry": "_ZN4vllm18act_and_mul_kernel…packed_silu…"</code>
           </div>
           <div className="diff-line added">
             <b>+</b>
-            <code>"cubin": "hf:kernels-community/activation</code>
+            <code>"module": "activation",</code>
           </div>
           <div className="diff-line added">
             <b>+</b>
-            <code>          /…/_activation_320b408.abi3.so",</code>
-          </div>
-          <div className="diff-line added">
-            <b>+</b>
-            <code>"sha256": "73748b54…b1fe49aa",</code>
+            <code>"entry": "_ZN4vllm18act_and_mul_kernel…"</code>
           </div>
           <div className="diff-line context">
             <b> </b>
-            <code>"params": ["out buffer&lt;bf16&gt;", "in buffer&lt;bf16&gt;", "i32"]</code>
+            <code>"modules": {"{"}</code>
+          </div>
+          <div className="diff-line added">
+            <b>+</b>
+            <code>"activation": {"{"} "source": "hf:kernels-community/activation/…",</code>
+          </div>
+          <div className="diff-line added">
+            <b>+</b>
+            <code>                "sha256": "73748b54…b1fe49aa" {"}"}</code>
           </div>
         </div>
 
@@ -204,7 +208,7 @@ function TheSwap() {
             <path className="flight-ship" d="M248 228 L246 247 L233 235" />
           </svg>
           <div className="flight-block">
-            <span className="flight-kicker">NEW IMPL</span>
+            <span className="flight-kicker">NEW MODULE</span>
             <strong>hf:kernels-community/activation</strong>
             <small>sha256 · 73748b54…b1fe49aa</small>
             <i className="flight-verified">✓ VERIFIED</i>
@@ -214,7 +218,7 @@ function TheSwap() {
         </div>
 
         <div className="swap-pipeline">
-          <span className="pipeline-title">FORWARD PROGRAM · DISPATCH ORDER</span>
+          <span className="pipeline-title">FORWARD PROGRAM · CALL ORDER</span>
           <div className="pipe-block">
             <code>rms_norm</code>
             <i>=</i>
@@ -242,7 +246,7 @@ function TheSwap() {
           <div className="pipeline-foot">
             <b>0</b>
             <span>
-              OTHER DISPATCHES
+              OTHER CALLS
               <br />
               TOUCHED
             </span>
@@ -364,7 +368,7 @@ function EvidenceDiagram() {
       className="evidence-diagram"
       viewBox="0 0 810 440"
       role="img"
-      aria-label="A and B run one prompt in lockstep; at the swapped dispatch the frontier inputs and A's outputs are snapshotted; every later check — noise floor, local compare, fuzz, timing — replays only that cut from the snapshot"
+      aria-label="A and B run one prompt in lockstep; at the swapped call the frontier inputs and A's outputs are snapshotted; every later check — noise floor, local compare, fuzz, timing — replays only that cut from the snapshot"
     >
       <text className="ev-label" x={40} y={28}>A · REFERENCE · hf:kernels-community/activation</text>
       <ProgramRow y={40} tone="a" />
@@ -589,14 +593,15 @@ function Artifact() {
         <Arrow />
         <div className="manifest-window">
           <div className="manifest-rail">
-            <span>V2</span>
+            <span>V3</span>
             <span>QWEN3-4B</span>
           </div>
           <div className="manifest-body">
-            <div><b>1</b><span>symbol</span></div>
+            <div><b>1</b><span>var</span></div>
             <div><b>1</b><span>opaque state</span></div>
             <div><b>310</b><span>buffers</span></div>
-            <div><b>12</b><span>kernel interfaces</span></div>
+            <div><b>4</b><span>modules</span></div>
+            <div><b>12</b><span>op interfaces</span></div>
             <div className="manifest-programs"><b>2</b><span>programs</span></div>
           </div>
         </div>
@@ -605,7 +610,7 @@ function Artifact() {
           <span className="node-kicker">RUNTIME KNOWS</span>
           <strong>buffers</strong>
           <strong>state bytes</strong>
-          <strong>dispatches</strong>
+          <strong>calls</strong>
           <span className="executor-no">NO MODEL BRANCHES</span>
         </div>
       </div>

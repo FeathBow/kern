@@ -58,7 +58,7 @@ capture 按 kernelParams 逐参数拆分，对 flat ABI 的核完美——但恰
 flat ABI 的核全部可直接 replay：`rms_norm`(12 param)、`rotary_embedding`(13)、
 `act_and_mul`/silu(6)、`reshape_and_cache_flash`(16)。注意模板实例化按
 call-site 的**静态维度**选择（rms_norm 的 hidden=2560 与 head_dim=128 是两个
-不同 symbol），不随 tokens 变——per-dispatch pin symbol 是安全的；但 vec-width
+不同 symbol），不随 tokens 变——per-call pin entry 是安全的；但 vec-width
 路径假设指针 16B 对齐，runtime 分配 buffer 对齐别低于 vLLM（保守按 256B）。
 
 **结论**：mining 用作 ABI 参考 + 收编 flat 核；**GEMM 特判**——runtime 以内置
@@ -143,15 +143,15 @@ decode 取值不同**（reshape_and_cache 的 value stride：vLLM decode 1024=
 
 ## 生成器后端：`tools/gen_qwen3_decode.py`
 
-产出 `examples/qwen3-4b.json`（310 buffer；`prefill` 433 dispatch +
-`decode` 436 dispatch），**过 verifier**（`qwen3_decode_mined_verifies`
+产出 `examples/qwen3-4b.json`（310 buffer；`prefill` 433 call +
+`decode` 436 call），**过 verifier**（`qwen3_decode_mined_verifies`
 测试）。数据源是 TRITON_ATTN capture（`dumped-kernels/pid3977275`）。
 bs=1，两个 program：
 
 - 七个真核：rms/rms_head/rope/fused（vLLM CUDA cubin）+ Triton 版
   reshape_and_cache + `kernel_unified_attention`（decode 用 3D split-KV
   实例 31 参数 + `reduce_segments` 12 参数；prefill 用 2D 实例 28 参数）。
-  真实 symbol、逐参数类型/方向表、标量字面量逐位取自代表性 decode/prefill
+  真实 entry、逐参数类型/方向表、标量字面量逐位取自代表性 decode/prefill
   forward。
 - 连线是手写的（provider 知道模型），**挖矿数据负责证伪**：发射前断言
   q/k/v 在 qkv 融合 buffer 中的视图偏移（+0/+8192B/+10240B，q/k norm
@@ -161,24 +161,24 @@ bs=1，两个 program：
 - KV state 从 vLLM 逐层池改为层交织 `[page][layer][16][8][2][128]`——
   同一批 kernel 靠 page-stride 参数 ×36 和 state offset 字面量
   （layer×65536）适配，bytes_per_token=147456，runtime 仍只知一个数。
-- decode attention 是一个两 step impl：unified 3D 写 f32 segm 部分和
+- decode attention 是一个两 launch impl：unified 3D 写 f32 segm 部分和
   （impl 私有 scratch），reduce_segments 归并到 attn_out——调用方只见
-  28 参数的 `attn` 接口，一次 dispatch/层。**prefill attention
+  `attn` 接口（normalize 把 ABI 常量折进 impl 后只剩 buffer/state 参数），一次 call/层。**prefill attention
   （`attn_prefill`）是同一接口的另一份实现**：2D 实例单步无 scratch，
   其 28 参 launch ABI 恰好就是接口本身（接口切分正确的实证）；grid =
   `[ceil_div(tokens,4), 8, 1]`（两个真实 prompt 长度拟合证实）。
   seq_lens/cu_seqlens_q 是 caller 每次调用前填的 input buffer。
-  rms_norm_head 因 q/k 调用点 grid 不同（×32 vs ×8，v2 里 grid 归
-  impl）拆成 qhead/khead 两个 kernel 条目。
+  rms_norm_head 因 q/k 调用点 grid 不同（×32 vs ×8，grid 归
+  impl）拆成 qhead/khead 两个 op。
 - **prefill program = decode 去掉 final_norm/lm_head/sample 尾巴**（只落
   KV），chunked prefill = caller 连调 prefill + 最后一个 prompt token 走
-  decode 出首个 logits——"prefill_last"就是 decode，免掉 symbol 依赖的
+  decode 出首个 logits——"prefill_last"就是 decode，免掉 var 依赖的
   offset。三个 decode 时被 tokens=1 掩盖的字面量由 prefill capture 现形
   并修正：head-norm 输入行距=6144（融合 qkv）、head-norm 总 head 数 =
   tokens×heads（表达式标量）、cache value 行距=6144。logits/next_token
   定常形状 `[1,·]`、decode 专属 kernel（attn 3D/argmax）grid 与 scratch
   定常——否则按 CHUNK_MAX=2048 上界要多付 ~1GB。
-- GEMM dispatch 用 `extern:cublaslt_bf16_tn` 符号（runtime 按前缀特判为
+- GEMM launch 用 `extern:cublaslt_bf16_tn` entry（runtime 按前缀特判为
   cublasLt matmul）；embedding 是唯一手写核（`tools/kernels-src/embedding.cu`，
   `kern_embedding_i64_bf16`，20 行 gather）。
 

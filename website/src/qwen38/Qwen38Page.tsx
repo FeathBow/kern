@@ -180,7 +180,7 @@ function Sketch() {
         <text x={630} y={63}>qwen3.8-27b.json</text>
         <text x={630} y={83} className="q-dim">prefill · decode</text>
         <text x={630} y={133}>qwen3.8-27b-dflash2.json</text>
-        <text x={630} y={153} className="q-dim">6 programs · 40 kernels</text>
+        <text x={630} y={153} className="q-dim">6 programs · 40 ops</text>
         <text x={630} y={213}>25 PINNED CUBINS</text>
         <text x={630} y={233} className="q-dim">sha256 · from both captures</text>
         <text x={630} y={283} className="q-bold">6 HANDWRITTEN KERNELS</text>
@@ -329,10 +329,10 @@ export default function Qwen38Page() {
         <h2>THE MODEL LANDED<br />IN THE GENERATOR.</h2>
         <CostBar />
         <ul className="q-list q-runtime-list">
-          <li><code>State.bytes_fixed</code><span>a state may be fixed-size, not per-token</span></li>
+          <li><code>State.bytes</code><span>a state may be fixed-size, not per-token</span></li>
           <li><code>verify</code><span>bounds-check offsets into such a state</span></li>
           <li><code>load_weights(&amp;[blob])</code><span>weights may arrive in several files</span></li>
-          <li><code>meta.spec</code><span>a speculative manifest declares its block size</span></li>
+          <li><code>spec</code><span>a speculative manifest declares its block size</span></li>
         </ul>
         <p className="q-aside">Those are the 49 lines. None of them says GDN, DFlash, or Qwen.</p>
       </section>
@@ -372,7 +372,7 @@ export default function Qwen38Page() {
         <div className="q-ties-grid">
           <div className="q-stat">
             <strong>1</strong>
-            <span>GEMM · M=43, N=96<br /><em>4 of 4,128 values off by 1 ulp — a cuBLAS algorithm choice, the one dispatch not pinned by sha256</em></span>
+            <span>GEMM · M=43, N=96<br /><em>4 of 4,128 values off by 1 ulp — a cuBLAS algorithm choice, the one launch not pinned by sha256</em></span>
           </div>
           <div className="q-stat q-stat-tight">
             <strong>≤&nbsp;0.125</strong>
