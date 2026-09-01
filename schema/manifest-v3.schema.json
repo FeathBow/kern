@@ -352,6 +352,38 @@
       ],
       "description": "The closed scalar-expression set: a constant, a var name (`\"tokens\"`),\n`{\"ceil_div\": [e, c]}`, `{\"mul\": [e, c]}`. This is deliberately not a\nlanguage: grid geometry, dynamic shared memory and var-derived scalar\nargs are the only runtime-dependent numbers a provider may compute, and\nonly with these forms."
     },
+    "ExternLaunch": {
+      "additionalProperties": false,
+      "description": "A runtime built-in: `entry` is `extern:<name>` (`cublaslt_bf16_tn`,\n`cublaslt_bf16_tn_acc`). No module, no geometry — the runtime owns both.",
+      "properties": {
+        "args": {
+          "items": {
+            "$ref": "#/$defs/LaunchArg"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "entry": {
+          "description": "`extern:<name>`.",
+          "type": "string"
+        },
+        "params": {
+          "items": {
+            "$ref": "#/$defs/ParamType"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "entry"
+      ],
+      "type": "object"
+    },
     "Impl": {
       "additionalProperties": false,
       "description": "An implementation is a micro-program: private scratch buffers (sized by\nvar expressions, provisioned by the runtime, dead outside one call) and\none or more launches. Launch geometry lives here, not at the call site —\nit belongs to the implementation.",
@@ -374,9 +406,9 @@
       ],
       "type": "object"
     },
-    "Launch": {
+    "KernelLaunch": {
       "additionalProperties": false,
-      "description": "One launch inside an implementation. The common single-launch op whose\nABI *is* the interface writes only `module`, `entry`, `block`, `grid`:\n`params` defaults to the op's params and `args` to forwarding them in\norder.",
+      "description": "A device entry point. Every kernel launch names its module: the manifest\nis the complete dependency list, and the runtime loads nothing it does\nnot name.",
       "properties": {
         "args": {
           "description": "Wiring: where each launch param comes from — a forwarded interface\nparam, a scratch buffer, or an implementation-private literal.\nAbsent: `[{\"param\": 0}, {\"param\": 1}, ...]` over the op's params.",
@@ -389,7 +421,6 @@
           ]
         },
         "block": {
-          "description": "Required unless `entry` is `extern:`.",
           "items": {
             "format": "uint32",
             "minimum": 0,
@@ -397,13 +428,10 @@
           },
           "maxItems": 3,
           "minItems": 3,
-          "type": [
-            "array",
-            "null"
-          ]
+          "type": "array"
         },
         "entry": {
-          "description": "Entry point in the module, or `extern:<name>` for a runtime built-in\n(no module, no geometry).",
+          "description": "Entry point (CUDA symbol) in the module. Same-named instances in one\nmodule (a Triton kernel's constexpr variants) are told apart by\n`params`.",
           "type": "string"
         },
         "grid": {
@@ -412,17 +440,11 @@
           },
           "maxItems": 3,
           "minItems": 3,
-          "type": [
-            "array",
-            "null"
-          ]
+          "type": "array"
         },
         "module": {
-          "description": "Name of the `modules` entry this entry point lives in. Absent: the\nruntime searches every loaded module (disambiguating by param\nlayout) — mined kernels that only know their symbol. `extern:`\nentries have no module.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "description": "Name of the `modules` entry the entry point lives in.",
+          "type": "string"
         },
         "params": {
           "description": "This launch's own ABI (what the entry actually takes). Absent: the\nop's `params`.",
@@ -447,9 +469,23 @@
         }
       },
       "required": [
-        "entry"
+        "module",
+        "entry",
+        "block",
+        "grid"
       ],
       "type": "object"
+    },
+    "Launch": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/KernelLaunch"
+        },
+        {
+          "$ref": "#/$defs/ExternLaunch"
+        }
+      ],
+      "description": "One launch inside an implementation: a device entry point in a pinned\nmodule, or a runtime built-in. The common single-launch op whose ABI\n*is* the interface writes only `module`, `entry`, `block`, `grid`:\n`params` defaults to the op's params and `args` to forwarding them in\norder."
     },
     "LaunchArg": {
       "anyOf": [
@@ -670,6 +706,7 @@
       "additionalProperties": {
         "$ref": "#/$defs/Module"
       },
+      "description": "The dependency list: every code artifact a kernel launch pins, by\nname. Complete by construction — a launch without a module is a\nruntime built-in — so the runtime loads exactly these.",
       "type": "object"
     },
     "ops": {
@@ -722,6 +759,7 @@
     "schema_version",
     "model",
     "buffers",
+    "modules",
     "ops",
     "programs"
   ],

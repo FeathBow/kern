@@ -6250,6 +6250,10 @@
   "unified_noncausal": {
    "source": "unified_noncausal.cubin",
    "sha256": "7284b317223a98d636bbf9a06b0c8cbcfdabbacec40721c819efb52c6dcada9f"
+  },
+  "vllm_activation": {
+   "source": "vllm_activation.cubin",
+   "sha256": "612f0d4914c05466fc16d70c66beb8cf81a9d17a16a0696c45b455687109ecb7"
   }
  },
  "ops": {
@@ -6608,6 +6612,7 @@
    "impl": {
     "launches": [
      {
+      "module": "vllm_activation",
       "entry": "_ZN4vllm18act_and_mul_kernelIN3c108BFloat16E14__nv_bfloat162XadL_ZNS_11silu_kernelIS2_EET_RKS5_fEEXadL_ZNS_18packed_silu_kernelIS3_EES5_S7_fEELb1ELb1ELb0ELb1EEEvPS5_PS6_ifff",
       "params": [
        "out buffer<bf16>",

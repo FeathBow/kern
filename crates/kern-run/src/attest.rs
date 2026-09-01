@@ -1127,10 +1127,9 @@ fn execute(o: Opts) -> Result<i32> {
         let ls = &op.imp.launches;
         let mut names: Vec<String> = ls
             .iter()
-            .map(|l| match l.module.as_deref().and_then(|n| m.modules.get(n)) {
+            .map(|l| match l.module().and_then(|n| m.modules.get(n)) {
                 Some(md) => md.source.rsplit('/').next().unwrap_or(&md.source).to_string(),
-                None if l.is_extern() => l.entry.clone(),
-                None => "(unpinned module)".to_string(),
+                None => l.entry().to_string(),
             })
             .collect();
         names.dedup();

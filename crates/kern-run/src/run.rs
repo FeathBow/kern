@@ -195,28 +195,28 @@ fn execute(o: Opts) -> Result<()> {
     }
 
     info!(
-        "op resolution: {} artifacts loaded from {} ({} pinned by `modules`), entries matched by \
+        "op resolution: {} of the {} modules the manifest pins loaded from {}, entries matched by \
          cuFuncGetParamInfo layout vs declared params ({:?}):",
         rt.module_count(),
-        o.kernels.display(),
         m.modules.len(),
+        o.kernels.display(),
         load_t
     );
     for (name, modules) in rt.op_resolution() {
         let op = &rt.manifest.ops[&name];
         for (li, (l, module)) in op.imp.launches.iter().zip(&modules).enumerate() {
             let label = if li == 0 { name.clone() } else { format!("  ·launch{li}") };
-            let sm = match &l.shared_mem {
+            let sm = match l.kernel().and_then(|k| k.shared_mem.as_ref()) {
                 Some(e) => format!(
                     ", shmem {:?}",
                     e.eval(&BTreeMap::from([("tokens".into(), 1)])).unwrap_or(0)
                 ),
                 None => String::new(),
             };
-            let block = l.block.map_or(String::new(), |b| format!(", block {b:?}"));
+            let block = l.kernel().map_or(String::new(), |k| format!(", block {:?}", k.block));
             info!(
                 "  {label:<18} {:<44} {:>2} params{block}{sm} <- {module}",
-                ellipsize(&l.entry, 44),
+                ellipsize(l.entry(), 44),
                 l.params_of(op).len(),
             );
         }

@@ -764,7 +764,7 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
                                    [512, 1, 1], [T, 1, 1], shared_mem=GEMMA_SMEM,
                                    **hw("gemma_rms_norm")),
         "silu_mul": single(silu_sym, ["out buffer<bf16>", "in buffer<bf16>", "i32", "i32", "f32", "i32"],
-                           blk("silu"), [T, 1, 1]),
+                           blk("silu"), [T, 1, 1], cubin=pins[("silu", True)][0], sha256=pins[("silu", True)][1]),
         "copy_rows": single("kern_copy_rows_bf16",
                             ["out buffer<bf16>", "in buffer<bf16>", "i32", "i32", "i32"],
                             [256, 1, 1], [T, 1, 1], **hw("copy_rows")),
@@ -1388,8 +1388,11 @@ def main():
             if src[tag]:
                 _, sha = pinner.pin(TRITON[tag], src[tag][0]["attributes"]["num_regs"])
                 pins[(tag, is_pre)] = (f"{tag}.cubin", sha)
+    # the one mined CUDA kernel (vLLM's activation_kernels.cu) pins its module too
+    pins[("silu", True)] = ("vllm_activation.cubin",
+                            pinner.pin(silu_sym, pre["silu"][0]["attributes"]["num_regs"])[1])
     for (tag, is_pre), (mod, sha) in sorted(pins.items()):
-        print(f"  pin {TRITON[tag]:<52} {'prefill' if is_pre else 'decode '} -> {mod} {sha[:12]}",
+        print(f"  pin {TRITON.get(tag, silu_sym)[:52]:<52} {'prefill' if is_pre else 'decode '} -> {mod} {sha[:12]}",
               file=sys.stderr)
 
     spec = None

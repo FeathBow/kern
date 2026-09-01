@@ -24,7 +24,7 @@ mod device;
 mod error;
 pub mod values;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::raw::c_void;
 use std::sync::Arc;
 
@@ -138,7 +138,9 @@ impl Runtime {
         ctx.bind_to_thread()?;
 
         let remote = cubin::fetch_registry_cubins(&manifest)?;
-        let modules = cubin::load_all_modules(kernels_dir, &remote)?;
+        let wanted: BTreeSet<String> =
+            manifest.modules.values().map(|md| md.sha256.to_lowercase()).collect();
+        let modules = cubin::load_pinned_modules(kernels_dir, &remote, &wanted)?;
 
         // States are paged: every `index_into` a state comes in `stride`
         // tokens per index (the KV block table's page). A capacity that is

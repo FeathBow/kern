@@ -23,7 +23,11 @@ Keys are emitted in a canonical order so diffs stay readable.
 """
 
 import copy
+import hashlib
+import os
+import pathlib
 import re
+import subprocess
 
 SCHEMA_VERSION = 3
 SCALARS = ("i32", "i64", "f32", "u8")
@@ -146,3 +150,68 @@ def normalize(m):
     m["buffers"] = {k: _order(v, _BUFFER) for k, v in m["buffers"].items()}
     m["programs"] = {k: [_order(c, _CALL) for c in v] for k, v in m["programs"].items()}
     return _order(m, _TOP)
+
+
+# ------------------------------------------------------------- dump index
+def cuobjdump():
+    return str(pathlib.Path(os.environ.get("CUDA_HOME", "/usr/local/cuda")) / "bin" / "cuobjdump")
+
+
+def module_functions(mod):
+    """{function: register count} for one cubin (``cuobjdump -res-usage``)."""
+    out = subprocess.run([cuobjdump(), "-res-usage", str(mod)],
+                         capture_output=True, text=True).stdout
+    fns, cur = {}, None
+    for line in out.splitlines():
+        s = line.strip()
+        if s.startswith("Function "):
+            cur = s.split()[1].rstrip(":")
+        elif cur and "REG:" in s:
+            fns[cur] = int(s.split("REG:")[1].split()[0])
+            cur = None
+    return fns
+
+
+class DumpIndex:
+    """Every ``module_*.cubin`` of one or more capture dumps, by content:
+    ``pin(symbol, regs)`` names the one module that defines ``symbol`` with
+    that register count, so a generator can pin every mined launch — the
+    manifest's ``modules`` table is the complete dependency list."""
+
+    def __init__(self, *dump_dirs):
+        self.mods = {}   # sha -> (path, {function: regs})
+        for d in dump_dirs:
+            for mod in sorted(pathlib.Path(d).glob("module_*.cubin")):
+                sha = hashlib.sha256(mod.read_bytes()).hexdigest()
+                if sha not in self.mods:
+                    fns = module_functions(mod)
+                    if fns:
+                        self.mods[sha] = (mod, fns)
+
+    def param_sizes(self, sha, symbol):
+        """Kernel parameter sizes in ordinal order, from the cubin's
+        ``.nv.info.<symbol>`` (EIATTR_KPARAM_INFO) — what the runtime reads
+        back with cuFuncGetParamInfo."""
+        mod, _ = self.mods[sha]
+        out = subprocess.run([cuobjdump(), "-elf", str(mod)], capture_output=True, text=True).stdout
+        # the section body (not its line in the section table): a header
+        # line that is exactly the section name, up to the next section
+        hdr = re.search(r"^\.nv\.info\.%s\s*$" % re.escape(symbol), out, re.M)
+        assert hdr, f"{mod.name}: no .nv.info.{symbol}"
+        nxt = re.search(r"^\.[A-Za-z]", out[hdr.end():], re.M)
+        sect = out[hdr.end():hdr.end() + nxt.start() if nxt else None]
+        params = {int(o, 16): int(sz, 16) for o, sz in
+                  re.findall(r"Ordinal\s*:\s*0x([0-9a-f]+)\s+Offset\s*:\s*0x[0-9a-f]+\s+Size\s*:\s*0x([0-9a-f]+)", sect)}
+        return [params[i] for i in range(len(params))]
+
+    def pin(self, symbol, regs=None, sizes=None):
+        """sha256 of the unique dump module defining ``symbol`` — at ``regs``
+        registers, and (when the register count does not separate two
+        constexpr instances) with parameter layout ``sizes``."""
+        hits = {sha: mod for sha, (mod, fns) in self.mods.items()
+                if symbol in fns and (regs is None or fns[symbol] == regs)}
+        assert hits, f"{symbol} REG={regs}: no dump module defines it"
+        if len(hits) > 1 and sizes is not None:
+            hits = {sha: mod for sha, mod in hits.items() if self.param_sizes(sha, symbol) == list(sizes)}
+        assert len(hits) == 1, f"{symbol} REG={regs} params={sizes}: {len(hits)} dump modules match: {sorted(m.name for m in hits.values())}"
+        return next(iter(hits))

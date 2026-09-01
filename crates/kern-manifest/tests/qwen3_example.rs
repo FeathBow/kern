@@ -52,9 +52,9 @@ fn qwen3_silu_mined_fixture_verifies() {
     assert_eq!(oa.params.len(), 2);
     let (la, lb) = (&oa.imp.launches[0], &ob.imp.launches[0]);
     assert_eq!(la.params_of(oa).len(), 3);
-    assert!(a.modules[la.module.as_deref().unwrap()].source.starts_with("hf:"));
+    assert!(a.modules[la.module().unwrap()].source.starts_with("hf:"));
     assert_eq!(lb.params_of(ob).len(), 6);
-    assert!(lb.module.is_none());
+    assert!(!m.modules[lb.module().unwrap()].source.starts_with("hf:"));
     for p in ["decode", "prefill"] {
         assert_eq!(
             serde_json::to_string(&a.programs[p]).unwrap(),
@@ -87,7 +87,7 @@ fn qwen3_dspark_mined_verifies() {
     // to its own module or resolution would be ambiguous.
     let pinned = |op: &str| {
         let l = &m.ops[op].imp.launches[0];
-        m.modules[l.module.as_deref().unwrap_or_else(|| panic!("{op} not pinned"))].sha256.clone()
+        m.modules[l.module().unwrap()].sha256.clone()
     };
     assert_ne!(pinned("attn_prefill"), pinned("attn_draft"));
 }

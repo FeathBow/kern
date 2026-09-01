@@ -47,7 +47,7 @@ buffers.<name>               buffer   有类型的张量：input / output / weig
   不保留）/ `carry`（一个 program 写、另一个 program 读的交接棒，跨次
   执行保留；谁先跑是 caller 契约，verifier 只要求它被某个 program 写到
   ——投机解码的 aux 隐状态逼出来的）。
-- `modules`：manifest 的依赖清单——每个 launch 钉住的代码工件：
+- `modules`：manifest 的依赖清单（必填）——每个 kernel launch 钉住的代码工件：
   `source`（本地文件名 `argmax.cubin`，或 registry ref
   `hf:<org>/<repo>/<path>[@revision]`）+ `sha256`。**身份是 sha256，
   source 只是标签**（registry ref 时兼做 URL）。
@@ -57,10 +57,12 @@ buffers.<name>               buffer   有类型的张量：input / output / weig
     buffer/state 必须声明方向，方向驱动数据流校验。
   - **实现（`impl`）是可整体替换的微程序**：`scratch`（impl 私有工作区，
     dtype+shape 声明，调用方看不见）+ `launches` 顺序 launch 列表。每个
-    launch：`module`（`modules` 表里的名字；挖矿来的只知道符号的 launch
-    可不写，runtime 在全部已装载模块里按参数布局消歧）、`entry`（module
-    里的入口点，或 `extern:<name>` 表示 runtime 内置——此时没有 module
-    也没有几何）、`params`（该 launch 自己的 ABI；**不写 = 同接口**）、
+    launch 二选一——**kernel launch**：`module`（`modules` 表里的名字，
+    必填：manifest 是完整的依赖清单，runtime 只装载它点名的工件；同一
+    module 里同名的 Triton constexpr 实例靠 `params` 布局区分）+ `entry`
+    （module 里的入口点）+ 几何；**extern launch**：`entry` 写
+    `extern:<name>` 表示 runtime 内置，没有 module 也没有几何。其余字段：
+    `params`（该 launch 自己的 ABI；**不写 = 同接口**）、
     `block`/`grid`（grid 用下述表达式集合；可选 `shared_mem`，上限 227KB
     opt-in）、`args` 连线：`{"param": i}` 转发接口第 i 参 /
     `{"scratch": name}` 接私有工作区 / 字面量标量（impl 私有常量）；
@@ -152,7 +154,8 @@ impl 与接口的自洽（方向、dtype、scratch 数据流），runtime 加载
 就是"kernel 市场"的交换单元。
 
 **module 的身份是 sha256，source 只是标签。** runtime 把 kernel 目录里的
-每个工件都装载并算哈希，按哈希给 launch 找模块，**从不按文件名找**。所以
+每个工件算哈希，**只装载 manifest 点名的那些**，按哈希给 launch 找模块，
+**从不按文件名找**。所以
 一个目录可以同时放一个核的每一个版本（`gemm8-3f9a1c2d4e5b.cubin`、
 `gemm8-9b0c….cubin`，`tools/extract_kernels.sh` 就这么落地：module 名 +
 sha 前 12 位），上一个 commit 的 manifest 和这一个都能从同一个目录解析
@@ -204,9 +207,9 @@ header 重复——没有权重文件也要能 verify。冗余在 manifest 不�
    `index_into` 与 min/max 互斥、`monotone` 只许一维、min ≤ max 在
    var 两端成立；
 5. module：`sha256` 64 位 hex、`source` 非空、registry ref 语法；
-6. op impl 逐 launch：`module` 可解析；`extern:` 入口没有 module 也没有
-   几何，其余必须有 block/grid；block 不超 CUDA 限制、grid 在 var 上界
-   不超 CUDA 限制/下界不为零；launch args 与 launch params（缺省 = 接口）
+6. op impl 逐 launch：kernel launch 的 `module` 可解析（没有 module 的
+   launch 必须是 `extern:` 内置，带 module 的 entry 不得是 `extern:`）；
+   block 不超 CUDA 限制、grid 在 var 上界不超 CUDA 限制/下界不为零；launch args 与 launch params（缺省 = 接口）
    数量/逐位类型匹配；
 7. impl 与接口的自洽：launch 不得写穿接口 `in` 参、接口 `out` 参必须被
    某个 launch 写到、scratch dtype + 跨 launch 数据流（禁止读未写的
@@ -237,7 +240,8 @@ const，也不是 shape 意义上的 dim）、`kernels`→`ops`、`steps`→`lau
 `inout ptr`→`inout state`、`unit`→`stride`、`bytes_fixed`→`bytes`、`meta`
 拆平到顶层、`version`→`schema_version`。
 
-结构：`modules` 表取代逐 launch 的 `cubin+sha256`；`Program` 单字段包装
-拆掉；launch 的 `params`/`args` 有缺省；`extern:` 不写几何；ABI 常量折进
+结构：`modules` 表取代逐 launch 的 `cubin+sha256`，且每个 kernel launch
+都必须钉 module（v2 允许只写符号、由 runtime 在全部已装载模块里猜——
+kern test 的 c10 假阴性就是它咬的）；`Program` 单字段包装拆掉；launch 的 `params`/`args` 有缺省；`extern:` 不写几何；ABI 常量折进
 impl。删掉从没被读过的字段：`states.*.align`、`symbols.*.min`、scratch
 实参的 `offset`、`u32` 标量。

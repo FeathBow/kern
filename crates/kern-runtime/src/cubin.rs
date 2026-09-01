@@ -2,7 +2,7 @@
 //! libraries with embedded fatbins, and registry refs (`hf:...`) fetched
 //! into a content-addressed cache.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CString;
 use std::os::raw::c_void;
 use std::path::{Path, PathBuf};
@@ -55,15 +55,16 @@ pub(crate) struct LoadedModule {
     pub module: sys::CUmodule,
 }
 
-/// Load every module the artifacts provide, keyed by sha256 of the file.
-/// File names are labels only: a kernel dir may hold every version of a
-/// kernel ever built (`gemm8-3f9a1c2d4e5b.cubin`, `gemm8-9b0c…`) and each
-/// manifest resolves to the one it pins. Two files with the same bytes load
-/// once. Local files load in name order so unpinned-entry resolution is
-/// deterministic; registry artifacts follow.
-pub(crate) fn load_all_modules(
+/// Load the modules the manifest pins, keyed by sha256 of the file. Every
+/// `.cubin` in the directory is hashed; only artifacts whose hash the
+/// manifest's `modules` table names are loaded — the manifest is the
+/// complete dependency list, the directory may hold every version ever
+/// built (`gemm8-3f9a1c2d4e5b.cubin`, `gemm8-9b0c…`) and each manifest
+/// resolves to the one it pins. Two files with the same bytes load once.
+pub(crate) fn load_pinned_modules(
     kernels_dir: &Path,
     remote: &BTreeMap<String, PathBuf>,
+    wanted: &BTreeSet<String>,
 ) -> Result<Vec<LoadedModule>> {
     let mut cubins: Vec<_> = std::fs::read_dir(kernels_dir)
         .map_err(|e| Error::KernelArtifact(format!("kernel dir {}: {e}", kernels_dir.display())))?
@@ -82,6 +83,10 @@ pub(crate) fn load_all_modules(
         let bytes = std::fs::read(&path)
             .map_err(|e| Error::KernelArtifact(format!("reading {}: {e}", path.display())))?;
         let sha = format!("{:x}", sha2::Sha256::digest(&bytes));
+        if !wanted.contains(&sha) {
+            tracing::debug!("{label} ({}): not pinned by this manifest, not loaded", &sha[..12]);
+            continue;
+        }
         if let Some(prev) = modules.iter().find(|m| m.sha == sha) {
             tracing::debug!("{label}: same bytes as {} ({}), not loaded twice", prev.label, &sha[..12]);
             continue;

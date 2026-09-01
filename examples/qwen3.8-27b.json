@@ -5465,6 +5465,10 @@
   "unified-7b29120e": {
    "source": "unified.cubin",
    "sha256": "7b29120edbd4c2bd54ac23b46df77d4c594fe2a019996423be70e15ccb3c18d2"
+  },
+  "vllm_activation": {
+   "source": "vllm_activation.cubin",
+   "sha256": "612f0d4914c05466fc16d70c66beb8cf81a9d17a16a0696c45b455687109ecb7"
   }
  },
  "ops": {
@@ -5823,6 +5827,7 @@
    "impl": {
     "launches": [
      {
+      "module": "vllm_activation",
       "entry": "_ZN4vllm18act_and_mul_kernelIN3c108BFloat16E14__nv_bfloat162XadL_ZNS_11silu_kernelIS2_EET_RKS5_fEEXadL_ZNS_18packed_silu_kernelIS3_EES5_S7_fEELb1ELb1ELb0ELb1EEEvPS5_PS6_ifff",
       "params": [
        "out buffer<bf16>",

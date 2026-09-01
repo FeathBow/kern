@@ -14,11 +14,11 @@
 ## 执行器（`crates/kern-runtime`）
 
 `kern-runtime` 是模型无关的执行器（依赖只有 crates.io：cudarc/half/
-safetensors/thiserror，可开源）：verify manifest → 加载 `kernels/` 下全部
-cubin 并逐个算 sha256（`tools/extract_kernels.sh` 按 manifest `modules` 表钉的哈希从
-dump / 手写核 build 里凑齐，落地名 `<module>-<sha12>.cubin`）→ 逐 op 逐
-launch 解析 entry——写了 `module` 的 launch 只在哈希相同的模块里找（文件名不参与），
-没写的在全部模块里找，**同名 Triton 多 constexpr 实例靠
+safetensors/thiserror，可开源）：verify manifest → `kernels/` 下每个
+cubin 算 sha256，**只装载 manifest `modules` 表点名的哈希**（其余文件不碰；
+`tools/extract_kernels.sh` 按这些哈希从 dump / 手写核 build 里凑齐，落地名
+`<module>-<sha12>.cubin`）→ 逐 op 逐 launch 在自己钉的模块里解析 entry
+（文件名不参与），**同一模块里同名的 Triton 多 constexpr 实例靠
 `cuFuncGetParamInfo` 参数布局与 manifest params 比对来消歧**（phase-2
 ABI 校验兼做实例选择，绕开了 capture 缺 launch→module 映射的坑）→ 按
 var max 分配全部 buffer / 按 bytes_per_token×capacity 分配 state →

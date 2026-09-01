@@ -211,71 +211,64 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
         let mut scratch_used: BTreeSet<&str> = BTreeSet::new();
 
         for (li, launch) in imp.launches.iter().enumerate() {
-            let ctx = format!("op `{oname}` launch #{li} ({})", launch.entry);
-            if launch.entry.is_empty() {
-                errs.push(format!("{ctx}: empty entry"));
-            }
-            if let Some(md) = &launch.module {
-                if m.modules.contains_key(md) {
-                    used_modules.insert(md.clone());
-                } else {
-                    errs.push(format!("{ctx}: unknown module `{md}`"));
-                }
-            }
-
-            if launch.is_extern() {
-                if launch.module.is_some() {
-                    errs.push(format!("{ctx}: an extern entry has no module"));
-                }
-                if launch.block.is_some() || launch.grid.is_some() || launch.shared_mem.is_some() {
-                    errs.push(format!("{ctx}: an extern entry has no launch geometry"));
-                }
-            } else {
-                match &launch.block {
-                    None => errs.push(format!("{ctx}: missing block")),
-                    Some(block) => {
-                        let threads: u64 = block.iter().map(|&x| x as u64).product();
-                        if block.contains(&0) || threads > MAX_BLOCK_THREADS {
-                            errs.push(format!(
-                                "{ctx}: block {block:?} exceeds {MAX_BLOCK_THREADS} threads or has a zero dim"
-                            ));
-                        }
-                        if block[2] > MAX_BLOCK_Z {
-                            errs.push(format!("{ctx}: block.z {} > {MAX_BLOCK_Z}", block[2]));
-                        }
+            let ctx = format!("op `{oname}` launch #{li} ({})", launch.entry());
+            match launch {
+                Launch::Extern(e) => {
+                    if !e.entry.starts_with("extern:") {
+                        errs.push(format!(
+                            "{ctx}: a launch without a module must be a runtime built-in (`extern:<name>`)"
+                        ));
                     }
                 }
-                match &launch.grid {
-                    None => errs.push(format!("{ctx}: missing grid")),
-                    Some(grid) => {
-                        for (axis, e) in ["x", "y", "z"].iter().zip(grid) {
-                            let ectx = format!("{ctx}: grid.{axis}");
-                            check_expr(e, m, &mut used_vars, &mut errs, &ectx);
-                            match e.eval(&env_max) {
-                                Ok(v) => {
-                                    let limit = if *axis == "x" { MAX_GRID_X } else { MAX_GRID_YZ };
-                                    if v > limit {
-                                        errs.push(format!(
-                                            "{ectx}: {v} exceeds CUDA limit {limit} at var upper bounds"
-                                        ));
-                                    }
+                Launch::Kernel(k) => {
+                    if k.entry.is_empty() {
+                        errs.push(format!("{ctx}: empty entry"));
+                    }
+                    if k.entry.starts_with("extern:") {
+                        errs.push(format!("{ctx}: an extern entry has no module or launch geometry"));
+                    }
+                    if m.modules.contains_key(&k.module) {
+                        used_modules.insert(k.module.clone());
+                    } else {
+                        errs.push(format!("{ctx}: unknown module `{}`", k.module));
+                    }
+                    let block = &k.block;
+                    let threads: u64 = block.iter().map(|&x| x as u64).product();
+                    if block.contains(&0) || threads > MAX_BLOCK_THREADS {
+                        errs.push(format!(
+                            "{ctx}: block {block:?} exceeds {MAX_BLOCK_THREADS} threads or has a zero dim"
+                        ));
+                    }
+                    if block[2] > MAX_BLOCK_Z {
+                        errs.push(format!("{ctx}: block.z {} > {MAX_BLOCK_Z}", block[2]));
+                    }
+                    for (axis, e) in ["x", "y", "z"].iter().zip(&k.grid) {
+                        let ectx = format!("{ctx}: grid.{axis}");
+                        check_expr(e, m, &mut used_vars, &mut errs, &ectx);
+                        match e.eval(&env_max) {
+                            Ok(v) => {
+                                let limit = if *axis == "x" { MAX_GRID_X } else { MAX_GRID_YZ };
+                                if v > limit {
+                                    errs.push(format!(
+                                        "{ectx}: {v} exceeds CUDA limit {limit} at var upper bounds"
+                                    ));
                                 }
-                                Err(err) => errs.push(format!("{ectx}: {err}")),
                             }
-                            if let Ok(0) = e.eval(&env_min) {
-                                errs.push(format!("{ectx}: evaluates to 0 at var lower bounds"));
-                            }
+                            Err(err) => errs.push(format!("{ectx}: {err}")),
+                        }
+                        if let Ok(0) = e.eval(&env_min) {
+                            errs.push(format!("{ectx}: evaluates to 0 at var lower bounds"));
                         }
                     }
-                }
-                if let Some(e) = &launch.shared_mem {
-                    let ectx = format!("{ctx}: shared_mem");
-                    check_expr(e, m, &mut used_vars, &mut errs, &ectx);
-                    if let Ok(v) = e.eval(&env_max) {
-                        if v > MAX_DYN_SHARED_MEM {
-                            errs.push(format!(
-                                "{ectx}: {v} bytes exceeds opt-in limit {MAX_DYN_SHARED_MEM} at var upper bounds"
-                            ));
+                    if let Some(e) = &k.shared_mem {
+                        let ectx = format!("{ctx}: shared_mem");
+                        check_expr(e, m, &mut used_vars, &mut errs, &ectx);
+                        if let Ok(v) = e.eval(&env_max) {
+                            if v > MAX_DYN_SHARED_MEM {
+                                errs.push(format!(
+                                    "{ectx}: {v} bytes exceeds opt-in limit {MAX_DYN_SHARED_MEM} at var upper bounds"
+                                ));
+                            }
                         }
                     }
                 }
@@ -715,7 +708,7 @@ mod tests {
                 "args": [{ "param": 0 }, { "param": 1 }, { "scratch": "part" }, { "param": 3 }, { "param": 4 }]
               },
               {
-                "entry": "attn_reduce_k",
+                "module": "toy", "entry": "attn_reduce_k",
                 "params": ["in buffer<f32>", "out buffer<bf16>", "i32"],
                 "block": [128, 1, 1],
                 "grid": ["tokens", 1, 1],
@@ -839,20 +832,31 @@ mod tests {
         // arity: extern gemm inherits the 4-param interface here; only the
         // geometry rule is under test
         check(v).unwrap();
+        // geometry on an extern: matches neither launch shape
         let mut v = base();
         v["ops"]["embed"]["impl"]["launches"][0] =
             serde_json::json!({ "entry": "extern:cublaslt_bf16_tn", "block": [1, 1, 1], "grid": [1, 1, 1] });
-        assert_err(v, "an extern entry has no launch geometry");
+        assert!(check(v).is_err());
+        // a module with an extern entry
         let mut v = base();
         v["ops"]["embed"]["impl"]["launches"][0]["entry"] = "extern:x".into();
-        assert_err(v, "an extern entry has no module");
+        assert_err(v, "an extern entry has no module or launch geometry");
     }
 
     #[test]
-    fn cubin_launch_needs_geometry() {
+    fn kernel_launch_needs_module_and_geometry() {
+        // no module, no geometry, not extern: parses as an extern launch and
+        // the verifier names the rule
+        let mut v = base();
+        v["ops"]["embed"]["impl"]["launches"][0] = serde_json::json!({ "entry": "embed_k" });
+        assert_err(v, "a launch without a module must be a runtime built-in");
+        // geometry without a module: no shape accepts it
+        let mut v = base();
+        v["ops"]["embed"]["impl"]["launches"][0].as_object_mut().unwrap().remove("module");
+        assert!(check(v).is_err());
         let mut v = base();
         v["ops"]["embed"]["impl"]["launches"][0].as_object_mut().unwrap().remove("grid");
-        assert_err(v, "missing grid");
+        assert!(check(v).is_err());
     }
 
     #[test]

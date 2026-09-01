@@ -2380,9 +2380,29 @@
    "source": "embedding.cubin",
    "sha256": "1c3dd3e591d872aed259d7ef59d44649061f77a4247a5df864a7fbf0ccbde92f"
   },
+  "reduce_segments": {
+   "source": "reduce_segments.cubin",
+   "sha256": "9efa493af6c900015da509df9cc753616fd451b4f63f9bf58dcdbc69c37f1b76"
+  },
+  "reshape_and_cache": {
+   "source": "reshape_and_cache.cubin",
+   "sha256": "1e5912bed482f8555e91a145a3cff4a1ce9b0c4240e23aa21b184c32d4716f13"
+  },
   "unified_causal": {
    "source": "unified_causal.cubin",
    "sha256": "c6960716503ae634c36ecddb1239b16e3b0856eb04ed3f011249cb6234bb7163"
+  },
+  "unified_decode": {
+   "source": "unified_decode.cubin",
+   "sha256": "4c2b10b116c067a3076927f4473cafde6aee00ea696b2ca788bfde9d8cad4545"
+  },
+  "vllm_layernorm": {
+   "source": "vllm_layernorm.cubin",
+   "sha256": "21d39dd342b4ce528a353c2a006d0834466cd5e6394647164147c9e3eccd91d6"
+  },
+  "vllm_pos_encoding": {
+   "source": "vllm_pos_encoding.cubin",
+   "sha256": "116de812ac5a3a186f76fa239d4c16abbed6b8b0af06d16e1baec0aefe8fe8fa"
   }
  },
  "ops": {
@@ -2396,6 +2416,7 @@
    "impl": {
     "launches": [
      {
+      "module": "vllm_layernorm",
       "entry": "_ZN4vllm15rms_norm_kernelIN3c108BFloat16ELi8ELi2ELb1EEEvPT_PKS3_lllllS6_lfii",
       "params": [
        "out buffer<bf16>",
@@ -2473,6 +2494,7 @@
    "impl": {
     "launches": [
      {
+      "module": "vllm_layernorm",
       "entry": "_ZN4vllm15rms_norm_kernelIN3c108BFloat16ELi8ELi3ELb1EEEvPT_PKS3_lllllS6_lfii",
       "params": [
        "out buffer<bf16>",
@@ -2555,6 +2577,7 @@
    "impl": {
     "launches": [
      {
+      "module": "vllm_layernorm",
       "entry": "_ZN4vllm15rms_norm_kernelIN3c108BFloat16ELi8ELi3ELb1EEEvPT_PKS3_lllllS6_lfii",
       "params": [
        "out buffer<bf16>",
@@ -2637,6 +2660,7 @@
    "impl": {
     "launches": [
      {
+      "module": "vllm_pos_encoding",
       "entry": "_ZN4vllm23rotary_embedding_kernelIN3c108BFloat16ES2_Lb1EEEvPKlPT_S6_PKT0_illliiilb",
       "params": [
        "in buffer<i64>",
@@ -2721,6 +2745,7 @@
    "impl": {
     "launches": [
      {
+      "module": "reshape_and_cache",
       "entry": "reshape_and_cache_kernel_flash",
       "params": [
        "in buffer<bf16>",
@@ -2847,6 +2872,7 @@
     },
     "launches": [
      {
+      "module": "unified_decode",
       "entry": "kernel_unified_attention",
       "params": [
        "out buffer<bf16>",
@@ -2989,6 +3015,7 @@
       ]
      },
      {
+      "module": "reduce_segments",
       "entry": "reduce_segments",
       "params": [
        "out buffer<bf16>",
@@ -3261,6 +3288,7 @@
    "impl": {
     "launches": [
      {
+      "module": "vllm_layernorm",
       "entry": "_ZN4vllm25fused_add_rms_norm_kernelIN3c108BFloat16ELi8ELb1EEENSt9enable_ifIXaagtT0_Li0Esr4vllm12_typeConvertIT_EE6existsEvE4typeEPS4_lS7_PKS4_fiil",
       "params": [
        "inout buffer<bf16>",

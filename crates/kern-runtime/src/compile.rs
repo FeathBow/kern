@@ -151,48 +151,43 @@ pub(crate) fn resolve_ops(
     for (name, op) in &manifest.ops {
         let mut launches = Vec::new();
         for (li, l) in op.imp.launches.iter().enumerate() {
-            if let Some(ext) = l.entry.strip_prefix("extern:") {
-                match ext {
-                    "cublaslt_bf16_tn" => launches.push(LaunchImpl::GemmBf16Tn { beta: 0.0 }),
-                    "cublaslt_bf16_tn_acc" => launches.push(LaunchImpl::GemmBf16Tn { beta: 1.0 }),
-                    _ => bail!(Manifest, "op `{name}` launch #{li}: unsupported extern `{ext}`"),
+            let k = match l {
+                kern_manifest::types::Launch::Extern(e) => {
+                    let ext = e.entry.strip_prefix("extern:").unwrap_or(&e.entry);
+                    match ext {
+                        "cublaslt_bf16_tn" => launches.push(LaunchImpl::GemmBf16Tn { beta: 0.0 }),
+                        "cublaslt_bf16_tn_acc" => launches.push(LaunchImpl::GemmBf16Tn { beta: 1.0 }),
+                        _ => bail!(Manifest, "op `{name}` launch #{li}: unsupported extern `{ext}`"),
+                    }
+                    continue;
                 }
-                continue;
-            }
-            // Identity: a launch that names its module pins that module's
-            // sha256 (the verifier resolved the name); the source is a
-            // label. Only loaded modules with that hash are candidates.
-            // Unpinned launches search every loaded module and
-            // disambiguate by param layout.
-            let pinned = l.module.as_deref().and_then(|m| manifest.modules.get(m).map(|md| (m, md)));
-            let want_sha = pinned.map(|(_, md)| md.sha256.to_lowercase());
-            if let (Some((mname, md)), Some(sha)) = (pinned, &want_sha) {
-                if !modules.iter().any(|m| &m.sha == sha) {
-                    bail!(
-                        KernelArtifact,
-                        "op `{name}` launch #{li}: module `{mname}` ({} @{}) is not among the {} \
-                         artifacts loaded from {} — the source is a label, the hash is the identity; \
-                         put an artifact with that sha256 there (tools/extract_kernels.sh <manifest> \
-                         <dump dirs> {})",
-                        md.source,
-                        &sha[..12.min(sha.len())],
-                        modules.len(),
-                        kernels_dir.display(),
-                        kernels_dir.display()
-                    );
-                }
+                kern_manifest::types::Launch::Kernel(k) => k,
+            };
+            // Identity: the launch's module pins a sha256 (the verifier
+            // resolved the name; the source is a label). Only artifacts with
+            // that hash are candidates; same-named instances inside one are
+            // told apart by param layout.
+            let md = &manifest.modules[&k.module];
+            let sha = md.sha256.to_lowercase();
+            if !modules.iter().any(|m| m.sha == sha) {
+                bail!(
+                    KernelArtifact,
+                    "op `{name}` launch #{li}: module `{}` ({} @{}) is not among the artifacts in {} — \
+                     the source is a label, the hash is the identity; put an artifact with that \
+                     sha256 there (`kern kernels`, or tools/extract_kernels.sh <manifest> <dump dirs> {})",
+                    k.module,
+                    md.source,
+                    &sha[..12],
+                    kernels_dir.display(),
+                    kernels_dir.display()
+                );
             }
             let want: Vec<usize> = l.params_of(op).iter().map(|p| p.size_bytes() as usize).collect();
-            let entry = CString::new(l.entry.as_str())
+            let entry = CString::new(k.entry.as_str())
                 .map_err(|e| Error::Manifest(format!("op `{name}` entry: {e}")))?;
             let mut resolved = None;
             let mut seen = Vec::new();
-            for m in modules {
-                if let Some(sha) = &want_sha {
-                    if &m.sha != sha {
-                        continue;
-                    }
-                }
+            for m in modules.iter().filter(|m| m.sha == sha) {
                 let Ok(func) = (unsafe { cu::module::get_function(m.module, entry.clone()) }) else {
                     continue;
                 };
@@ -206,15 +201,15 @@ pub(crate) fn resolve_ops(
             let Some(r) = resolved else {
                 bail!(
                     KernelArtifact,
-                    "op `{name}` launch #{li} ({}): no loaded instance matches declared \
-                     param layout {want:?} (module {:?} sha {:?}); saw {seen:?}",
-                    l.entry,
-                    l.module,
-                    want_sha.as_deref().map(|s| &s[..12.min(s.len())])
+                    "op `{name}` launch #{li} ({}): module `{}` @{} has no instance matching the \
+                     declared param layout {want:?}; saw {seen:?}",
+                    k.entry,
+                    k.module,
+                    &sha[..12]
                 );
             };
             // Opt in to >48KB dynamic shared memory where the launch needs it.
-            if let (LaunchImpl::Cubin { func, .. }, Some(sm)) = (&r, &l.shared_mem) {
+            if let (LaunchImpl::Cubin { func, .. }, Some(sm)) = (&r, &k.shared_mem) {
                 let bytes = sm
                     .eval(max_env)
                     .map_err(|e| Error::Manifest(format!("op `{name}`: {e}")))?;
@@ -338,22 +333,22 @@ fn compile_call(
                 LaunchKind::Gemm { beta: *beta }
             }
             LaunchImpl::Cubin { func, .. } => {
-                let (Some(block), Some(grid)) = (l.block, &l.grid) else {
-                    bail!(Manifest, "launch #{li}: missing block/grid");
+                let Some(k) = l.kernel() else {
+                    bail!(Manifest, "launch #{li}: a cubin resolved for an extern launch");
                 };
                 LaunchKind::Cubin {
                     func: *func,
-                    block,
+                    block: k.block,
                     grid: [
-                        compile_expr(&grid[0], vars)?,
-                        compile_expr(&grid[1], vars)?,
-                        compile_expr(&grid[2], vars)?,
+                        compile_expr(&k.grid[0], vars)?,
+                        compile_expr(&k.grid[1], vars)?,
+                        compile_expr(&k.grid[2], vars)?,
                     ],
-                    shared_mem: l.shared_mem.as_ref().map(|e| compile_expr(e, vars)).transpose()?,
+                    shared_mem: k.shared_mem.as_ref().map(|e| compile_expr(e, vars)).transpose()?,
                 }
             }
         };
-        launches.push(Launch { kind, slots, ctx: format!("{cctx} launch #{li} (`{}`)", l.entry) });
+        launches.push(Launch { kind, slots, ctx: format!("{cctx} launch #{li} (`{}`)", l.entry()) });
     }
     Ok(())
 }

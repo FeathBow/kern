@@ -60,7 +60,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
-from kern_manifest import normalize  # noqa: E402
+from kern_manifest import DumpIndex, normalize  # noqa: E402
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import mine_capture as mc
@@ -435,6 +435,12 @@ HUB_SILU = {
 def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
     pf_sym, pf_block, pf_smem = pf
     causal_cubin, causal_sha = pins["causal"]
+
+    def mp(tag):
+        """`cubin` + `sha256` of the dump module a mined launch pins."""
+        cubin, sha = pins[tag]
+        return {"cubin": cubin, "sha256": sha}
+
     buffers = {
         "token_ids": {"dtype": "i64", "shape": ["tokens"], "kind": "input"},
         "positions": {"dtype": "i64", "shape": ["tokens"], "kind": "input"},
@@ -550,25 +556,25 @@ def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
     # 分部和缓冲不再泄漏进调用方的 buffer 表。
     kernels = {
         "rms_norm": single(by["rms"][0]["symbol"], RMS_PARAMS, blk("rms"),
-                           [T, 1, 1]),
+                           [T, 1, 1], **mp("rms")),
         # 同一 head-norm 核的两个实例化：grid 随 head 数烘焙在实现里
         "rms_norm_qhead": single(by["rms_head"][0]["symbol"], RMS_PARAMS,
-                                 blk("rms_head"), [mul(T, HEADS), 1, 1]),
+                                 blk("rms_head"), [mul(T, HEADS), 1, 1], **mp("rms_head")),
         "rms_norm_khead": single(by["rms_head"][0]["symbol"], RMS_PARAMS,
-                                 blk("rms_head"), [mul(T, KV_HEADS), 1, 1]),
+                                 blk("rms_head"), [mul(T, KV_HEADS), 1, 1], **mp("rms_head")),
         "rotary_embedding": single(
             by["rope"][0]["symbol"],
             ["in buffer<i64>", "inout buffer<bf16>", "inout buffer<bf16>",
              "in buffer<bf16>", "i32", "i64", "i64", "i64", "i32", "i32",
              "i32", "i64", "u8"],
-            blk("rope"), [T, 1, 1]),
+            blk("rope"), [T, 1, 1], **mp("rope")),
         "reshape_and_cache": single(
             by["cache"][0]["symbol"],
             ["in buffer<bf16>", "in buffer<bf16>", "inout state",
              "inout state", "in buffer<i64>", "in buffer<f32>",
              "in buffer<f32>", "i64", "i64", "i64", "i64", "i64", "i64",
              "i64", "i64", "i64"],
-            blk("cache"), [T, 1, 1]),
+            blk("cache"), [T, 1, 1], **mp("cache")),
         # decode attention：3D split-KV 微程序。decode 恒 tokens=1，grid 与
         # scratch 定常（scratch 若挂 tokens 会按 CHUNK_MAX 上界多付 ~500MB）
         "attn": {
@@ -588,13 +594,13 @@ def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
                          [a(i) for i in range(26)]
                          + [scr("segm_out"), scr("segm_max"), scr("segm_expsum"),
                             a(26), a(27)],
-                         shared_mem=smem("unified")),
+                         shared_mem=smem("unified"), **mp("unified")),
                     step(by["reduce"][0]["symbol"], REDUCE_PARAMS,
                          blk("reduce"), [1, HEADS, 1],
                          [a(0), scr("segm_out"), scr("segm_max"),
                           scr("segm_expsum"), a(5), f32(1.0), i64(Q_DIM),
                           i64(HEAD_DIM), i64(MAX_BLOCKS), a(24), i64(0), i64(0)],
-                         shared_mem=smem("reduce")),
+                         shared_mem=smem("reduce"), **mp("reduce")),
                 ],
             },
         },
@@ -609,7 +615,7 @@ def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
         "silu_mul": single(
             by["silu"][0]["symbol"],
             ["out buffer<bf16>", "in buffer<bf16>", "i32", "i32", "f32", "i32"],
-            blk("silu"), [T, 1, 1]) if silu == "mined" else {
+            blk("silu"), [T, 1, 1], **mp("silu")) if silu == "mined" else {
             # same interface, hub impl: (out, in, d) — the caller's extra
             # scalars (stride/offset/scale) are dropped on the floor
             "params": ["out buffer<bf16>", "in buffer<bf16>", "i32", "i32", "f32", "i32"],
@@ -619,7 +625,7 @@ def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
             by["fused"][0]["symbol"],
             ["inout buffer<bf16>", "i64", "inout buffer<bf16>",
              "in buffer<bf16>", "f32", "i32", "i32", "i64"],
-            blk("fused"), [T, 1, 1]),
+            blk("fused"), [T, 1, 1], **mp("fused")),
         "embedding": single(
             "kern_embedding_i64_bf16",
             ["in buffer<i64>", "in buffer<bf16>", "out buffer<bf16>",
@@ -917,6 +923,13 @@ def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
     })
 
 
+MINED_MODULES = {
+    "rms": "vllm_layernorm", "rms_head": "vllm_layernorm", "fused": "vllm_layernorm",
+    "rope": "vllm_pos_encoding", "silu": "vllm_activation", "cache": "reshape_and_cache",
+    "unified": "unified_decode", "reduce": "reduce_segments",
+}
+
+
 def main():
     repo = pathlib.Path(__file__).resolve().parent.parent
     jsonl = sys.argv[1] if len(sys.argv) > 1 else str(
@@ -936,6 +949,17 @@ def main():
     # `cubin` is a label; the runtime resolves the sha256. extract_kernels.sh
     # finds the non-causal instance in the spec dump by hash.
     pins = {"causal": ("unified_causal.cubin", csha), "draft": ("unified_noncausal.cubin", dsha)}
+    # Every mined launch pins its dump module too: the manifest's `modules`
+    # table is the complete dependency list, the runtime loads nothing else.
+    # Labels say what the module is (vLLM's layernorm_kernels.cu, …); the
+    # sha256 is the identity.
+    idx = DumpIndex(pathlib.Path(jsonl).parent)
+    for tag, label in MINED_MODULES.items():
+        r = by[tag][0]
+        pins[tag] = (f"{label}.cubin", idx.pin(r["symbol"], r["attributes"]["num_regs"],
+                                               [p["size"] for p in r["params"]]))
+    for tag, (label, sha) in sorted(pins.items()):
+        print(f"  pin {tag:<9} -> {label:<26} {sha[:12]}")
 
     for spec, silu, name in [(False, "hub", "qwen3-4b.json"),
                              (False, "mined", "qwen3-4b-silu-mined.json"),

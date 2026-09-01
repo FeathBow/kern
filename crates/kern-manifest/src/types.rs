@@ -73,7 +73,10 @@ pub struct Manifest {
     pub states: BTreeMap<String, State>,
     #[serde(deserialize_with = "unique_map")]
     pub buffers: BTreeMap<String, Buffer>,
-    #[serde(default, deserialize_with = "unique_map", skip_serializing_if = "BTreeMap::is_empty")]
+    /// The dependency list: every code artifact a kernel launch pins, by
+    /// name. Complete by construction — a launch without a module is a
+    /// runtime built-in — so the runtime loads exactly these.
+    #[serde(deserialize_with = "unique_map")]
     pub modules: BTreeMap<String, Module>,
     #[serde(deserialize_with = "unique_map")]
     pub ops: BTreeMap<String, Op>,
@@ -597,31 +600,36 @@ pub struct Scratch {
     pub shape: Vec<Dim>,
 }
 
-/// One launch inside an implementation. The common single-launch op whose
-/// ABI *is* the interface writes only `module`, `entry`, `block`, `grid`:
+/// One launch inside an implementation: a device entry point in a pinned
+/// module, or a runtime built-in. The common single-launch op whose ABI
+/// *is* the interface writes only `module`, `entry`, `block`, `grid`:
 /// `params` defaults to the op's params and `args` to forwarding them in
 /// order.
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum Launch {
+    Kernel(KernelLaunch),
+    Extern(ExternLaunch),
+}
+
+/// A device entry point. Every kernel launch names its module: the manifest
+/// is the complete dependency list, and the runtime loads nothing it does
+/// not name.
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct Launch {
-    /// Name of the `modules` entry this entry point lives in. Absent: the
-    /// runtime searches every loaded module (disambiguating by param
-    /// layout) — mined kernels that only know their symbol. `extern:`
-    /// entries have no module.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub module: Option<String>,
-    /// Entry point in the module, or `extern:<name>` for a runtime built-in
-    /// (no module, no geometry).
+pub struct KernelLaunch {
+    /// Name of the `modules` entry the entry point lives in.
+    pub module: String,
+    /// Entry point (CUDA symbol) in the module. Same-named instances in one
+    /// module (a Triton kernel's constexpr variants) are told apart by
+    /// `params`.
     pub entry: String,
     /// This launch's own ABI (what the entry actually takes). Absent: the
     /// op's `params`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<Vec<ParamType>>,
-    /// Required unless `entry` is `extern:`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub block: Option<[u32; 3]>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub grid: Option<[Expr; 3]>,
+    pub block: [u32; 3],
+    pub grid: [Expr; 3],
     /// Dynamic shared memory in bytes, if the launch needs any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_mem: Option<Expr>,
@@ -632,19 +640,62 @@ pub struct Launch {
     pub args: Option<Vec<LaunchArg>>,
 }
 
+/// A runtime built-in: `entry` is `extern:<name>` (`cublaslt_bf16_tn`,
+/// `cublaslt_bf16_tn_acc`). No module, no geometry — the runtime owns both.
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExternLaunch {
+    /// `extern:<name>`.
+    pub entry: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<Vec<ParamType>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<LaunchArg>>,
+}
+
 impl Launch {
     pub fn is_extern(&self) -> bool {
-        self.entry.starts_with("extern:")
+        matches!(self, Launch::Extern(_))
+    }
+
+    pub fn entry(&self) -> &str {
+        match self {
+            Launch::Kernel(k) => &k.entry,
+            Launch::Extern(e) => &e.entry,
+        }
+    }
+
+    /// The pinned module, for a kernel launch.
+    pub fn module(&self) -> Option<&str> {
+        match self {
+            Launch::Kernel(k) => Some(&k.module),
+            Launch::Extern(_) => None,
+        }
+    }
+
+    pub fn kernel(&self) -> Option<&KernelLaunch> {
+        match self {
+            Launch::Kernel(k) => Some(k),
+            Launch::Extern(_) => None,
+        }
     }
 
     /// The launch ABI, defaulting to the op's interface.
     pub fn params_of<'a>(&'a self, op: &'a Op) -> &'a [ParamType] {
-        self.params.as_deref().unwrap_or(&op.params)
+        let own = match self {
+            Launch::Kernel(k) => &k.params,
+            Launch::Extern(e) => &e.params,
+        };
+        own.as_deref().unwrap_or(&op.params)
     }
 
     /// The wiring, defaulting to forwarding the op's params in order.
     pub fn args_of(&self, op: &Op) -> Cow<'_, [LaunchArg]> {
-        match &self.args {
+        let own = match self {
+            Launch::Kernel(k) => &k.args,
+            Launch::Extern(e) => &e.args,
+        };
+        match own {
             Some(a) => Cow::Borrowed(a),
             None => Cow::Owned((0..op.params.len()).map(|param| LaunchArg::Param { param }).collect()),
         }

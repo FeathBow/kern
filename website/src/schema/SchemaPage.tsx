@@ -115,7 +115,7 @@ const GROUPS: { label: string; names: string[] }[] = [
   },
   {
     label: "ops",
-    names: ["Op", "ParamType", "Impl", "Scratch", "Launch", "LaunchArg"],
+    names: ["Op", "ParamType", "Impl", "Scratch", "Launch", "KernelLaunch", "ExternLaunch", "LaunchArg"],
   },
   { label: "programs", names: ["Call", "Arg", "Expr"] },
 ];
