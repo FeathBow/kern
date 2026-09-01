@@ -22,7 +22,10 @@
 //! never leased (a kernel may read line index 0 as the null line), the
 //! rest go one per lease. A line table is shaped `[lines, seqs]` (or
 //! `[lines]`): row `r` names, for every sequence of the batch, line `r` of
-//! its slot — `slot × lines_per_slot + r`.
+//! its slot — `slot × lines_per_slot + r`. A wide table `[lines, seqs, w]`
+//! has `w` entries per (line, sequence) cell for kernels that take a
+//! per-sequence list of lines: the caller puts the line in one of them (the
+//! contract of the program says which) and 0, the null line, in the rest.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -40,10 +43,12 @@ struct Table {
 }
 
 /// A line table input over a per-sequence state: `rows` lines per
-/// sequence it names, out of `per_slot` lines a slot holds.
+/// sequence it names, out of `per_slot` lines a slot holds, `width`
+/// entries per (line, sequence) cell.
 struct SeqTable {
     rows: usize,
     per_slot: i32,
+    width: usize,
 }
 
 /// Shared between the runtime and every live lease so a drop returns pages
@@ -82,7 +87,7 @@ fn tables(m: &Manifest) -> BTreeMap<String, Table> {
 }
 
 /// The line tables: every input whose domain `index_into`s a per-sequence
-/// state, shaped `[lines, ...]`.
+/// state, shaped `[lines]`, `[lines, seqs]` or `[lines, seqs, w]`.
 fn seq_tables(m: &Manifest) -> Result<BTreeMap<String, SeqTable>> {
     let mut out = BTreeMap::new();
     for (name, b) in &m.buffers {
@@ -91,14 +96,19 @@ fn seq_tables(m: &Manifest) -> Result<BTreeMap<String, SeqTable>> {
         if !st.is_per_seq() {
             continue;
         }
-        let Some(Dim::Const(rows)) = b.shape.first() else {
-            bail!(Manifest, "`{name}` indexes a per-sequence state: expected shape [lines, ...], got {:?}", b.shape);
+        let (rows, width) = match b.shape.as_slice() {
+            [Dim::Const(rows)] | [Dim::Const(rows), Dim::Var(_)] => (*rows, 1),
+            [Dim::Const(rows), Dim::Var(_), Dim::Const(w)] => (*rows, *w as usize),
+            s => bail!(
+                Manifest,
+                "`{name}` indexes a per-sequence state: expected shape [lines], [lines, seqs] or [lines, seqs, w], got {s:?}"
+            ),
         };
         let per_slot = st.bytes_per_seq / d.stride.max(1);
-        if *rows > per_slot {
+        if rows > per_slot {
             bail!(Manifest, "`{name}` names {rows} lines per sequence, the state holds {per_slot}");
         }
-        out.insert(name.clone(), SeqTable { rows: *rows as usize, per_slot: per_slot as i32 });
+        out.insert(name.clone(), SeqTable { rows: rows as usize, per_slot: per_slot as i32, width });
     }
     Ok(out)
 }
@@ -284,6 +294,15 @@ impl Lease {
             None => bail!(Api, "`{table}` is not a line table of this manifest"),
         }
     }
+
+    /// Entries per (line, sequence) cell of line table `table`: 1, or the
+    /// `w` of a wide `[lines, seqs, w]` table.
+    pub fn seq_width(&self, table: &str) -> Result<usize> {
+        match self.pool.seq_tables.get(table) {
+            Some(t) => Ok(t.width),
+            None => bail!(Api, "`{table}` is not a line table of this manifest"),
+        }
+    }
 }
 
 impl fmt::Debug for Lease {
@@ -458,6 +477,12 @@ mod tests {
         let b = m.buffers.get_mut("line_index").unwrap();
         b.shape = vec![Dim::Var("seqs".into())];
         let Err(e) = Pool::new(&m, 64, 16) else { panic!("[seqs] accepted") };
-        assert!(e.to_string().contains("[lines, ...]"), "{e}");
+        assert!(e.to_string().contains("[lines, seqs, w]"), "{e}");
+        let b = m.buffers.get_mut("line_index").unwrap();
+        b.shape = vec![Dim::Const(3), Dim::Var("seqs".into()), Dim::Const(8)];
+        let p = Arc::new(Pool::new(&m, 64, 16).unwrap());
+        let a = p.lease(16).unwrap();
+        assert_eq!(a.seq_width("line_index").unwrap(), 8);
+        assert_eq!(a.seq_lines("line_index").unwrap(), 3);
     }
 }

@@ -33,7 +33,8 @@ call 表：接口实参解析一次，逐 launch 按 `args` 连线转发/接 scr
 （1 GiB）与定长/per-seq state 之后按 Σ bytes_per_token 折成整页，再封顶到
 `seqs.max × 行上限 + 1 页`。`Runtime::lease(tokens)` 一次租下 KV 页和每个
 per-seq state 的一个 slot（租时在 stream 上清零），`Lease::seq_line(table,
-r)` 给出 line 表的项；租约 drop 时一起归还。
+r)` 给出 line 表的项（宽表 `[lines, seqs, w]` 的格宽由 `seq_width` 给出，
+caller 决定 line 落在哪一项）；租约 drop 时一起归还。
 kern run / kern test 仍默认 4096（test 的 workload 抽样以 capacity 为界）。
 `extern:cublaslt_bf16_tn` 特判：行主序 `C[m,n]=A[m,k]@W[n,k]^T` 映射成列
 主序 `C'=W_cm^T×A_cm`（transa=T、lda=ldb=k、m'=n、ldc=n）；

@@ -89,6 +89,9 @@ struct SpecPlan {
     /// Rows per sequence in `verify`: `[anchor, drafts...]` = n + 1.
     verify_rows: usize,
     mask_token: i64,
+    /// The target resumes a recurrent state from `num_accepted_tokens`
+    /// (one per sequence) and commits the accepted rows with `advance`.
+    advance: bool,
     counters: SpecDecodeCounters,
 }
 
@@ -117,8 +120,12 @@ pub struct KernScheduler {
     /// `prefill` emits `next_token` itself (see the module doc).
     prefill_emits: bool,
     /// The manifest's line tables over per-sequence states: (name, lines
-    /// per sequence), each shaped `[lines, seqs]`.
-    line_tables: Vec<(String, usize)>,
+    /// per sequence, entries per cell), shaped `[lines, seqs]` or
+    /// `[lines, seqs, w]`.
+    line_tables: Vec<(String, usize, usize)>,
+    /// The page tables, each shaped `[seqs, n]`: `block_table` and, under
+    /// speculation, the draft's.
+    page_tables: Vec<String>,
     /// The `seqs` bound: a line table's row width.
     seqs_max: usize,
     waiting: VecDeque<QueuedRequest>,
@@ -168,8 +175,18 @@ impl KernScheduler {
         let line_tables = rt
             .seq_tables()
             .map(|name| match m.buffers[name].shape.as_slice() {
-                [Dim::Const(rows), Dim::Var(v)] if v == "seqs" => Ok((name.to_string(), *rows as usize)),
-                s => bail!("line table `{name}` shaped {s:?}, expected [lines, seqs]"),
+                [Dim::Const(rows), Dim::Var(v)] if v == "seqs" => Ok((name.to_string(), *rows as usize, 1)),
+                [Dim::Const(rows), Dim::Var(v), Dim::Const(w)] if v == "seqs" => {
+                    Ok((name.to_string(), *rows as usize, *w as usize))
+                }
+                s => bail!("line table `{name}` shaped {s:?}, expected [lines, seqs] or [lines, seqs, w]"),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let page_tables = rt
+            .page_tables()
+            .map(|name| match m.buffers[name].shape.as_slice() {
+                [Dim::Var(v), Dim::Const(_)] if v == "seqs" => Ok(name.to_string()),
+                s => bail!("page table `{name}` shaped {s:?}, expected [seqs, n]"),
             })
             .collect::<Result<Vec<_>>>()?;
         policy.max_seqs = policy.max_seqs.clamp(1, seqs_max);
@@ -195,8 +212,17 @@ impl KernScheduler {
                 Some([Dim::Var(v)]) if v == "seqs" => {}
                 s => bail!("--spec needs `anchor_token` shaped [seqs], got {s:?}"),
             }
-            if m.buffers.contains_key("num_accepted_tokens") {
-                bail!("--spec: this manifest resumes a recurrent state from `num_accepted_tokens`; that is one value per call, not per sequence — not batched yet");
+            let advance = m.programs.contains_key("advance");
+            if let Some(b) = m.buffers.get("num_accepted_tokens") {
+                match b.shape.as_slice() {
+                    [Dim::Var(v)] if v == "seqs" => {}
+                    s => bail!("--spec needs `num_accepted_tokens` shaped [seqs] (one per sequence), got {s:?}"),
+                }
+                if !advance {
+                    bail!("--spec: this manifest resumes a recurrent state from `num_accepted_tokens` but has no `advance` program to commit the accepted rows");
+                }
+            } else if advance {
+                bail!("--spec: program `advance` without a `num_accepted_tokens` input");
             }
             if n_drafts > MAX_SPEC_TOKENS {
                 bail!("--spec: {n_drafts} drafts per round, the frontend's metrics hold {MAX_SPEC_TOKENS}");
@@ -216,6 +242,7 @@ impl KernScheduler {
                 draft_rows,
                 verify_rows,
                 mask_token,
+                advance,
                 counters: SpecDecodeCounters {
                     num_spec_tokens: n_drafts as u64,
                     num_drafts: 0,
@@ -260,6 +287,7 @@ impl KernScheduler {
                 spec,
                 prefill_emits,
                 line_tables,
+                page_tables,
                 seqs_max,
                 waiting: VecDeque::new(),
                 running: Vec::new(),
@@ -403,9 +431,7 @@ impl KernScheduler {
     /// manifest's prefill emits it.
     fn prefill(&mut self, pages: &Lease, ids: &[i64]) -> Result<Option<u32>> {
         let chunk = self.policy.chunk;
-        let mut row = Vec::new();
-        pages.extend_row("block_table", &mut row)?;
-        self.stage_lines(&[pages])?;
+        self.stage_lines(&[pages], &[])?;
         let mut pos = 0usize;
         while pos < ids.len() {
             let c = (ids.len() - pos).min(chunk);
@@ -418,7 +444,7 @@ impl KernScheduler {
             rt.write_input_at("slot_mapping", &le_i64(&slots), &env)?;
             rt.write_input_at("seq_lens", &le_i32(&[(pos + c) as i32]), &env)?;
             rt.write_input_at("cu_seqlens_q", &le_i32(&[0, c as i32]), &env)?;
-            rt.write_input_at("block_table", &le_i32(&row), &env)?;
+            stage_tables(rt, &self.page_tables, &[pages], &self.pad, 1, &env)?;
             let eager = self.policy.eager || c != chunk;
             run_program(rt, "prefill", &env, eager)?;
             if self.spec.is_some() {
@@ -437,9 +463,10 @@ impl KernScheduler {
 
     /// Stage every line table: column i names sequence i's lines, the
     /// columns past the batch the pad's (a manifest without per-sequence
-    /// states has no line tables; nothing is written).
-    fn stage_lines(&mut self, seqs: &[&Lease]) -> Result<()> {
-        stage_lines(&mut self.rt.0, &self.line_tables, self.seqs_max, &self.pad, seqs)
+    /// states has no line tables; nothing is written). `cols[i]` picks the
+    /// entry of a wide table's cell that carries sequence i's line.
+    fn stage_lines(&mut self, seqs: &[&Lease], cols: &[usize]) -> Result<()> {
+        stage_lines(&mut self.rt.0, &self.line_tables, self.seqs_max, &self.pad, seqs, cols)
     }
 
     /// Speculative admission: the last prompt token through `decode_spec`
@@ -447,16 +474,14 @@ impl KernScheduler {
     /// generated token.
     fn first_token(&mut self, s: &Seq) -> Result<u32> {
         let env = env(1, 1);
-        let mut row = Vec::new();
-        s.pages.extend_row("block_table", &mut row)?;
-        self.stage_lines(&[&s.pages])?;
+        self.stage_lines(&[&s.pages], &[])?;
         let rt = &mut self.rt.0;
         rt.write_input_at("token_ids", &le_i64(&[s.next as i64]), &env)?;
         rt.write_input_at("positions", &le_i64(&[s.pos as i64]), &env)?;
         rt.write_input_at("slot_mapping", &le_i64(&[s.pages.slot(s.pos)]), &env)?;
         rt.write_input_at("seq_lens", &le_i32(&[s.pos as i32 + 1]), &env)?;
         rt.write_input_at("cu_seqlens_q", &le_i32(&[0, 1]), &env)?;
-        rt.write_input_at("block_table", &le_i32(&row), &env)?;
+        stage_tables(rt, &self.page_tables, &[&s.pages], &self.pad, 1, &env)?;
         run_program(rt, "decode_spec", &env, self.policy.eager)?;
         run_program(rt, "draft_precompute", &env, self.policy.eager)?;
         let out = rt.read_output("next_token")?;
@@ -479,7 +504,7 @@ impl KernScheduler {
         }
         let b = self.bucket(n);
         let plan = self.spec.as_ref().unwrap();
-        let (nd, dr, vr, mask) = (plan.n_drafts, plan.draft_rows, plan.verify_rows, plan.mask_token);
+        let (nd, dr, vr, mask, advance) = (plan.n_drafts, plan.draft_rows, plan.verify_rows, plan.mask_token, plan.advance);
         let t0 = Instant::now();
 
         // A batch of row-groups: `rows` per sequence, padding sequences
@@ -490,7 +515,6 @@ impl KernScheduler {
             slots: Vec<i64>,
             seq_lens: Vec<i32>,
             cu: Vec<i32>,
-            table: Vec<i32>,
             pad: &'a Lease,
         }
         impl<'a> Group<'a> {
@@ -501,7 +525,6 @@ impl KernScheduler {
                     slots: Vec::with_capacity(rows),
                     seq_lens: Vec::new(),
                     cu: vec![0],
-                    table: Vec::new(),
                     pad,
                 }
             }
@@ -512,7 +535,7 @@ impl KernScheduler {
                 self.slots.extend(pages.slots(pos..pos + rows));
                 self.seq_lens.push((pos + rows) as i32);
                 self.cu.push(self.cu.last().unwrap() + rows as i32);
-                Ok(pages.extend_row("block_table", &mut self.table)?)
+                Ok(())
             }
             fn pad_to(&mut self, b: usize, rows: usize) -> Result<()> {
                 let pad = self.pad;
@@ -527,7 +550,6 @@ impl KernScheduler {
                 rt.write_input_at("slot_mapping", &le_i64(&self.slots), env)?;
                 rt.write_input_at("seq_lens", &le_i32(&self.seq_lens), env)?;
                 rt.write_input_at("cu_seqlens_q", &le_i32(&self.cu), env)?;
-                rt.write_input_at("block_table", &le_i32(&self.table), env)?;
                 Ok(())
             }
         }
@@ -545,7 +567,12 @@ impl KernScheduler {
         anchors.resize(b, 0);
         let env_d = env(b * dr, b);
         let eager = self.policy.eager;
+        // The batch's page tables and line tables (the line in entry 0 of
+        // a wide table's cell: verify resumes from the committed state).
+        let leases: Vec<&Lease> = self.running.iter().map(|s| &s.pages).collect();
+        stage_lines(&mut self.rt.0, &self.line_tables, self.seqs_max, &self.pad, &leases, &[])?;
         let rt = &mut self.rt.0;
+        stage_tables(rt, &self.page_tables, &leases, &self.pad, b, &env_d)?;
         g.stage(rt, &env_d)?;
         rt.write_input_at("anchor_token", &le_i64(&anchors), &env_d)?;
         run_program(rt, "draft", &env_d, eager)?;
@@ -564,29 +591,50 @@ impl KernScheduler {
         let env_v = env(b * vr, b);
         let rt = &mut self.rt.0;
         g.stage(rt, &env_v)?;
+        if advance {
+            rt.write_input_at("num_accepted_tokens", &le_i32(&vec![1; b]), &env_v)?;
+        }
         run_program(rt, "verify", &env_v, eager)?;
         let vt = i64s(&rt.read_output("verify_tokens")?);
         // Every row's tap into the draft KV (positions/slot_mapping are
         // still verify's): rejected rows land past the sequence's new
         // position and the next round overwrites them.
         run_program(rt, "draft_precompute", &env_v, eager)?;
-        self.stat_decode_ns += t0.elapsed().as_nanos();
-        self.stat_steps += 1;
 
         // Accept the longest matching prefix; vt[a] is the correction (or
         // the bonus token when everything matched).
+        let accepted: Vec<usize> = (0..n)
+            .map(|i| {
+                let d = &drafts[i * nd..i * nd + nd];
+                let v = &vt[i * vr..i * vr + vr];
+                d.iter().zip(v).take_while(|(x, y)| x == y).count()
+            })
+            .collect();
+        if advance {
+            // Commit the accepted rows into the recurrent state: the
+            // target re-runs verify's rows from the state after the anchor
+            // and stores after the last accepted one — the line moves to
+            // entry `a` of its cell, `num_accepted_tokens` = a + 1.
+            let mut nacc: Vec<i32> = accepted.iter().map(|&a| a as i32 + 1).collect();
+            nacc.resize(b, 1);
+            stage_lines(&mut self.rt.0, &self.line_tables, self.seqs_max, &self.pad, &leases, &accepted)?;
+            let rt = &mut self.rt.0;
+            rt.write_input_at("num_accepted_tokens", &le_i32(&nacc), &env_v)?;
+            run_program(rt, "advance", &env_v, eager)?;
+        }
+        self.stat_decode_ns += t0.elapsed().as_nanos();
+        self.stat_steps += 1;
+
         let plan = self.spec.as_mut().unwrap();
         let stop = &self.policy.stop_tokens;
         let mut emitted = 0u64;
         let mut i = 0;
         self.running.retain_mut(|s| {
-            let d = &drafts[i * nd..i * nd + nd];
             let v = &vt[i * vr..i * vr + vr];
+            let a = accepted[i];
             i += 1;
-            let mut a = 0;
-            while a < nd && d[a] == v[a] {
-                plan.counters.num_accepted_tokens_per_pos[a] += 1;
-                a += 1;
+            for p in &mut plan.counters.num_accepted_tokens_per_pos[..a] {
+                *p += 1;
             }
             plan.counters.num_drafts += 1;
             plan.counters.num_draft_tokens += nd as u64;
@@ -653,33 +701,30 @@ impl KernScheduler {
         let mut positions = Vec::with_capacity(b);
         let mut slots = Vec::with_capacity(b);
         let mut seq_lens = Vec::with_capacity(b);
-        let mut table = Vec::new();
         for s in &self.running {
             token_ids.push(s.next as i64);
             positions.push(s.pos as i64);
             slots.push(s.pages.slot(s.pos));
             seq_lens.push(s.pos as i32 + 1);
-            s.pages.extend_row("block_table", &mut table)?;
         }
         for _ in n..b {
             token_ids.push(0);
             positions.push(0);
             slots.push(pad_slot);
             seq_lens.push(1);
-            self.pad.extend_row("block_table", &mut table)?;
         }
         let cu: Vec<i32> = (0..=b as i32).collect();
         let program = if b == 1 { "decode" } else { "decode_batch" };
         let t0 = Instant::now();
         let leases: Vec<&Lease> = self.running.iter().map(|s| &s.pages).collect();
-        stage_lines(&mut self.rt.0, &self.line_tables, self.seqs_max, &self.pad, &leases)?;
+        stage_lines(&mut self.rt.0, &self.line_tables, self.seqs_max, &self.pad, &leases, &[])?;
         let rt = &mut self.rt.0;
+        stage_tables(rt, &self.page_tables, &leases, &self.pad, b, &env)?;
         rt.write_input_at("token_ids", &le_i64(&token_ids), &env)?;
         rt.write_input_at("positions", &le_i64(&positions), &env)?;
         rt.write_input_at("slot_mapping", &le_i64(&slots), &env)?;
         rt.write_input_at("seq_lens", &le_i32(&seq_lens), &env)?;
         rt.write_input_at("cu_seqlens_q", &le_i32(&cu), &env)?;
-        rt.write_input_at("block_table", &le_i32(&table), &env)?;
         run_program(rt, program, &env, self.policy.eager)?;
         let out = rt.read_output("next_token")?;
         self.stat_decode_ns += t0.elapsed().as_nanos();
@@ -800,19 +845,53 @@ fn run_program(rt: &mut Runtime, program: &str, env: &BTreeMap<String, u64>, eag
 }
 
 /// See [`KernScheduler::stage_lines`].
-fn stage_lines(rt: &mut Runtime, tables: &[(String, usize)], seqs_max: usize, pad: &Lease, seqs: &[&Lease]) -> Result<()> {
-    for (name, rows) in tables {
-        let mut t = vec![0i32; rows * seqs_max];
+/// Every line table for a batch: cell `[r, i]` carries sequence i's line
+/// r — in entry `cols[i]` (0 past `cols`) of a wide table's cell, the
+/// null line 0 in the rest — and the pad's line past the batch.
+fn stage_lines(
+    rt: &mut Runtime,
+    tables: &[(String, usize, usize)],
+    seqs_max: usize,
+    pad: &Lease,
+    seqs: &[&Lease],
+    cols: &[usize],
+) -> Result<()> {
+    for (name, rows, w) in tables {
+        let mut t = vec![0i32; rows * seqs_max * w];
         for r in 0..*rows {
             let fill = pad.seq_line(name, r)?;
-            for (i, entry) in t[r * seqs_max..(r + 1) * seqs_max].iter_mut().enumerate() {
-                *entry = match seqs.get(i) {
-                    Some(l) => l.seq_line(name, r)?,
-                    None => fill,
+            for i in 0..seqs_max {
+                let (line, col) = match seqs.get(i) {
+                    Some(l) => (l.seq_line(name, r)?, cols.get(i).copied().unwrap_or(0)),
+                    None => (fill, 0),
                 };
+                if col >= *w {
+                    bail!("line table `{name}`: entry {col} of a {w}-wide cell");
+                }
+                t[(r * seqs_max + i) * w + col] = line;
             }
         }
         rt.write_input(name, &le_i32(&t))?;
+    }
+    Ok(())
+}
+
+/// Every page table for a batch of `b` rows: sequence i's row, the pad's
+/// past the batch.
+fn stage_tables(
+    rt: &mut Runtime,
+    tables: &[String],
+    seqs: &[&Lease],
+    pad: &Lease,
+    b: usize,
+    env: &BTreeMap<String, u64>,
+) -> Result<()> {
+    for name in tables {
+        let mut t = Vec::new();
+        for i in 0..b {
+            seqs.get(i).copied().unwrap_or(pad).extend_row(name, &mut t)?;
+        }
+        rt.write_input_at(name, &le_i32(&t), env)?;
     }
     Ok(())
 }

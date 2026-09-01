@@ -130,7 +130,11 @@ impl 不必重写先验，kernel package 零改动。两种形式互斥：
   行/槽（默认 1；paged KV 的 block_table 一个下标覆盖 16 个 token）。
   指向 `bytes_per_seq` state 时元素是 **line** 下标，一条 line 是
   `stride` 字节（GDN 的一层一页）；这样的 buffer 形如 `[lines, seqs]`，
-  runtime 按租约填 `slot × (bytes_per_seq / stride) + line`。
+  runtime 按租约填 `slot × (bytes_per_seq / stride) + line`。宽表
+  `[lines, seqs, w]` 给每个 (line, seq) 格 w 个项，供按序列取 line 列表的
+  kernel（vLLM 投机核的 `ssm_state_indices[seq, 8]`）：caller 把 line 填在
+  其中一项（哪一项由 program 的契约定，如 verify 填 0、advance 填接受数），
+  其余填 0 = null line。
 
 附加 `"monotone": true` 要求非递减序列（`cu_seqlens` 这类前缀和）。
 

@@ -395,7 +395,8 @@ impl Runtime {
     }
 
     /// The line-table inputs (`index_into` a per-sequence state, shaped
-    /// `[lines, ...]`), e.g. a hybrid model's `gdn.line_index`.
+    /// `[lines, seqs]` or `[lines, seqs, w]`), e.g. a hybrid model's
+    /// `gdn.line_index`.
     pub fn seq_tables(&self) -> impl Iterator<Item = &str> {
         self.pool.seq_tables()
     }

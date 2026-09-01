@@ -12,7 +12,7 @@ pub mod run;
 use std::collections::BTreeMap;
 
 use anyhow::{bail, ensure, Result};
-use kern_manifest::types::{Arg, Dim, Manifest};
+use kern_manifest::types::{Arg, BufferKind, Dim, Manifest};
 use kern_runtime::{Lease, Runtime};
 
 /// Default stop tokens (Qwen3 <|endoftext|>, <|im_end|>) for raw
@@ -68,6 +68,31 @@ pub fn first_i64(bytes: &[u8]) -> i64 {
     i64::from_le_bytes(bytes[..8].try_into().unwrap())
 }
 
+/// Every line table gets this sequence's lines in every column; a wide
+/// table `[lines, seqs, w]` carries the line in entry `col` of each cell
+/// and the null line 0 in the rest.
+fn stage_lines(rt: &mut Runtime, lease: &Lease, col: usize) -> Result<()> {
+    let tables: Vec<String> = rt.seq_tables().map(str::to_string).collect();
+    for name in tables {
+        let cols = match rt.manifest.buffers[&name].shape.as_slice() {
+            [Dim::Const(_)] => 1,
+            [Dim::Const(_), Dim::Var(v)] | [Dim::Const(_), Dim::Var(v), Dim::Const(_)] => rt.manifest.vars[v].max,
+            s => bail!("unexpected {name} shape {s:?}"),
+        };
+        let w = lease.seq_width(&name)?;
+        ensure!(col < w, "`{name}`: column {col} of a {w}-wide line table");
+        let mut table = Vec::new();
+        for r in 0..lease.seq_lines(&name)? {
+            let line = lease.seq_line(&name, r)?;
+            for _ in 0..cols {
+                table.extend((0..w).map(|j| if j == col { line } else { 0 }));
+            }
+        }
+        rt.write_input(&name, &le_bytes_i32(&table))?;
+    }
+    Ok(())
+}
+
 /// A runtime plus the single sequence: its token slots and position cursor.
 pub struct Caller {
     pub rt: Runtime,
@@ -101,23 +126,23 @@ impl Caller {
             }
             rt.write_input(&name, &le_bytes_i32(&table))?;
         }
-        let tables: Vec<String> = rt.seq_tables().map(str::to_string).collect();
-        for name in tables {
-            let cols = match rt.manifest.buffers[&name].shape.as_slice() {
-                [Dim::Const(_)] => 1,
-                [Dim::Const(_), Dim::Var(v)] => rt.manifest.vars[v].max,
-                // A wider table (per-line slot lists of a speculative
-                // manifest) is the spec driver's to stage.
-                _ => continue,
-            };
-            let mut table = Vec::new();
-            for r in 0..lease.seq_lines(&name)? {
-                let line = lease.seq_line(&name, r)?;
-                table.extend(std::iter::repeat_n(line, cols as usize));
-            }
-            rt.write_input(&name, &le_bytes_i32(&table))?;
+        stage_lines(&mut rt, &lease, 0)?;
+        // A recurrent state resumed from the last accepted row: 1 (the
+        // anchor) everywhere until the spec driver says otherwise.
+        if rt.manifest.buffers.get("num_accepted_tokens").is_some_and(|b| b.kind == BufferKind::Input) {
+            let n = rt.manifest.buffers["num_accepted_tokens"].shape.iter().map(|d| match d {
+                Dim::Const(c) => *c,
+                Dim::Var(v) => rt.manifest.vars[v].max,
+            }).product::<u64>() as usize;
+            rt.write_input("num_accepted_tokens", &le_bytes_i32(&vec![1; n]))?;
         }
         Ok(Caller { rt, lease, pos: 0 })
+    }
+
+    /// Re-stage every line table with the line in column `col` of each
+    /// cell (wide `[lines, seqs, w]` tables; the others ignore `col`).
+    pub fn set_line_column(&mut self, col: usize) -> Result<()> {
+        stage_lines(&mut self.rt, &self.lease, col)
     }
 
     /// Token slots the sequence can hold.

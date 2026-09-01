@@ -84,7 +84,7 @@ pub struct RunOpts {
     pub stop_tokens: Vec<i64>,
 
     /// Debug: dump per-layer activations (`y` after every `*.down_proj`,
-    /// embedding, logits) of the first prefill chunk and two decode steps
+    /// embedding, logits) of the first prefill chunk and two decode steps (`KERN_PROBE_STEPS` overrides)
     /// into this directory, then exit. Programs run call-range by
     /// call-range so nothing executes twice.
     #[arg(long)]
@@ -468,7 +468,9 @@ fn probe(caller: &mut Caller, prompt_ids: &[i64], dir: &std::path::Path, chunk: 
         caller.prefill(&prompt_ids[c..n_pre], chunk as u64, true)?;
     }
     let mut tok = if prefill_all { caller.next_token()? } else { prompt_ids[n_pre] };
-    for s in 0..2 {
+    // KERN_PROBE_STEPS=<n>: decode steps to dump (default 2).
+    let steps: usize = std::env::var("KERN_PROBE_STEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(2);
+    for s in 0..steps {
         let e = caller.stage_decode(tok)?;
         run_probed(&caller.rt, "decode", &e, 1, &format!("decode{s}"))?;
         caller.advance(1);
@@ -516,6 +518,11 @@ fn spec_decode(caller: &mut Caller, o: &Opts, prompt_ids: &[i64], mut generated:
     };
     ensure!(draft_rows == n_drafts || draft_rows == verify_n, "draft rows {draft_rows} vs {n_drafts} drafts");
     let has_nacc = rt.manifest.buffers.contains_key("num_accepted_tokens");
+    // The recurrent state is committed by an `advance` pass after the
+    // accept step (verify always resumes from the committed state, 1);
+    // without one, verify itself resumes from the checkpoint of the last
+    // accepted row.
+    let has_advance = rt.manifest.programs.contains_key("advance");
 
     if generated.is_empty() {
         // Last prompt token through decode_spec: first logits + its aux tap.
@@ -538,8 +545,12 @@ fn spec_decode(caller: &mut Caller, o: &Opts, prompt_ids: &[i64], mut generated:
         let t = Instant::now();
         caller.rt.capture("draft", &env(draft_rows as u64))?;
         caller.rt.capture("verify", &env(verify_n as u64))?;
+        if has_advance {
+            caller.rt.capture("advance", &env(verify_n as u64))?;
+        }
         info!(
-            "CUDA graphs: `draft` (tokens={draft_rows}) + `verify` (tokens={verify_n}) captured ({:?})",
+            "CUDA graphs: `draft` (tokens={draft_rows}) + `verify` (tokens={verify_n}){} captured ({:?})",
+            if has_advance { " + `advance`" } else { "" },
             t.elapsed()
         );
     }
@@ -562,7 +573,9 @@ fn spec_decode(caller: &mut Caller, o: &Opts, prompt_ids: &[i64], mut generated:
         } else {
             rt.run_captured("draft", &env(draft_rows as u64))?;
         }
-        let drafts = i64_from_le(&rt.read_output("draft_tokens")?);
+        // Row 0 of `draft_tokens` (the buffer may be [seqs, n]).
+        let mut drafts = i64_from_le(&rt.read_output("draft_tokens")?);
+        drafts.truncate(n_drafts);
 
         // Verify: one causal target pass over [anchor, d0..] -> verify_n
         // greedy predictions; row i answers "what follows position pos+i".
@@ -571,7 +584,7 @@ fn spec_decode(caller: &mut Caller, o: &Opts, prompt_ids: &[i64], mut generated:
         caller.stage(&vids)?;
         let rt = &mut caller.rt;
         if has_nacc {
-            rt.write_input("num_accepted_tokens", &le_bytes_i32(&[nacc]))?;
+            rt.write_input("num_accepted_tokens", &le_bytes_i32(&[if has_advance { 1 } else { nacc }]))?;
         }
         if o.eager {
             rt.run("verify", &env(verify_n as u64))?;
@@ -579,6 +592,20 @@ fn spec_decode(caller: &mut Caller, o: &Opts, prompt_ids: &[i64], mut generated:
             rt.run_captured("verify", &env(verify_n as u64))?;
         }
         let vt = i64_from_le(&rt.read_output("verify_tokens")?);
+        // KERN_SPEC_DUMP=<dir>: per round, the verify rows' ids, predictions
+        // and logits (`logits_blk`, first verify_n rows) for path-vs-path diffs.
+        if let Ok(dir) = std::env::var("KERN_SPEC_DUMP") {
+            let dir = std::path::Path::new(&dir);
+            std::fs::create_dir_all(dir)?;
+            let vocab = rt.manifest.buffers["logits_blk"].shape[1..]
+                .iter()
+                .map(|d| if let Dim::Const(c) = d { *c as usize } else { 1 })
+                .product::<usize>()
+                * rt.manifest.buffers["logits_blk"].dtype.bytes() as usize;
+            std::fs::write(dir.join(format!("round{rounds}.logits.bin")), rt.read_buffer_prefix("logits_blk", verify_n * vocab)?)?;
+            std::fs::write(dir.join(format!("round{rounds}.vids.bin")), le_bytes_i64(&vids))?;
+            std::fs::write(dir.join(format!("round{rounds}.vt.bin")), le_bytes_i64(&vt[..verify_n]))?;
+        }
 
         // Accept the longest matching prefix; vt[a] is the correction (or the
         // bonus token when everything matched).
@@ -591,6 +618,19 @@ fn spec_decode(caller: &mut Caller, o: &Opts, prompt_ids: &[i64], mut generated:
         // (rows 0..=a of fc_out; positions/slot_mapping still hold them).
         rt.run("draft_precompute", &env(a as u64 + 1))?;
         nacc = a as i32 + 1;
+        if has_advance {
+            // Commit rows 1..=a into the recurrent state: the line moves to
+            // entry `a` of its line-table cell, the pass loads the state
+            // after the anchor from there and stores after row a.
+            caller.rt.write_input("num_accepted_tokens", &le_bytes_i32(&[nacc]))?;
+            caller.set_line_column(a)?;
+            if o.eager {
+                caller.rt.run("advance", &env(verify_n as u64))?;
+            } else {
+                caller.rt.run_captured("advance", &env(verify_n as u64))?;
+            }
+            caller.set_line_column(0)?;
+        }
         caller.advance(a as u64 + 1);
         rounds += 1;
         accepted += a;
