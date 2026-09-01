@@ -137,6 +137,34 @@ impl Runtime {
         let remote = cubin::fetch_registry_cubins(&manifest)?;
         let modules = cubin::load_all_modules(kernels_dir, &remote)?;
 
+        // States are paged: every `index_into` a state comes in `unit`
+        // tokens per index (the KV block table's page). A capacity that is
+        // not a whole number of pages would provision a torn last page —
+        // slots the domain says are valid but a page-major kernel writes
+        // past the pool for. Round down; the caller asked for "about this
+        // many tokens", not for that page.
+        let page = manifest
+            .buffers
+            .values()
+            .filter_map(|b| b.domain.as_ref())
+            .filter(|d| d.index_into.as_deref().is_some_and(|s| manifest.states.contains_key(s)))
+            .map(|d| d.unit.max(1))
+            .fold(1u64, lcm);
+        let state_capacity_tokens = if state_capacity_tokens % page == 0 {
+            state_capacity_tokens
+        } else {
+            let aligned = state_capacity_tokens / page * page;
+            if aligned == 0 {
+                return Err(Error::Manifest(format!(
+                    "state capacity {state_capacity_tokens} tokens is smaller than one page ({page} tokens)"
+                )));
+            }
+            tracing::warn!(
+                "state capacity {state_capacity_tokens} is not a multiple of the page unit {page}; using {aligned}"
+            );
+            aligned
+        };
+
         let max_env: BTreeMap<_, _> =
             manifest.symbols.iter().map(|(s, v)| (s.clone(), v.max)).collect();
 
@@ -170,8 +198,7 @@ impl Runtime {
             }
         }
 
-        let resolved =
-            compile::resolve_kernels(&manifest, &modules, &remote, kernels_dir, &stream, &max_env)?;
+        let resolved = compile::resolve_kernels(&manifest, &modules, kernels_dir, &stream, &max_env)?;
         let resolution = resolved.iter().map(|(n, rk)| (n.clone(), rk.step_modules())).collect();
         let programs = compile::compile_programs(&manifest, &resolved, &buffers, &states)?;
         let scratch = resolved.into_values().flat_map(|rk| rk.scratch.into_values()).collect();
@@ -652,4 +679,12 @@ impl Runtime {
             }
         }
     }
+}
+
+fn gcd(a: u64, b: u64) -> u64 {
+    if b == 0 { a } else { gcd(b, a % b) }
+}
+
+fn lcm(a: u64, b: u64) -> u64 {
+    a / gcd(a, b) * b
 }

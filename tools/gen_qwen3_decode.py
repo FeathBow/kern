@@ -55,13 +55,13 @@ packed struct / TMA descriptor，不可 rebind）：
 import hashlib
 import json
 import pathlib
-import shutil
 import struct
 import subprocess
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import mine_capture as mc
+from handwritten import hw  # tools/handwritten.py: build + pin handwritten cubins
 
 HIDDEN = 2560
 LAYERS = 36
@@ -412,7 +412,19 @@ DOMAINS = {
 }
 
 
-def build(by, eps, scale, pf, pins, spec=False):
+# silu_mul from the HF kernel hub (kernels-community/activation, packed
+# bf16x2 variant): the shipped qwen3-4b.json uses it; the *-silu-mined.json
+# fixture keeps the mined vLLM instance so the two form kern-test's A/B pair.
+HUB_SILU = {
+    "cubin": "hf:kernels-community/activation/build/torch29-cxx11-cu130-aarch64-linux/"
+             "activation/_activation_320b408.abi3.so",
+    "sha256": "73748b54059552f5983322f7dedc36ed349b38ad6fb9318301bb4965b1fe49aa",
+    "symbol": "_ZN4vllm18act_and_mul_kernelIN3c108BFloat16EXadL_ZNS_11silu_kernelIS2_EET_RKS4_EELb1EEEvPS4_PS5_i",
+    "params": ["out buffer<bf16>", "in buffer<bf16>", "i32"],
+}
+
+
+def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
     pf_sym, pf_block, pf_smem = pf
     causal_cubin, causal_sha = pins["causal"]
     buffers = {
@@ -589,7 +601,12 @@ def build(by, eps, scale, pf, pins, spec=False):
         "silu_mul": single(
             by["silu"][0]["symbol"],
             ["out buffer<bf16>", "in buffer<bf16>", "i32", "i32", "f32", "i32"],
-            blk("silu"), [T, 1, 1]),
+            blk("silu"), [T, 1, 1]) if silu == "mined" else {
+            # same interface, hub impl: (out, in, d) — the caller's extra
+            # scalars (stride/offset/scale) are dropped on the floor
+            "params": ["out buffer<bf16>", "in buffer<bf16>", "i32", "i32", "f32", "i32"],
+            "impl": {"steps": [dict(HUB_SILU, block=[1024, 1, 1], grid=[T, 1, 1],
+                                    args=[a(0), a(1), a(2)])]}},
         "fused_add_rms_norm": single(
             by["fused"][0]["symbol"],
             ["inout buffer<bf16>", "i64", "inout buffer<bf16>",
@@ -599,7 +616,7 @@ def build(by, eps, scale, pf, pins, spec=False):
             "kern_embedding_i64_bf16",
             ["in buffer<i64>", "in buffer<bf16>", "out buffer<bf16>",
              "i32", "i32"],
-            [256, 1, 1], [T, 1, 1], cubin="embedding.cubin"),
+            [256, 1, 1], [T, 1, 1], **hw("embedding")),
         # c[m,n] = a[m,k] @ w[n,k]^T；runtime 按 extern: 前缀特判走 cublasLt
         "gemm": single(
             "extern:cublaslt_bf16_tn",
@@ -623,13 +640,13 @@ def build(by, eps, scale, pf, pins, spec=False):
                           "out buffer<i32>", "i32"],
                          [1024, 1, 1], [T, 64, 1],
                          [a(0), scr("pmax"), scr("pidx"), a(2)],
-                         cubin="argmax.cubin"),
+                         **hw("argmax")),
                     step("kern_argmax_final_i64",
                          ["in buffer<f32>", "in buffer<i32>",
                           "out buffer<i64>", "i32"],
                          [64, 1, 1], [T, 1, 1],
                          [scr("pmax"), scr("pidx"), a(1), i32(64)],
-                         cubin="argmax.cubin"),
+                         **hw("argmax")),
                 ],
             },
         },
@@ -657,13 +674,13 @@ def build(by, eps, scale, pf, pins, spec=False):
                           "out buffer<i32>", "i32"],
                          [1024, 1, 1], [1, 64, 1],
                          [a(0), scr("pmax"), scr("pidx"), a(2)],
-                         cubin="argmax.cubin"),
+                         **hw("argmax")),
                     step("kern_argmax_final_i64",
                          ["in buffer<f32>", "in buffer<i32>",
                           "out buffer<i64>", "i32"],
                          [64, 1, 1], [1, 1, 1],
                          [scr("pmax"), scr("pidx"), a(1), i32(64)],
-                         cubin="argmax.cubin"),
+                         **hw("argmax")),
                 ],
             },
         }
@@ -671,7 +688,7 @@ def build(by, eps, scale, pf, pins, spec=False):
             "kern_embedding_i64_bf16",
             ["in buffer<i64>", "in buffer<bf16>", "out buffer<bf16>",
              "i32", "i32"],
-            [256, 1, 1], [1, 1, 1], cubin="embedding.cubin")
+            [256, 1, 1], [1, 1, 1], **hw("embedding"))
         # c[m,n] += a[m,k] @ w[n,k]^T：β=1 累加版，喂 fc 分块和 markov 偏置
         kernels["gemm_acc"] = single(
             "extern:cublaslt_bf16_tn_acc",
@@ -908,17 +925,15 @@ def main():
     # cuobjdump 按 num_regs 定位两个同 ABI 实例各自的 module 文件
     causal_regs, draft_regs = check_spec(spec_dir, jsonl, pf)
     cfile, csha, _ = find_unified_module(pathlib.Path(jsonl).parent, causal_regs)
-    dfile, dsha, dpath = find_unified_module(spec_dir, draft_regs)
-    # non-causal module 来自 spec dump，主 dump 的 extract 不会带上它——
-    # 以稳定名放进 kernels/（extract 只清理 module_*.cubin，它能存活）
-    dst = repo / "kernels" / "unified_noncausal.cubin"
-    dst.parent.mkdir(exist_ok=True)
-    if not dst.exists() or hashlib.sha256(dst.read_bytes()).hexdigest() != dsha:
-        shutil.copy(dpath, dst)
-    pins = {"causal": (cfile, csha), "draft": ("unified_noncausal.cubin", dsha)}
+    dfile, dsha, _ = find_unified_module(spec_dir, draft_regs)
+    # `cubin` is a label; the runtime resolves the sha256. extract_kernels.sh
+    # finds the non-causal instance in the spec dump by hash.
+    pins = {"causal": ("unified_causal.cubin", csha), "draft": ("unified_noncausal.cubin", dsha)}
 
-    for spec, name in [(False, "qwen3-4b.json"), (True, "qwen3-4b-dspark.json")]:
-        manifest = build(by, eps, scale, pf, pins, spec=spec)
+    for spec, silu, name in [(False, "hub", "qwen3-4b.json"),
+                             (False, "mined", "qwen3-4b-silu-mined.json"),
+                             (True, "mined", "qwen3-4b-dspark.json")]:
+        manifest = build(by, eps, scale, pf, pins, spec=spec, silu=silu)
         out = repo / "examples" / name
         out.write_text(json.dumps(manifest, indent=1) + "\n")
         counts = {p: len(v["dispatches"]) for p, v in manifest["programs"].items()}
@@ -926,8 +941,8 @@ def main():
               f"{len(manifest['buffers'])} buffers, dispatches {counts})")
     print(f"topology checks passed (eps={eps!r}, attn scale={scale!r}, "
           f"prefill fwds={[t for t, _ in prefills]}; unified pins: "
-          f"causal={cfile} regs={causal_regs}, "
-          f"draft=unified_noncausal.cubin regs={draft_regs})")
+          f"causal={cfile} {csha[:12]} regs={causal_regs}, "
+          f"draft={dfile} {dsha[:12]} regs={draft_regs})")
 
 
 if __name__ == "__main__":

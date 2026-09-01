@@ -6191,7 +6191,8 @@
         "arg": 4
        }
       ],
-      "cubin": "embedding.cubin"
+      "cubin": "embedding.cubin",
+      "sha256": "1c3dd3e591d872aed259d7ef59d44649061f77a4247a5df864a7fbf0ccbde92f"
      }
     ]
    }
@@ -6330,7 +6331,8 @@
        }
       ],
       "shared_mem": 43008,
-      "cubin": "gemma_rms_norm.cubin"
+      "cubin": "gemma_rms_norm.cubin",
+      "sha256": "7267301ce33ab56665591e3718bd390d883d13de1d4d9308c59fd89cd83010d0"
      }
     ]
    }
@@ -6419,7 +6421,8 @@
        }
       ],
       "shared_mem": 4096,
-      "cubin": "gemma_rms_norm.cubin"
+      "cubin": "gemma_rms_norm.cubin",
+      "sha256": "7267301ce33ab56665591e3718bd390d883d13de1d4d9308c59fd89cd83010d0"
      }
     ]
    }
@@ -6508,7 +6511,8 @@
        }
       ],
       "shared_mem": 4096,
-      "cubin": "gemma_rms_norm.cubin"
+      "cubin": "gemma_rms_norm.cubin",
+      "sha256": "7267301ce33ab56665591e3718bd390d883d13de1d4d9308c59fd89cd83010d0"
      }
     ]
    }
@@ -6582,7 +6586,8 @@
        }
       ],
       "shared_mem": 43008,
-      "cubin": "gemma_rms_norm.cubin"
+      "cubin": "gemma_rms_norm.cubin",
+      "sha256": "7267301ce33ab56665591e3718bd390d883d13de1d4d9308c59fd89cd83010d0"
      }
     ]
    }
@@ -6692,7 +6697,8 @@
         "arg": 4
        }
       ],
-      "cubin": "copy_rows.cubin"
+      "cubin": "copy_rows.cubin",
+      "sha256": "a49dcdf873038dbf4de19e8a324ac420afc669dca2cf122d601e034bcab10edd"
      }
     ]
    }
@@ -6743,7 +6749,8 @@
         "arg": 4
        }
       ],
-      "cubin": "copy_rows.cubin"
+      "cubin": "copy_rows.cubin",
+      "sha256": "a49dcdf873038dbf4de19e8a324ac420afc669dca2cf122d601e034bcab10edd"
      }
     ]
    }
@@ -6806,7 +6813,8 @@
         "arg": 6
        }
       ],
-      "cubin": "sigmoid_mul.cubin"
+      "cubin": "sigmoid_mul.cubin",
+      "sha256": "c888cc63af14e51dce35d3a7342202668cd4730ed34df96a994eafc359fab23a"
      }
     ]
    }
@@ -6867,7 +6875,8 @@
         "arg": 2
        }
       ],
-      "cubin": "argmax.cubin"
+      "cubin": "argmax.cubin",
+      "sha256": "25374575bd35dbd9fe07f90982d0da0c2d4a72cc6ac88df5ec92cdb62a3beb16"
      },
      {
       "symbol": "kern_argmax_final_i64",
@@ -6901,7 +6910,8 @@
         "i32": 64
        }
       ],
-      "cubin": "argmax.cubin"
+      "cubin": "argmax.cubin",
+      "sha256": "25374575bd35dbd9fe07f90982d0da0c2d4a72cc6ac88df5ec92cdb62a3beb16"
      }
     ]
    }
@@ -7004,7 +7014,7 @@
         "arg": 13
        }
       ],
-      "cubin": "d4bc8694d03e.cubin",
+      "cubin": "conv_fwd.cubin",
       "sha256": "d4bc8694d03eefcf1c2f520cd1a1ddf453bc7cc4adb65ca25c937226f7defd99"
      }
     ]
@@ -7133,7 +7143,7 @@
         "arg": 18
        }
       ],
-      "cubin": "f7191a867340.cubin",
+      "cubin": "post_conv.cubin",
       "sha256": "f7191a8673409fdb2b84a101a28aa0701447e325152f8a69adf0213cf876c8fc"
      }
     ]
@@ -7202,7 +7212,7 @@
         "arg": 6
        }
       ],
-      "cubin": "3f48f1c2ce71.cubin",
+      "cubin": "cumsum.cubin",
       "sha256": "3f48f1c2ce717182b9485be09ecf6b4abf759d3666a8109c91a8fabf29cf649a"
      }
     ]
@@ -7282,7 +7292,7 @@
        }
       ],
       "shared_mem": 40976,
-      "cubin": "dfb46daefbf8.cubin",
+      "cubin": "kkt.cubin",
       "sha256": "dfb46daefbf80d9cd145b64b583feb04651f4bfe1e6dcac4d01cdc6600c7c830"
      }
     ]
@@ -7352,7 +7362,7 @@
        }
       ],
       "shared_mem": 10240,
-      "cubin": "934faeb85ecb.cubin",
+      "cubin": "solve_tril.cubin",
       "sha256": "934faeb85ecbb46a5e011e66f961a69641085e2c86c34f4c3d102c8745b6e183"
      }
     ]
@@ -7447,7 +7457,7 @@
        }
       ],
       "shared_mem": 41984,
-      "cubin": "9b0eebd20138.cubin",
+      "cubin": "recompute.cubin",
       "sha256": "9b0eebd20138198d07f8806dbdba962856b0e8d9c5bbf58d5ce552e2ba52ba40"
      }
     ]
@@ -7540,7 +7550,7 @@
        }
       ],
       "shared_mem": 41220,
-      "cubin": "f0b2bd305bc4.cubin",
+      "cubin": "chunk_h.cubin",
       "sha256": "f0b2bd305bc428b03b06f7073efb3c73d0161fc8c1613c1047e169eae423f32c"
      }
     ]
@@ -7635,7 +7645,7 @@
        }
       ],
       "shared_mem": 73760,
-      "cubin": "ff99adcbe9fd.cubin",
+      "cubin": "chunk_o.cubin",
       "sha256": "ff99adcbe9fdf5c0cc98ee195611d38723094a8e4042d8b20103fbbf372e43e2"
      }
     ]
@@ -7737,7 +7747,7 @@
         "arg": 10
        }
       ],
-      "cubin": "c2d4ed3e2a28.cubin",
+      "cubin": "layer_norm.cubin",
       "sha256": "c2d4ed3e2a2850707f75db04ede3d23a3904c71e9843c61da0c1efd08daeb229"
      }
     ]
@@ -7801,7 +7811,7 @@
         "arg": 6
        }
       ],
-      "cubin": "cc5d7bff4bfd.cubin",
+      "cubin": "mrope.cubin",
       "sha256": "cc5d7bff4bfd36a94e8e43bfb6651908905734c8314019db41d3e469b3517483"
      }
     ]
@@ -7910,7 +7920,7 @@
         "arg": 15
        }
       ],
-      "cubin": "93d7768f15ce.cubin",
+      "cubin": "cache.cubin",
       "sha256": "93d7768f15ce02e252ad208dca2f6803d8ad65296d57f3444dccb9d1e6b88ac5"
      }
     ]
@@ -8085,7 +8095,7 @@
        }
       ],
       "shared_mem": 155648,
-      "cubin": "ed9fb4215388.cubin",
+      "cubin": "unified.cubin",
       "sha256": "ed9fb4215388f0b61af82e4aa279d61e738d32966a000b4c3cd224dd87411eb4"
      }
     ]
@@ -8292,7 +8302,7 @@
        }
       ],
       "shared_mem": 25216,
-      "cubin": "7b29120edbd4.cubin",
+      "cubin": "unified.cubin",
       "sha256": "7b29120edbd4c2bd54ac23b46df77d4c594fe2a019996423be70e15ccb3c18d2"
      },
      {
@@ -8360,7 +8370,7 @@
        }
       ],
       "shared_mem": 2048,
-      "cubin": "b0bb46835a7c.cubin",
+      "cubin": "reduce.cubin",
       "sha256": "b0bb46835a7cc970cab3d22d64ed0795a2ffdbacc553dabe873bf9a0a4ca6339"
      }
     ]
@@ -8507,7 +8517,7 @@
         "arg": 12
        }
       ],
-      "cubin": "159465ea16be.cubin",
+      "cubin": "conv_update_spec.cubin",
       "sha256": "159465ea16be78a5440e457e32159ace2a074114488122dc35be1b30962006b1"
      }
     ]
@@ -8635,7 +8645,7 @@
        }
       ],
       "shared_mem": 512,
-      "cubin": "786e2578f9bd.cubin",
+      "cubin": "recurrent_spec.cubin",
       "sha256": "786e2578f9bd5555dbb6babb53c89016aea1a1c2752f1bb0ad76b9904ad3330a"
      }
     ]
@@ -8699,7 +8709,8 @@
         "arg": 2
        }
       ],
-      "cubin": "argmax.cubin"
+      "cubin": "argmax.cubin",
+      "sha256": "25374575bd35dbd9fe07f90982d0da0c2d4a72cc6ac88df5ec92cdb62a3beb16"
      },
      {
       "symbol": "kern_argmax_final_i64",
@@ -8735,7 +8746,8 @@
         "i32": 64
        }
       ],
-      "cubin": "argmax.cubin"
+      "cubin": "argmax.cubin",
+      "sha256": "25374575bd35dbd9fe07f90982d0da0c2d4a72cc6ac88df5ec92cdb62a3beb16"
      }
     ]
    }
@@ -8823,7 +8835,7 @@
         "arg": 11
        }
       ],
-      "cubin": "21d39dd342b4.cubin",
+      "cubin": "d_rms_norm.cubin",
       "sha256": "21d39dd342b4ce528a353c2a006d0834466cd5e6394647164147c9e3eccd91d6"
      }
     ]
@@ -8917,7 +8929,7 @@
         "arg": 11
        }
       ],
-      "cubin": "21d39dd342b4.cubin",
+      "cubin": "d_head_norm.cubin",
       "sha256": "21d39dd342b4ce528a353c2a006d0834466cd5e6394647164147c9e3eccd91d6"
      }
     ]
@@ -9011,7 +9023,7 @@
         "arg": 11
        }
       ],
-      "cubin": "21d39dd342b4.cubin",
+      "cubin": "d_head_norm.cubin",
       "sha256": "21d39dd342b4ce528a353c2a006d0834466cd5e6394647164147c9e3eccd91d6"
      }
     ]
@@ -9080,7 +9092,7 @@
         "arg": 7
        }
       ],
-      "cubin": "21d39dd342b4.cubin",
+      "cubin": "d_fused_norm.cubin",
       "sha256": "21d39dd342b4ce528a353c2a006d0834466cd5e6394647164147c9e3eccd91d6"
      }
     ]
@@ -9174,7 +9186,7 @@
         "arg": 12
        }
       ],
-      "cubin": "116de812ac5a.cubin",
+      "cubin": "d_rope.cubin",
       "sha256": "116de812ac5a3a186f76fa239d4c16abbed6b8b0af06d16e1baec0aefe8fe8fa"
      }
     ]
@@ -9283,7 +9295,7 @@
         "arg": 15
        }
       ],
-      "cubin": "2bf7800a6f9f.cubin",
+      "cubin": "d_cache.cubin",
       "sha256": "2bf7800a6f9f8e64aa9b81bb6e72e13ffcab7543279a2f253263ed2ae2e7153b"
      }
     ]
@@ -9525,7 +9537,8 @@
         "arg": 7
        }
       ],
-      "cubin": "dflash_conv.cubin"
+      "cubin": "dflash_conv.cubin",
+      "sha256": "522f6fb744cd34c71cef2ee5d4821749ebabfe15e3422735dcb2c3fcfaeae90f"
      }
     ]
    }
@@ -9576,7 +9589,8 @@
         "arg": 4
        }
       ],
-      "cubin": "topk_row.cubin"
+      "cubin": "topk_row.cubin",
+      "sha256": "18bd70c38ebbac1f0ccb97bc1795c42fd3214631ba594e060e78f316e9ff4f04"
      }
     ]
    }
@@ -9653,7 +9667,8 @@
        }
       ],
       "shared_mem": 16384,
-      "cubin": "dflash_select.cubin"
+      "cubin": "dflash_select.cubin",
+      "sha256": "9a7399ea07f74412a5be5295146f53c41cc258e3059157d82cb8e1a8b8337a7f"
      }
     ]
    }
@@ -9704,7 +9719,8 @@
         "arg": 4
        }
       ],
-      "cubin": "embedding.cubin"
+      "cubin": "embedding.cubin",
+      "sha256": "1c3dd3e591d872aed259d7ef59d44649061f77a4247a5df864a7fbf0ccbde92f"
      }
     ]
    }
@@ -9755,7 +9771,8 @@
         "arg": 4
        }
       ],
-      "cubin": "embedding.cubin"
+      "cubin": "embedding.cubin",
+      "sha256": "1c3dd3e591d872aed259d7ef59d44649061f77a4247a5df864a7fbf0ccbde92f"
      }
     ]
    }

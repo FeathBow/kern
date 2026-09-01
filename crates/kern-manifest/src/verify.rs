@@ -222,15 +222,17 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
             if step.cubin.as_deref() == Some("") {
                 errs.push(format!("{ctx}: empty cubin file name"));
             }
-            if let Some(reg) = step.cubin.as_deref().and_then(RegistryRef::parse) {
-                match reg {
-                    Err(e) => errs.push(format!("{ctx}: {e}")),
-                    Ok(_) if step.sha256.is_none() => errs.push(format!(
-                        "{ctx}: registry cubin requires a pinned sha256 \
-                         (the transport is untrusted)"
-                    )),
-                    Ok(_) => {}
-                }
+            match step.cubin.as_deref().map(|cb| (cb, RegistryRef::parse(cb))) {
+                Some((_, Some(Err(e)))) => errs.push(format!("{ctx}: {e}")),
+                Some((_, Some(Ok(_)))) if step.sha256.is_none() => errs.push(format!(
+                    "{ctx}: registry cubin requires a pinned sha256 \
+                     (the transport is untrusted)"
+                )),
+                Some((cb, None)) if step.sha256.is_none() => errs.push(format!(
+                    "{ctx}: cubin `{cb}` requires a pinned sha256 \
+                     (the file name is a label; the hash is the identity the runtime resolves)"
+                )),
+                _ => {}
             }
 
             let threads: u64 = step.block.iter().map(|&x| x as u64).product();
@@ -789,6 +791,21 @@ mod tests {
     #[test]
     fn base_manifest_verifies() {
         check(base()).unwrap();
+    }
+
+    #[test]
+    fn local_cubin_requires_sha256() {
+        let mut v = base();
+        v["kernels"]["embed"]["impl"]["steps"][0]["cubin"] = "embed.cubin".into();
+        assert_err(v, "cubin `embed.cubin` requires a pinned sha256");
+    }
+
+    #[test]
+    fn local_cubin_pinned_verifies() {
+        let mut v = base();
+        v["kernels"]["embed"]["impl"]["steps"][0]["cubin"] = "embed.cubin".into();
+        v["kernels"]["embed"]["impl"]["steps"][0]["sha256"] = "ab".repeat(32).into();
+        check(v).unwrap();
     }
 
     #[test]

@@ -15,16 +15,19 @@
 
 `kern-runtime` 是模型无关的执行器（依赖只有 crates.io：cudarc/half/
 safetensors/thiserror，可开源）：verify manifest → 加载 `kernels/` 下全部
-cubin（`tools/extract_kernels.sh` 从 dump 抽 manifest 用到的 module +
-nvcc 编 embedding）→ 逐 kernel 解析符号——**同名 Triton 多 constexpr 实例
-靠 `cuFuncGetParamInfo` 参数布局与 manifest params 比对来消歧**（phase-2
+cubin 并逐个算 sha256（`tools/extract_kernels.sh` 按 manifest 钉的哈希从
+dump / 手写核 build 里凑齐，落地名 `<显示名>-<sha12>.cubin`）→ 逐 kernel
+解析符号——钉了 `sha256` 的 step 只在哈希相同的模块里找（文件名不参与），
+没钉的在全部模块里找，**同名 Triton 多 constexpr 实例靠
+`cuFuncGetParamInfo` 参数布局与 manifest params 比对来消歧**（phase-2
 ABI 校验兼做实例选择，绕开了 capture 缺 launch→module 映射的坑）→ 按
 symbol max 分配全部 buffer / 按 bytes_per_token×capacity 分配 state →
 safetensors 按名绑权重（scratch 按 impl 声明另行私有分配）→ 顺序重放
 dispatch 表：接口实参解析一次，逐 step 按 `args` 连线转发/接 scratch/
 填字面量后 raw `cuLaunchKernel`（实参 staging 成小端 u64 slot；>48KB
-动态 shmem 自动 `cuFuncSetAttribute`）。step 钉了 `cubin` 就只在该文件
-里解析，带 `sha256` 则加载时校验文件哈希——可插拔工件的完整性检查。
+动态 shmem 自动 `cuFuncSetAttribute`）。state 的 token 容量（`--capacity`）
+向下对齐到 manifest 里 `index_into` 该 state 的最大页单位（block table 的
+`unit`），不会出现半页。
 `extern:cublaslt_bf16_tn` 特判：行主序 `C[m,n]=A[m,k]@W[n,k]^T` 映射成列
 主序 `C'=W_cm^T×A_cm`（transa=T、lda=ldb=k、m'=n、ldc=n）；
 `extern:cublaslt_bf16_tn_acc` 是同一条路径 β=1（`C += A@W^T`，c 参
@@ -104,8 +107,9 @@ CUDA_VISIBLE_DEVICES=0 tools/capture_qwen3.sh        # -> dumped-kernels/pid<N>/
 .venv/bin/python tools/gen_qwen3_decode.py dumped-kernels/pid<N>/launches.jsonl
                                                      # -> examples/qwen3-4b.json
 
-# 4) 抽核：从 dump 的 module 里拷 manifest 用到的 cubin + nvcc 编两个自写核
-tools/extract_kernels.sh dumped-kernels/pid<N>       # -> kernels/
+# 4) 抽核：按 manifest 钉的 sha256 从 dump 里拷 module、从 target/cubins 拷
+#    手写核（tools/build_kernels.sh 编的），落地 <名>-<sha12>.cubin；目录只增不减
+tools/extract_kernels.sh examples/qwen3-4b.json dumped-kernels/pid<N>   # -> kernels/
 
 # 5) 权重：HF checkpoint 合并导出（qkv/gate_up 合并、rope cache 预计算）
 .venv/bin/python tools/export_weights.py             # -> weights/

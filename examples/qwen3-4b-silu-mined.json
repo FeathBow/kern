@@ -3282,7 +3282,7 @@
        }
       ],
       "shared_mem": 21760,
-      "cubin": "module_73.cubin",
+      "cubin": "unified_causal.cubin",
       "sha256": "c6960716503ae634c36ecddb1239b16e3b0856eb04ed3f011249cb6234bb7163"
      }
     ]
@@ -3460,7 +3460,8 @@
         "arg": 4
        }
       ],
-      "cubin": "embedding.cubin"
+      "cubin": "embedding.cubin",
+      "sha256": "1c3dd3e591d872aed259d7ef59d44649061f77a4247a5df864a7fbf0ccbde92f"
      }
     ]
    }
@@ -3578,7 +3579,8 @@
         "arg": 2
        }
       ],
-      "cubin": "argmax.cubin"
+      "cubin": "argmax.cubin",
+      "sha256": "25374575bd35dbd9fe07f90982d0da0c2d4a72cc6ac88df5ec92cdb62a3beb16"
      },
      {
       "symbol": "kern_argmax_final_i64",
@@ -3614,7 +3616,8 @@
         "i32": 64
        }
       ],
-      "cubin": "argmax.cubin"
+      "cubin": "argmax.cubin",
+      "sha256": "25374575bd35dbd9fe07f90982d0da0c2d4a72cc6ac88df5ec92cdb62a3beb16"
      }
     ]
    }

@@ -67,6 +67,7 @@ import re
 import struct
 import subprocess
 import sys
+from handwritten import hw  # tools/handwritten.py: build + pin handwritten cubins
 
 # --- model geometry (config.json; asserted against the capture below)
 HIDDEN = 5120
@@ -737,35 +738,35 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
     kernels = {
         "embedding": single("kern_embedding_i64_bf16",
                             ["in buffer<i64>", "in buffer<bf16>", "out buffer<bf16>", "i32", "i32"],
-                            [256, 1, 1], [T, 1, 1], cubin="embedding.cubin"),
+                            [256, 1, 1], [T, 1, 1], **hw("embedding")),
         "gemm": single("extern:cublaslt_bf16_tn",
                        ["in buffer<bf16>", "in buffer<bf16>", "out buffer<bf16>", "i32", "i32", "i32"],
                        [1, 1, 1], [1, 1, 1]),
         # Gemma norms: one block per row; rows/grid differ per use (ATen's
         # reduction width depends on the row count, so `rows` is an arg).
         "gemma_norm": single("kern_gemma_rms_norm_bf16", GEMMA_PARAMS, [512, 1, 1], [T, 1, 1],
-                             shared_mem=GEMMA_SMEM, cubin="gemma_rms_norm.cubin"),
+                             shared_mem=GEMMA_SMEM, **hw("gemma_rms_norm")),
         "gemma_norm_qhead": single("kern_gemma_rms_norm_bf16", GEMMA_PARAMS, [512, 1, 1],
                                    [mul(T, HEADS), 1, 1], shared_mem=GEMMA_HEAD_SMEM,
-                                   cubin="gemma_rms_norm.cubin"),
+                                   **hw("gemma_rms_norm")),
         "gemma_norm_khead": single("kern_gemma_rms_norm_bf16", GEMMA_PARAMS, [512, 1, 1],
                                    [mul(T, KV_HEADS), 1, 1], shared_mem=GEMMA_HEAD_SMEM,
-                                   cubin="gemma_rms_norm.cubin"),
+                                   **hw("gemma_rms_norm")),
         "gemma_fused_norm": single("kern_gemma_fused_add_rms_norm_bf16", GEMMA_FUSED_PARAMS,
                                    [512, 1, 1], [T, 1, 1], shared_mem=GEMMA_SMEM,
-                                   cubin="gemma_rms_norm.cubin"),
+                                   **hw("gemma_rms_norm")),
         "silu_mul": single(silu_sym, ["out buffer<bf16>", "in buffer<bf16>", "i32", "i32", "f32", "i32"],
                            blk("silu"), [T, 1, 1]),
         "copy_rows": single("kern_copy_rows_bf16",
                             ["out buffer<bf16>", "in buffer<bf16>", "i32", "i32", "i32"],
-                            [256, 1, 1], [T, 1, 1], cubin="copy_rows.cubin"),
+                            [256, 1, 1], [T, 1, 1], **hw("copy_rows")),
         "last_row": single("kern_last_row_bf16",
                            ["out buffer<bf16>", "in buffer<bf16>", "i32", "i32", "i32"],
-                           [256, 1, 1], [1, 1, 1], cubin="copy_rows.cubin"),
+                           [256, 1, 1], [1, 1, 1], **hw("copy_rows")),
         "sigmoid_mul": single("kern_sigmoid_mul_bf16",
                               ["out buffer<bf16>", "in buffer<bf16>", "in buffer<bf16>",
                                "i32", "i32", "i32", "i32"],
-                              [256, 1, 1], [T, 1, 1], cubin="sigmoid_mul.cubin"),
+                              [256, 1, 1], [T, 1, 1], **hw("sigmoid_mul")),
         "argmax_row": {
             "params": ["in buffer<bf16>", "out buffer<i64>", "i32"],
             "impl": {
@@ -775,11 +776,11 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
                     step("kern_argmax_partial_bf16",
                          ["in buffer<bf16>", "out buffer<f32>", "out buffer<i32>", "i32"],
                          [1024, 1, 1], [1, 64, 1], [a(0), scr("pmax"), scr("pidx"), a(2)],
-                         cubin="argmax.cubin"),
+                         **hw("argmax")),
                     step("kern_argmax_final_i64",
                          ["in buffer<f32>", "in buffer<i32>", "out buffer<i64>", "i32"],
                          [64, 1, 1], [1, 1, 1], [scr("pmax"), scr("pidx"), a(1), i32(64)],
-                         cubin="argmax.cubin"),
+                         **hw("argmax")),
                 ],
             },
         },
@@ -909,11 +910,11 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
                         step("kern_argmax_partial_bf16",
                              ["in buffer<bf16>", "out buffer<f32>", "out buffer<i32>", "i32"],
                              [1024, 1, 1], [T, 64, 1], [a(0), scr("pmax"), scr("pidx"), a(2)],
-                             cubin="argmax.cubin"),
+                             **hw("argmax")),
                         step("kern_argmax_final_i64",
                              ["in buffer<f32>", "in buffer<i32>", "out buffer<i64>", "i32"],
                              [64, 1, 1], [T, 1, 1], [scr("pmax"), scr("pidx"), a(1), i32(64)],
-                             cubin="argmax.cubin"),
+                             **hw("argmax")),
                     ],
                 },
             },
@@ -937,21 +938,21 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
             "dflash_conv": single("kern_dflash_conv_bf16",
                                   ["inout buffer<bf16>", "in buffer<bf16>", "in buffer<bf16>",
                                    "i32", "i32", "i32", "i32", "i32"],
-                                  [256, 1, 1], [HIDDEN // 256, 1, 1], cubin="dflash_conv.cubin"),
+                                  [256, 1, 1], [HIDDEN // 256, 1, 1], **hw("dflash_conv")),
             "topk16": single("kern_topk16_bf16",
                              ["in buffer<bf16>", "out buffer<i64>", "out buffer<f32>", "i32", "i32"],
-                             [1024, 1, 1], [DRAFT_TOKENS, 1, 1], cubin="topk_row.cubin"),
+                             [1024, 1, 1], [DRAFT_TOKENS, 1, 1], **hw("topk_row")),
             "dflash_select": single("kern_dflash_select",
                                     ["in buffer<i64>", "in buffer<f32>", "in buffer<bf16>", "in buffer<bf16>",
                                      "in buffer<bf16>", "in buffer<bf16>", "out buffer<i64>", "i32", "i32", "i32"],
                                     [SEL_RANK, 1, 1], [1, 1, 1], shared_mem=SEL_K * SEL_RANK * 4,
-                                    cubin="dflash_select.cubin"),
+                                    **hw("dflash_select")),
             "gather_cands": single("kern_embedding_i64_bf16",
                                    ["in buffer<i64>", "in buffer<bf16>", "out buffer<bf16>", "i32", "i32"],
-                                   [256, 1, 1], [DRAFT_TOKENS * SEL_K, 1, 1], cubin="embedding.cubin"),
+                                   [256, 1, 1], [DRAFT_TOKENS * SEL_K, 1, 1], **hw("embedding")),
             "gather_row": single("kern_embedding_i64_bf16",
                                  ["in buffer<i64>", "in buffer<bf16>", "out buffer<bf16>", "i32", "i32"],
-                                 [256, 1, 1], [1, 1, 1], cubin="embedding.cubin"),
+                                 [256, 1, 1], [1, 1, 1], **hw("embedding")),
         })
 
     def gemm(label, ab, w, c, m, n, k):
@@ -1369,12 +1370,15 @@ def main():
     assert abs(eps - 1e-6) < 1e-12 and attn_scale == 0.0625
     silu_sym = pre["silu"][0]["symbol"]
 
+    # A pinned step's `cubin` is a label (the runtime resolves the sha256),
+    # so name Triton instances by what they are, not by dump module number.
     pinner = Pinner(dump)
     pins = {}
     for tag in TRITON:
         for src, is_pre in ((pre, True), (dec, False)):
             if src[tag]:
-                pins[(tag, is_pre)] = pinner.pin(TRITON[tag], src[tag][0]["attributes"]["num_regs"])
+                _, sha = pinner.pin(TRITON[tag], src[tag][0]["attributes"]["num_regs"])
+                pins[(tag, is_pre)] = (f"{tag}.cubin", sha)
     for (tag, is_pre), (mod, sha) in sorted(pins.items()):
         print(f"  pin {TRITON[tag]:<52} {'prefill' if is_pre else 'decode '} -> {mod} {sha[:12]}",
               file=sys.stderr)
@@ -1382,18 +1386,17 @@ def main():
     spec = None
     if spec_dump:
         # Two dumps feed one manifest (Stage 1's target instances + the
-        # speculative path's), so pinned cubins are named by content
-        # (sha prefix); extract_kernels.sh resolves them across dumps.
-        by_sha = lambda mod_sha: (f"{mod_sha[1][:12]}.cubin", mod_sha[1])  # noqa: E731
-        pins = {k: by_sha(v) for k, v in pins.items()}
+        # speculative path's); extract_kernels.sh resolves every pin by
+        # sha256 across dumps, labels stay by tag.
         src = spec_launches(load(spec_dump / "launches.jsonl"))
         sp = Pinner(spec_dump)
         spins = {}
         for tag, r in src.items():
-            spins[tag] = by_sha(sp.pin(SPEC_SYMS[tag], r["attributes"]["num_regs"], nparams=len(r["params"])))
+            spins[tag] = (f"{tag}.cubin", sp.pin(SPEC_SYMS[tag], r["attributes"]["num_regs"], nparams=len(r["params"]))[1])
         # conv_fwd of the spec state layout: Stage 1's instance with the page stride rebaked
-        pins[("conv_fwd", True)] = by_sha(sp.pin_nearest(TRITON["conv_fwd"], pre["conv_fwd"][0]["attributes"]["num_regs"],
-                                                         pinner.pin(TRITON["conv_fwd"], pre["conv_fwd"][0]["attributes"]["num_regs"])[1]))
+        pins[("conv_fwd", True)] = ("conv_fwd.cubin",
+                                    sp.pin_nearest(TRITON["conv_fwd"], pre["conv_fwd"][0]["attributes"]["num_regs"],
+                                                   pinner.pin(TRITON["conv_fwd"], pre["conv_fwd"][0]["attributes"]["num_regs"])[1])[1])
         assert pf(src["recurrent_spec"], 15) == gdn_scale and pf(src["recurrent_spec"], 4) == 1.0
         assert pf(src["recurrent_spec"], 5) == 20.0, "softplus threshold"
         assert pv(src["conv_update_spec"], 9) == pv(src["conv_update_spec"], 10), "conv update not in place"

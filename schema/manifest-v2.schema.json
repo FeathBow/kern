@@ -543,7 +543,7 @@
           "type": "array"
         },
         "cubin": {
-          "description": "Cubin file (relative to the kernel artifact dir) this step's symbol\nmust come from. Absent: the runtime searches every loaded module\n(disambiguating by param layout). `extern:` symbols have no cubin.",
+          "description": "Display name of the cubin this step's symbol comes from — a file name\n(`gemm8.cubin`) or a registry ref (`hf:org/repo/path.cubin@rev`).\nThe runtime never resolves by this name: it loads every module in\nthe kernel dir, hashes each, and matches the step by `sha256`, so\none dir can hold every version of a kernel. Absent: the runtime\nsearches every loaded module (disambiguating by param layout).\n`extern:` symbols have no cubin.",
           "type": [
             "string",
             "null"
@@ -565,7 +565,7 @@
           "type": "array"
         },
         "sha256": {
-          "description": "sha256 of that cubin file, checked by the runtime when both are set.",
+          "description": "sha256 of the cubin — the step's identity. Required whenever `cubin`\nis set; a rebuilt cubin with different bytes is a different kernel.",
           "type": [
             "string",
             "null"

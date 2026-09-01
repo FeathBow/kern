@@ -45,7 +45,8 @@ struct Opts {
     /// Candidate manifest
     #[arg(long)]
     b: PathBuf,
-    /// Directory holding the .cubin modules (both manifests)
+    /// Directory of cubins for both manifests; steps resolve by their pinned
+    /// sha256, so one dir holds every version (file names are labels)
     #[arg(long, default_value = "kernels")]
     kernels: PathBuf,
     /// Safetensors artifact(s); repeat for a target + draft pair
@@ -62,6 +63,7 @@ struct Opts {
     fuzz: usize,
     #[arg(long, default_value_t = 0)]
     gpu: usize,
+    /// State capacity in tokens; rounded down to the manifest's page unit
     #[arg(long, default_value_t = 4096)]
     capacity: u64,
     #[arg(long, default_value_t = 512)]
@@ -1179,7 +1181,7 @@ fn main() -> Result<()> {
                     } else {
                         match &decl.domain {
                             Some(d) => {
-                                let r = d.resolve(&ma, &sn.env, o.capacity)?;
+                                let r = d.resolve(&ma, &sn.env, s.a.rt.capacity())?;
                                 let (lo, hi) = (r.lo.unwrap_or(0.0), r.hi.unwrap_or(r.lo.unwrap_or(0.0) + 1024.0));
                                 gen_int(&mut rng, n, lo, hi, r.monotone)
                             }
@@ -1212,7 +1214,7 @@ fn main() -> Result<()> {
                     // buffer's declared domain (A is checked too — a
                     // violation there is the reference misbehaving).
                     if let Some(d) = &mb.buffers[name].domain {
-                        let r = d.resolve(&mb, &sn.env, o.capacity)?;
+                        let r = d.resolve(&mb, &sn.env, s.b.rt.capacity())?;
                         for (side, bytes) in [("A", &out_a[name]), ("B", b)] {
                             let v = values::to_f64(mb.buffers[name].dtype, bytes);
                             if let Some(i) = v.iter().position(|x| !r.contains(*x)) {

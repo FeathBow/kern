@@ -34,7 +34,8 @@ struct Opts {
     #[arg(long, default_value = "examples/qwen3-4b.json")]
     manifest: PathBuf,
 
-    /// Directory holding the .cubin modules
+    /// Directory of cubins; steps resolve by their pinned sha256, so one dir
+    /// holds every version (file names are labels)
     #[arg(long, default_value = "kernels")]
     kernels: PathBuf,
 
@@ -59,7 +60,8 @@ struct Opts {
     #[arg(long, default_value_t = 0)]
     gpu: usize,
 
-    /// State capacity in tokens (KV pages etc.)
+    /// State capacity in tokens (KV pages etc.); rounded down to the
+    /// manifest's page unit
     #[arg(long, default_value_t = 4096)]
     capacity: u64,
 
@@ -137,7 +139,7 @@ fn main() -> Result<()> {
         if per_tok > 0 {
             info!(
                 "  state    {name}: opaque, {per_tok} B/token × capacity {} = {}",
-                o.capacity,
+                rt.capacity(),
                 human(alloc)
             );
         } else {

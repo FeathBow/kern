@@ -569,12 +569,17 @@ pub struct Scratch {
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Step {
-    /// Cubin file (relative to the kernel artifact dir) this step's symbol
-    /// must come from. Absent: the runtime searches every loaded module
-    /// (disambiguating by param layout). `extern:` symbols have no cubin.
+    /// Display name of the cubin this step's symbol comes from — a file name
+    /// (`gemm8.cubin`) or a registry ref (`hf:org/repo/path.cubin@rev`).
+    /// The runtime never resolves by this name: it loads every module in
+    /// the kernel dir, hashes each, and matches the step by `sha256`, so
+    /// one dir can hold every version of a kernel. Absent: the runtime
+    /// searches every loaded module (disambiguating by param layout).
+    /// `extern:` symbols have no cubin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cubin: Option<String>,
-    /// sha256 of that cubin file, checked by the runtime when both are set.
+    /// sha256 of the cubin — the step's identity. Required whenever `cubin`
+    /// is set; a rebuilt cubin with different bytes is a different kernel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
     /// Entry symbol, or `extern:<op>` for runtime built-ins.

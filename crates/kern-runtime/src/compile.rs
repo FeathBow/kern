@@ -7,14 +7,13 @@
 
 use std::collections::BTreeMap;
 use std::ffi::CString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use cudarc::driver::{result as cu, sys, CudaStream};
 use kern_manifest::types::{Arg, Dim, Dispatch, Expr, Kernel, Manifest, ParamType, StepArg};
-use sha2::Digest;
 
-use crate::cubin::param_sizes;
+use crate::cubin::{param_sizes, LoadedModule};
 use crate::device::{alloc, DeviceBuf};
 use crate::error::{bail, cuda_check, Error, Result};
 
@@ -143,8 +142,7 @@ pub(crate) fn shaped_bytes(
 /// hashes, opt into >48KB dynamic shared memory, allocate scratch.
 pub(crate) fn resolve_kernels(
     manifest: &Manifest,
-    modules: &[(String, sys::CUmodule)],
-    remote: &BTreeMap<String, PathBuf>,
+    modules: &[LoadedModule],
     kernels_dir: &Path,
     stream: &Arc<CudaStream>,
     max_env: &BTreeMap<String, u64>,
@@ -161,25 +159,24 @@ pub(crate) fn resolve_kernels(
                 }
                 continue;
             }
-            // Pinned-artifact integrity: when the step names its cubin
-            // (the pluggable path), verify the file hash if declared.
-            if let (Some(cb), Some(sha)) = (&st.cubin, &st.sha256) {
-                let path = match remote.get(cb.as_str()) {
-                    Some(p) => p.clone(),
-                    None => kernels_dir.join(cb),
-                };
-                let data = std::fs::read(&path).map_err(|e| {
-                    Error::KernelArtifact(format!(
-                        "kernel `{name}` step #{si}: reading {}: {e}",
-                        path.display()
-                    ))
-                })?;
-                let got = format!("{:x}", sha2::Sha256::digest(&data));
-                if got != sha.to_lowercase() {
+            // Identity: a step that names its cubin pins its sha256 (the
+            // verifier requires it); the file name is a label. Only modules
+            // with that hash are candidates. Unpinned steps search every
+            // loaded module and disambiguate by param layout.
+            let want_sha = st.sha256.as_deref().map(str::to_lowercase);
+            if let Some(sha) = &want_sha {
+                if !modules.iter().any(|m| &m.sha == sha) {
                     bail!(
                         KernelArtifact,
-                        "kernel `{name}` step #{si}: cubin `{cb}` sha256 mismatch: \
-                         manifest declares {sha}, file is {got}"
+                        "kernel `{name}` step #{si}: cubin `{}` @{} is not among the {} modules \
+                         loaded from {} — the file name is a label, the hash is the identity; \
+                         put a cubin with that sha256 there (tools/extract_kernels.sh <manifest> \
+                         <dump dirs> {})",
+                        st.cubin.as_deref().unwrap_or("?"),
+                        &sha[..12.min(sha.len())],
+                        modules.len(),
+                        kernels_dir.display(),
+                        kernels_dir.display()
                     );
                 }
             }
@@ -188,29 +185,30 @@ pub(crate) fn resolve_kernels(
                 .map_err(|e| Error::Manifest(format!("kernel `{name}` symbol: {e}")))?;
             let mut resolved = None;
             let mut seen = Vec::new();
-            for (file, cmod) in modules {
-                if let Some(cb) = &st.cubin {
-                    if file != cb {
+            for m in modules {
+                if let Some(sha) = &want_sha {
+                    if &m.sha != sha {
                         continue;
                     }
                 }
-                let Ok(func) = (unsafe { cu::module::get_function(*cmod, sym.clone()) }) else {
+                let Ok(func) = (unsafe { cu::module::get_function(m.module, sym.clone()) }) else {
                     continue;
                 };
                 let got = param_sizes(func)?;
                 if got == want {
-                    resolved = Some(StepImpl::Cubin { func, module: file.clone() });
+                    resolved = Some(StepImpl::Cubin { func, module: format!("{}@{}", m.label, &m.sha[..8]) });
                     break;
                 }
-                seen.push(format!("{file}: {got:?}"));
+                seen.push(format!("{}@{}: {got:?}", m.label, &m.sha[..8]));
             }
             let Some(r) = resolved else {
                 bail!(
                     KernelArtifact,
                     "kernel `{name}` step #{si} ({}): no loaded instance matches declared \
-                     param layout {want:?} (cubin filter {:?}); saw {seen:?}",
+                     param layout {want:?} (cubin {:?} sha {:?}); saw {seen:?}",
                     st.symbol,
-                    st.cubin
+                    st.cubin,
+                    want_sha.as_deref().map(|s| &s[..12.min(s.len())])
                 );
             };
             // Opt in to >48KB dynamic shared memory where the step needs it.

@@ -53,14 +53,27 @@ pub(crate) fn fetch_registry_cubins(manifest: &Manifest) -> Result<BTreeMap<Stri
     Ok(remote)
 }
 
-/// Load every module the artifacts provide, keyed by cubin file name (local
-/// files, loaded in name order so instance resolution is deterministic) or
-/// full registry ref string (remote).
+/// One loaded device module: the hash that identifies it (what a manifest
+/// step pins), a label for humans (the file name it came from, or the
+/// registry ref), and the driver handle.
+pub(crate) struct LoadedModule {
+    pub sha: String,
+    pub label: String,
+    pub module: sys::CUmodule,
+}
+
+/// Load every module the artifacts provide, keyed by sha256 of the file.
+/// File names are labels only: a kernel dir may hold every version of a
+/// kernel ever built (`gemm8-3f9a1c2d4e5b.cubin`, `gemm8-9b0c…`) and each
+/// manifest resolves to the one it pins. Two files with the same bytes load
+/// once. Local files load in name order so unpinned-symbol resolution is
+/// deterministic; registry artifacts follow.
 pub(crate) fn load_all_modules(
     kernels_dir: &Path,
     remote: &BTreeMap<String, PathBuf>,
-) -> Result<Vec<(String, sys::CUmodule)>> {
-    let mut cubins: Vec<_> = std::fs::read_dir(kernels_dir)?
+) -> Result<Vec<LoadedModule>> {
+    let mut cubins: Vec<_> = std::fs::read_dir(kernels_dir)
+        .map_err(|e| Error::KernelArtifact(format!("kernel dir {}: {e}", kernels_dir.display())))?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|e| e == "cubin"))
         .collect();
@@ -68,13 +81,20 @@ pub(crate) fn load_all_modules(
     if cubins.is_empty() && remote.is_empty() {
         bail!(KernelArtifact, "no .cubin files in {}", kernels_dir.display());
     }
-    let mut modules = Vec::new();
+    let mut modules: Vec<LoadedModule> = Vec::new();
     let local = cubins
         .iter()
         .map(|p| (p.file_name().unwrap().to_string_lossy().into_owned(), p.clone()));
-    for (key, path) in local.chain(remote.iter().map(|(r, p)| (r.clone(), p.clone()))) {
-        for cmod in load_device_modules(&path)? {
-            modules.push((key.clone(), cmod));
+    for (label, path) in local.chain(remote.iter().map(|(r, p)| (r.clone(), p.clone()))) {
+        let bytes = std::fs::read(&path)
+            .map_err(|e| Error::KernelArtifact(format!("reading {}: {e}", path.display())))?;
+        let sha = format!("{:x}", sha2::Sha256::digest(&bytes));
+        if let Some(prev) = modules.iter().find(|m| m.sha == sha) {
+            tracing::debug!("{label}: same bytes as {} ({}), not loaded twice", prev.label, &sha[..12]);
+            continue;
+        }
+        for module in load_device_modules(&path)? {
+            modules.push(LoadedModule { sha: sha.clone(), label: label.clone(), module });
         }
     }
     Ok(modules)

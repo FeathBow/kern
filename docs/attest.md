@@ -19,7 +19,10 @@
 `examples/qwen3-4b-silu-mined.json` 是自带的 A/B fixture：和
 `qwen3-4b.json` 唯一的区别是 `silu_mul` 的 impl 从 HF hub 的
 `kernels-community/activation` 包换回挖矿得到的 vLLM cubin，接口与全部
-dispatch 一字不动——纯 impl 替换。
+dispatch 一字不动——纯 impl 替换。两份 manifest 共用一个 `--kernels`
+目录：step 按 sha256 解析，目录里放着两边各自钉的版本即可（`tools/
+extract_kernels.sh` 对 A、B 各跑一次，只增不减）。`--capacity` 会向下
+对齐到 manifest 的页单位，fuzz 的 `slot_mapping` 不会落进半页。
 
 ## 设计：tap 一次，之后全是 cut 级
 

@@ -29,7 +29,7 @@ Model provider 交付 `manifest.json + kernels.cubin + weights`，runtime 负责
     dtype+shape 声明，调用方看不见）+ `steps` 顺序 launch 列表。每个
     step 有自己的 cubin 符号、launch ABI（`params`）、block/grid 几何
     （grid 用下述表达式集合；可选 `shared_mem`，上限 227KB opt-in）、
-    可选 `cubin` 文件钉定 + `sha256`，以及 `args` 连线：`{"arg": i}`
+    可选 `cubin`（显示名）+ `sha256`（身份，写了 cubin 就必填），以及 `args` 连线：`{"arg": i}`
     转发接口第 i 参 / `{"scratch": name, offset}` 接私有工作区 /
     字面量标量（impl 私有常量）。多数 kernel 是单 step 恒等连线；
     两段式 argmax、vLLM attention（unified + reduce_segments）这类
@@ -81,6 +81,17 @@ host 写入（O(n)，免费），`kern-attest` 据此为整数 buffer 合成合�
 impl 与接口的自洽（方向、dtype、scratch 数据流），runtime 加载时用
 `cuFuncGetParamInfo` 比对每个 step 声明的 ABI，`sha256` 钉住工件。这
 就是"kernel 市场"的交换单元。
+
+**cubin 的身份是 sha256，名字只是标签。** step 写了 `cubin` 就必须带
+`sha256`；runtime 把 kernel 目录里的每个 `.cubin` 都装载并算哈希，按
+哈希给 step 找模块，**从不按文件名找**。所以一个目录可以同时放一个核的
+每一个版本（`gemm8-3f9a1c2d4e5b.cubin`、`gemm8-9b0c….cubin`，
+`tools/extract_kernels.sh` 就这么落地：显示名 + sha 前 12 位），上一个
+commit 的 manifest 和这一个都能从同一个目录解析——kern-test 的 A/B 正
+是靠这个。推论：**换编译器、换 flag、改一行源码 = 换核**，哈希不同就是
+另一个工件，manifest 钉的是生成它时在场的那一次 build，两个 build 数值
+上是否等价由 kern-test 说了算，不由名字说了算。没写 `cubin` 的 step
+（挖矿来的、只给符号）在全部已装载模块里按参数布局消歧。
 
 **Registry ref**：step 的 `cubin` 除本地文件名外可写
 `hf:<org>/<repo>/<path>[@revision]`（revision 默认 `main`），此时
