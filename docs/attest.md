@@ -47,19 +47,29 @@ harness 付的是"模型装载一次 + 一次 prefill/decode + N × 几个 dispa
 2. **TAP（真实 workload，唯一的全程执行）**：A、B 在同一 prompt 上
    lockstep 跑 chunked prefill + 一个 decode step——Same 段两边各自跑，
    Changed 段跑之前从 A 读 frontier 输入（按当前 symbol 值取活跃前缀），
-   跑完读 A 的输出做参考、比 B 写出的 buffer 和 state（local）。第一个
-   prefill chunk 和 decode step 的每个 cut 都存成快照（输入 + 参考输出
-   + 参考 state），后面的段全靠它。最后比 output 类 buffer。
+   跑完读 A 的输出做参考、比 B 写出的 buffer（local）。**state 按 cut 的
+   write-set 比**：A 跑前后各读一次 state，差异的字节区间就是这个 cut 的
+   write-set（pre-image）；先把 A 的 pre-image 写进 B 再跑 B，然后只在
+   write-set 上比 A、B 的 post-image，另报 B 在 write-set 之外写了多少
+   字节。整个 state 不能拿来比——其余字节是别的层的历史，B 的历史又是
+   B 自己的。第一个 prefill chunk 和 decode step 的每个 cut 都存成快照
+   （输入 + 参考输出 + 参考 state + pre-image），后面的段全靠它。最后比
+   output 类 buffer。
 3. **NOISE FLOOR**：每个快照写回 A，重跑 A 自己的 cut，和参考输出比。
-   参考自己不确定，后面的 ulp 数字就没有意义；不 clean 时 B 按这条带子
-   判（`--no-noise` 跳过）。
+   带 inout state 的 cut 不幂等（重放一次 conv 窗口再移一位、SSM 再递推
+   一步），所以**每次重放先把 pre-image 写回，跑完把 A 的 post-image 写
+   回**——A、B 皆然，重放之前 B 的 state 先整体拷成 A 的。这样参考自己
+   逐位可复现，band 为零；仍不 clean 才是 A 真的不确定（atomics 之类），
+   此时 B 按这条带子判（`--no-noise` 跳过）。早先没有复位时 A 自比差
+   上百 MB，band 无限宽，B 在 state 上的真错误全躲在带内。
 4. **FUZZ（合成 workload）**：对每个快照，把 frontier 输入换成合成值：
    浮点 buffer 轮流用 uniform / normal / laplace（重尾）/ outliers
    （1% × 100）/ edge（±0、次正规、半量程）/ special（含 nan/inf）；整数
    buffer 只在声明了 `domain` 时按域合成（`index_into`、`min`/`max`、
    `monotone`），否则保留 tap 到的值并列为 unfuzzed。两边重放同一个 cut，
    比写出的 buffer；写出的 buffer 若声明了 domain，则检查每个元素落在域内
-   （后置条件；A 违反说明参考本身有问题）。B 崩溃（IMA）直接 FAIL。
+   （后置条件；A 违反说明参考本身有问题）。写出的 state 也比（A、B 全
+   量，两边此时起点相同）。B 崩溃（IMA）直接 FAIL。
 5. **PERF**：每个变了的 program 整步 eager 跑 N 次，逐 dispatch event 计时
    取最小——同一份数据既给**整步**（Σ 全部）又给 **Σ cuts**（换掉的那
    块）。表里 `B measured` 旁边就是 **`B derived`** = `A − Σcut_A +

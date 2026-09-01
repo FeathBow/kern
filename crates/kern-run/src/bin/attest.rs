@@ -462,6 +462,58 @@ struct Snap {
     inputs: Vec<(String, Vec<u8>)>,
     ref_out: BTreeMap<String, Vec<u8>>,
     ref_states: BTreeMap<String, Vec<u8>>,
+    /// Pre-image of every state byte the cut changed (A, before the cut):
+    /// `state -> [(offset, bytes)]`. A cut with inout state is not
+    /// idempotent — replaying it on its own output shifts the conv window
+    /// again, advances the SSM again — so every replay first writes these
+    /// back, and writes the post-image back when it is done. States are
+    /// opaque; this is byte-level, no model knowledge.
+    pre_states: BTreeMap<String, Vec<(usize, Vec<u8>)>>,
+}
+
+/// How B's write to a state compares with A's, on this cut: bytes of A's
+/// write-set (`set`), how many of them B wrote differently (`n_diff`), and
+/// how many bytes B changed outside A's write-set (`outside`).
+#[derive(Clone, Default)]
+struct StateCmp {
+    set: usize,
+    n_diff: usize,
+    outside: usize,
+}
+
+/// Runs of `[offset, offset+len)` where `pre` and `post` differ (gaps under
+/// 64 bytes are bridged so a sparse update is a few runs, not thousands).
+fn diff_runs(pre: &[u8], post: &[u8]) -> Vec<(usize, Vec<u8>)> {
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i < pre.len() {
+        if pre[i] == post[i] {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < pre.len() && pre[i] != post[i] {
+            i += 1;
+        }
+        match runs.last_mut() {
+            Some((_, end)) if start - *end < 64 => *end = i,
+            _ => runs.push((start, i)),
+        }
+    }
+    runs.into_iter().map(|(a, b)| (a, pre[a..b].to_vec())).collect()
+}
+
+/// Write a state pre-image (or post-image at the same offsets) back.
+fn restore_state(c: &mut Caller, runs: &BTreeMap<String, Vec<(usize, Vec<u8>)>>, image: Option<&BTreeMap<String, Vec<u8>>>) -> Result<()> {
+    for (name, rs) in runs {
+        for (off, bytes) in rs {
+            match image {
+                None => c.rt.write_state_at(name, *off, bytes)?,
+                Some(img) => c.rt.write_state_at(name, *off, &img[name][*off..*off + bytes.len()])?,
+            }
+        }
+    }
+    Ok(())
 }
 
 fn load_side(json: &str, o: &Opts, blobs: &[&[u8]]) -> Result<Caller> {
@@ -965,9 +1017,10 @@ fn main() -> Result<()> {
     // ---- 2. tap: A and B in lockstep on the prompt, snapshot at every cut
     let mut sec = Section::new("TAP", &format!("A and B lockstep · prompt {} tokens · snapshot + compare at every cut · runtimes loaded in {:.1?}", ids.len(), load_t));
     let mut snaps: Vec<Snap> = Vec::new();
+    let mut snap_state_bytes = 0usize;
     // program -> buffer -> [(cut label, cmp)]
     let mut local_res: BTreeMap<String, BTreeMap<String, Vec<(String, Cmp)>>> = BTreeMap::new();
-    let mut local_states: BTreeMap<String, BTreeMap<String, Vec<(String, usize)>>> = BTreeMap::new();
+    let mut local_states: BTreeMap<String, BTreeMap<String, Vec<(String, StateCmp)>>> = BTreeMap::new();
     let mut one_sided_all: BTreeSet<String> = BTreeSet::new();
     let mut local_json = Vec::new();
     let mut n_chunks = 0usize;
@@ -998,30 +1051,74 @@ fn main() -> Result<()> {
                     inputs.push((n.clone(), s.a.rt.read_buffer_prefix(n, live_bytes(&ma, n, e))?));
                 }
             }
-            s.a.rt.run_range(pname, e, seg.a.0, seg.a.1)?;
-            s.b.rt.run_range(pname, e, seg.b.0, seg.b.1)?;
             let (aa, ab) = (access(&ma, pname, seg.a.0, seg.a.1), access(&mb, pname, seg.b.0, seg.b.1));
-            let (bufs, states, one_sided) = compare_written(&s.a, &s.b, &aa, &ab, e, true)?;
+            let touched: BTreeSet<String> = aa.state_writes.union(&ab.state_writes).cloned().collect();
+            // State is compared on the cut's write-set — the bytes A's run
+            // changed — not on the whole allocation (the rest is other
+            // layers' history, and it moves between now and any replay).
+            // B runs the cut from A's pre-image of that write-set, so what
+            // B writes there is this cut's doing, not its own history's.
+            let mut a_pre = BTreeMap::new();
+            for st in &touched {
+                a_pre.insert(st.clone(), s.a.rt.read_state(st)?);
+            }
+            s.a.rt.run_range(pname, e, seg.a.0, seg.a.1)?;
+            let mut a_post = BTreeMap::new();
+            let mut pre_states = BTreeMap::new();
+            for st in &touched {
+                let post = s.a.rt.read_state(st)?;
+                let runs = diff_runs(&a_pre[st], &post);
+                for (off, bytes) in &runs {
+                    s.b.rt.write_state_at(st, *off, bytes)?;
+                }
+                pre_states.insert(st.clone(), runs);
+                a_post.insert(st.clone(), post);
+            }
+            let mut b_pre = BTreeMap::new();
+            for st in &touched {
+                b_pre.insert(st.clone(), s.b.rt.read_state(st)?);
+            }
+            s.b.rt.run_range(pname, e, seg.b.0, seg.b.1)?;
+            let (bufs, _, one_sided) = compare_written(&s.a, &s.b, &aa, &ab, e, false)?;
+            let mut states = BTreeMap::new();
+            for st in &touched {
+                let b_post = s.b.rt.read_state(st)?;
+                let ap = &a_post[st];
+                let runs = &pre_states[st];
+                let set: usize = runs.iter().map(|(_, b)| b.len()).sum();
+                let n_diff: usize = runs
+                    .iter()
+                    .map(|(off, b)| (0..b.len()).filter(|i| ap[off + i] != b_post[off + i]).count())
+                    .sum();
+                // bytes B changed that lie outside A's write-set
+                let outside: usize = diff_runs(&b_pre[st], &b_post)
+                    .iter()
+                    .map(|(boff, bb)| {
+                        (0..bb.len())
+                            .filter(|i| !runs.iter().any(|(aoff, ab)| (aoff..&(aoff + ab.len())).contains(&&(boff + i))))
+                            .count()
+                    })
+                    .sum();
+                states.insert(st.clone(), StateCmp { set, n_diff, outside });
+            }
             for (n, cmp) in &bufs {
                 local_res.entry(pname.into()).or_default().entry(n.clone()).or_default().push((label.clone(), cmp.clone()));
             }
-            for (st, n) in &states {
-                local_states.entry(pname.into()).or_default().entry(st.clone()).or_default().push((label.clone(), *n));
+            for (st, c) in &states {
+                local_states.entry(pname.into()).or_default().entry(st.clone()).or_default().push((label.clone(), c.clone()));
             }
             one_sided_all.extend(one_sided.iter().cloned());
             local_json.push(json!({"program": pname, "cut": label,
                 "buffers": bufs.iter().map(|(n, c)| (n.clone(), c.to_json())).collect::<serde_json::Map<_, _>>(),
-                "states": states, "one_sided": one_sided}));
+                "states": states.iter().map(|(n, c)| (n.clone(), json!({"write_set": c.set, "differ": c.n_diff, "outside": c.outside}))).collect::<serde_json::Map<_, _>>(),
+                "one_sided": one_sided}));
             if keep {
                 let mut ref_out = BTreeMap::new();
                 for n in aa.writes.intersection(&ab.writes) {
                     ref_out.insert(n.clone(), s.a.rt.read_buffer_prefix(n, live_bytes(&ma, n, e))?);
                 }
-                let mut ref_states = BTreeMap::new();
-                for st in aa.state_writes.union(&ab.state_writes) {
-                    ref_states.insert(st.clone(), s.a.rt.read_state(st)?);
-                }
-                snaps.push(Snap { program: pname.into(), seg: seg.clone(), env: e.clone(), inputs, ref_out, ref_states });
+                snap_state_bytes += pre_states.values().flatten().map(|(_, b)| b.len()).sum::<usize>();
+                snaps.push(Snap { program: pname.into(), seg: seg.clone(), env: e.clone(), inputs, ref_out, ref_states: a_post, pre_states });
             }
         }
         Ok(())
@@ -1063,10 +1160,20 @@ fn main() -> Result<()> {
         }
         if let Some(sts) = local_states.get(pname) {
             for (st, res) in sts {
-                let bad: Vec<&(String, usize)> = res.iter().filter(|(_, n)| *n > 0).collect();
+                let bad: Vec<&(String, StateCmp)> = res.iter().filter(|(_, c)| c.n_diff > 0 || c.outside > 0).collect();
                 local_identical &= bad.is_empty();
                 local_bit &= bad.is_empty();
-                let txt = if bad.is_empty() { Cell::good("bit-identical") } else { Cell::bad(format!("{}/{} cuts differ · {} bytes at {}", bad.len(), res.len(), bad[0].1, bad[0].0)) };
+                let set: usize = res.iter().map(|(_, c)| c.set).max().unwrap_or(0);
+                let txt = if bad.is_empty() {
+                    Cell::good(format!("bit-identical on the cut's write-set ({})", kb(set)))
+                } else {
+                    let (label, c) = bad[0];
+                    let mut t = format!("{}/{} cuts differ · {}/{} bytes of the write-set at {label}", bad.len(), res.len(), c.n_diff, c.set);
+                    if c.outside > 0 {
+                        t += &format!(" · B wrote {} outside A's write-set", kb(c.outside));
+                    }
+                    Cell::bad(t)
+                };
                 rows.push(row![if first { pname.to_string() } else { String::new() }, count.clone(), format!("state {st}"), txt]);
                 first = false;
             }
@@ -1084,6 +1191,9 @@ fn main() -> Result<()> {
     sec.table(rows);
     let snap_bytes: usize = snaps.iter().map(|sn| sn.inputs.iter().map(|(_, b)| b.len()).sum::<usize>() + sn.ref_out.values().map(|b| b.len()).sum::<usize>()).sum();
     sec.note(Cell::dim(format!("{} cuts snapshotted ({} of frontier inputs + reference outputs)", snaps.len(), kb(snap_bytes))));
+    if snap_state_bytes > 0 {
+        sec.note(Cell::dim(format!("inout state: B ran every cut from A's pre-image of the cut's write-set; {} of pre-image kept — every replay below starts from it and puts A's post-image back", kb(snap_state_bytes))));
+    }
     if !one_sided_all.is_empty() {
         sec.note(Cell::dim(format!("written on one side only (implementation-internal, not compared): {:?}", one_sided_all)));
     }
@@ -1095,31 +1205,52 @@ fn main() -> Result<()> {
 
     // Replay one snapshot's cut on a side from its inputs; returns the
     // written buffers (live prefix) and states.
+    // The state a cut writes is put back to A's pre-image first (so the cut
+    // sees what it saw in the tap, on either side) and to A's post-image
+    // after (so the next cut's reads see the reference, not this replay's
+    // output — under fuzz, garbage).
     let replay = |c: &mut Caller, m: &Manifest, sn: &Snap, side_b: bool, inputs: &[(String, Vec<u8>)]| -> Result<(BTreeMap<String, Vec<u8>>, BTreeMap<String, Vec<u8>>)> {
+        restore_state(c, &sn.pre_states, None)?;
         for (n, bytes) in inputs {
             c.rt.write_buffer(n, bytes)?;
         }
         let r = if side_b { sn.seg.b } else { sn.seg.a };
-        c.rt.run_range(&sn.program, &sn.env, r.0, r.1)?;
+        let run = c.rt.run_range(&sn.program, &sn.env, r.0, r.1);
         let mut out = BTreeMap::new();
-        for n in sn.ref_out.keys() {
-            out.insert(n.clone(), c.rt.read_buffer_prefix(n, live_bytes(m, n, &sn.env))?);
-        }
         let mut st = BTreeMap::new();
-        for n in sn.ref_states.keys() {
-            st.insert(n.clone(), c.rt.read_state(n)?);
+        if run.is_ok() {
+            for n in sn.ref_out.keys() {
+                out.insert(n.clone(), c.rt.read_buffer_prefix(n, live_bytes(m, n, &sn.env))?);
+            }
+            for n in sn.ref_states.keys() {
+                st.insert(n.clone(), c.rt.read_state(n)?);
+            }
+            restore_state(c, &sn.pre_states, Some(&sn.ref_states))?;
         }
+        run?;
         Ok((out, st))
     };
     let cmp_out = |m: &Manifest, sn: &Snap, out: &BTreeMap<String, Vec<u8>>| -> BTreeMap<String, Cmp> {
         out.iter().map(|(n, b)| (n.clone(), compare(m.buffers[n].dtype, &sn.ref_out[n], b))).collect()
     };
 
+    // From here on B's state is a byte copy of A's: every replay restores
+    // the same pre-image on both sides, so a full-state A/B comparison after
+    // a replay attributes to that replay alone.
+    {
+        let names: BTreeSet<&String> = snaps.iter().flat_map(|sn| sn.ref_states.keys()).collect();
+        for name in names {
+            let img = s.a.rt.read_state(name)?;
+            s.b.rt.write_state_at(name, 0, &img)?;
+        }
+    }
+
     // ---- 3. noise floor: A's cut re-run from its own snapshot
     let mut noise_res: BTreeMap<String, BTreeMap<String, Vec<(String, Cmp)>>> = BTreeMap::new();
     let mut noise_clean = true;
+    let mut noisy_states: BTreeSet<(String, String)> = BTreeSet::new();
     if !o.no_noise {
-        let mut sec = Section::new("NOISE FLOOR", &format!("A re-run from each snapshot vs A's own output · {} cuts", snaps.len()));
+        let mut sec = Section::new("NOISE FLOOR", &format!("A re-run from each snapshot (inout state restored) vs A's own output · {} cuts", snaps.len()));
         let mut state_noise = Vec::new();
         for sn in &snaps {
             let (out, st) = replay(&mut s.a, &ma, sn, false, &sn.inputs)?;
@@ -1128,9 +1259,11 @@ fn main() -> Result<()> {
                 noise_res.entry(sn.program.clone()).or_default().entry(n).or_default().push((seg_label(&sn.seg), c));
             }
             for (name, bytes) in st {
-                let d = bytes.iter().zip(&sn.ref_states[&name]).filter(|(p, q)| p != q).count();
+                let refp = &sn.ref_states[&name];
+                let d: usize = sn.pre_states[&name].iter().map(|(off, b)| (0..b.len()).filter(|i| bytes[off + i] != refp[off + i]).count()).sum();
                 if d > 0 {
                     noise_clean = false;
+                    noisy_states.insert((sn.program.clone(), name.clone()));
                     state_noise.push(format!("state {name}: {d} bytes at {} {}", sn.program, seg_label(&sn.seg)));
                 }
             }
@@ -1171,6 +1304,7 @@ fn main() -> Result<()> {
             let dist = round % DISTS.len();
             let mut worst: BTreeMap<String, Cmp> = BTreeMap::new();
             let mut violations: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            let mut state_diffs: BTreeMap<String, Vec<String>> = BTreeMap::new();
             for sn in &snaps {
                 let mut inputs = Vec::new();
                 for (name, _) in &sn.inputs {
@@ -1193,17 +1327,23 @@ fn main() -> Result<()> {
                     };
                     inputs.push((name.clone(), values::from_f64(decl.dtype, &vals)));
                 }
-                let (out_a, _) = match replay(&mut s.a, &ma, sn, false, &inputs) {
+                let (out_a, st_a) = match replay(&mut s.a, &ma, sn, false, &inputs) {
                     Ok(x) => x,
                     Err(err) => bail!("A crashed under fuzz ({}) at {} cut {}: {err}", DISTS[dist], sn.program, seg_label(&sn.seg)),
                 };
-                let (out_b, _) = match replay(&mut s.b, &mb, sn, true, &inputs) {
+                let (out_b, st_b) = match replay(&mut s.b, &mb, sn, true, &inputs) {
                     Ok(x) => x,
                     Err(err) => {
                         println!("  ✗ B crashed under `{}` at {} cut {}: {err}", DISTS[dist], sn.program, seg_label(&sn.seg));
                         bail!("B crashed under fuzz; the CUDA context is unusable past this point");
                     }
                 };
+                for (name, b) in &st_b {
+                    let d = st_a[name].iter().zip(b).filter(|(p, q)| p != q).count();
+                    if d > 0 {
+                        state_diffs.entry(sn.program.clone()).or_default().push(format!("state {name}: {d} bytes at {}", seg_label(&sn.seg)));
+                    }
+                }
                 for (name, b) in &out_b {
                     let c = compare(ma.buffers[name].dtype, &out_a[name], b);
                     let w = worst.entry(sn.program.clone()).or_default();
@@ -1225,18 +1365,28 @@ fn main() -> Result<()> {
                 }
             }
             for p in &progs {
+                if !snaps.iter().any(|sn| &sn.program == p) {
+                    grid.entry(round).or_default().insert(p.clone(), Cell::warn("not tapped"));
+                    continue;
+                }
                 let w = worst.get(p).cloned().unwrap_or_default();
                 fuzz_identical &= w.value_identical();
                 fuzz_bit &= w.identical();
-                let txt = match violations.get(p) {
-                    Some(v) => {
+                let sd = state_diffs.get(p);
+                if sd.is_some() {
+                    fuzz_identical = false;
+                    fuzz_bit = false;
+                }
+                let txt = match (violations.get(p), sd) {
+                    (Some(v), _) => {
                         fuzz_ok = false;
                         Cell::bad(format!("✗ {}", v.join("; ")))
                     }
-                    None => cell(&w),
+                    (None, Some(d)) => Cell::bad(format!("{} · {}{}", cell(&w).s, d[0], if d.len() > 1 { format!(" (+{} cuts)", d.len() - 1) } else { String::new() })),
+                    (None, None) => cell(&w),
                 };
                 grid.entry(round).or_default().insert(p.clone(), txt);
-                rounds_json.push(json!({"dist": DISTS[dist], "program": p, "worst": w.to_json(), "violations": violations.get(p)}));
+                rounds_json.push(json!({"dist": DISTS[dist], "program": p, "worst": w.to_json(), "violations": violations.get(p), "state_diffs": sd}));
             }
         }
         let mut rows = vec![std::iter::once(Cell::default()).chain(progs.iter().map(|p| Cell::from(p.as_str()))).collect::<Vec<_>>()];
@@ -1386,7 +1536,10 @@ fn main() -> Result<()> {
     }
 
     // Is every local difference inside A's own noise band?
-    let within_noise = !local_identical && !noise_clean && local_res.iter().all(|(p, bufs)| {
+    let states_within = local_states.iter().all(|(p, sts)| {
+        sts.iter().all(|(st, res)| res.iter().all(|(_, c)| c.n_diff == 0 && c.outside == 0) || noisy_states.contains(&(p.clone(), st.clone())))
+    });
+    let within_noise = !local_identical && !noise_clean && states_within && local_res.iter().all(|(p, bufs)| {
         bufs.iter().all(|(b, res)| {
             let worst_local = res.iter().filter_map(|(_, c)| if c.value_identical() { None } else { c.max_ulp.or(Some(u64::MAX)) }).max();
             let worst_noise = noise_res.get(p).and_then(|nb| nb.get(b)).and_then(|nr| nr.iter().filter_map(|(_, c)| if c.value_identical() { None } else { c.max_ulp.or(Some(u64::MAX)) }).max());

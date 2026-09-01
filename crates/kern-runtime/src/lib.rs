@@ -400,6 +400,23 @@ impl Runtime {
         Ok(())
     }
 
+    /// Overwrite `data.len()` bytes of a state starting at `offset`
+    /// (synchronous). States are opaque to the runtime; this is how a
+    /// harness puts a state back to a snapshot before replaying a cut.
+    pub fn write_state_at(&mut self, name: &str, offset: usize, data: &[u8]) -> Result<()> {
+        let Some(s) = self.states.get_mut(name) else {
+            bail!(Api, "no state `{name}`");
+        };
+        let end = offset + data.len();
+        if end as u64 > s.bytes {
+            bail!(Api, "state `{name}`: write [{offset}, {end}) exceeds allocation {}", s.bytes);
+        }
+        let mut view = s.slice.slice_mut(offset..end);
+        self.stream.memcpy_htod(data, &mut view)?;
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
     /// Whole allocation of a state.
     pub fn read_state(&self, name: &str) -> Result<Vec<u8>> {
         let Some(s) = self.states.get(name) else {
