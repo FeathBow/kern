@@ -13,7 +13,7 @@ programs sized by the `tokens` symbol:
   (FLA chunk kernels) and the decode path (recurrent kernel) are different
   arithmetic, and vLLM runs the last prompt token through the chunk path.
   Putting it through `decode` instead would change bits.  The driver
-  (kern-run) sees the output buffer in the program and prefills all prompt
+  (kern run) sees the output buffer in the program and prefills all prompt
   tokens.
 - `decode` (tokens = 1): one token, recurrent GDN kernels, split-KV
   attention, logits + argmax.

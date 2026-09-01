@@ -1,4 +1,4 @@
-# Runtime：`kern-runtime` + `kern-run`
+# Runtime：`kern-runtime` + `kern run`
 
 ## MVP 范围（已定）
 
@@ -44,7 +44,7 @@ dispatch 表：接口实参解析一次，逐 step 按 `args` 连线转发/接 s
 
 ## Caller 契约（`crates/kern-run`）
 
-`kern-run` 是 qwen3-4b 的 caller 契约（CLI 用 clap，日志走 tracing 到
+`kern run` 是 qwen3-4b 的 caller 契约（CLI 用 clap，日志走 tracing 到
 stderr，`RUST_LOG` 控制级别，stdout 只出生成文本）：**chunked prefill**——
 前 n-1 个 prompt token 按 `--chunk`（默认 512，clamp 到 tokens 上界）切块
 连调 `prefill`（每块填 token_ids/positions/slot_mapping 前缀 + seq_lens=
@@ -110,12 +110,14 @@ CUDA_VISIBLE_DEVICES=0 tools/capture_qwen3.sh        # -> dumped-kernels/pid<N>/
 # 4) 抽核：按 manifest 钉的 sha256 从 dump 里拷 module、从 target/cubins 拷
 #    手写核（tools/build_kernels.sh 编的），落地 <名>-<sha12>.cubin；目录只增不减
 tools/extract_kernels.sh examples/qwen3-4b.json dumped-kernels/pid<N>   # -> kernels/
+# 或 `kern kernels`：按 kern.toml 的 [kernels].dumps/.sources 给每个 target 的 manifest 与 reference 落 cubin
 
 # 5) 权重：HF checkpoint 合并导出（qkv/gate_up 合并、rope cache 预计算）
 .venv/bin/python tools/export_weights.py             # -> weights/
 
 # 6) 跑（构建在 kernel-lab 容器里做；binary 宿主机 dlopen CUDA 直接跑）
-./target/release/kern-run \
+./target/release/kern run            # 一切来自 kern.toml 的 target；flag 覆盖：
+./target/release/kern run \
   --manifest examples/qwen3-4b.json --kernels kernels \
   --weights weights/qwen3-4b-decode.safetensors --tokenizer weights/tokenizer.json \
   --gpu 3 --capacity 4096 --chunk 512 --prompt "The capital of France is" --steps 320

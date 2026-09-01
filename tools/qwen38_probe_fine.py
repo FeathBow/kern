@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare the per-dispatch dumps of one layer (kern-run --probe-dir with
+"""Compare the per-dispatch dumps of one layer (kern run --probe-dir with
 KERN_PROBE_LAYER=<i>) with the vLLM submodule hooks (PROBE_LAYER=<i>), in
 dispatch order, to find the first op whose output differs.
 

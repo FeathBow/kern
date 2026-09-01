@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run kern-run on every prompt of docs/qwen38-ref.json and compare the
+"""Run kern run on every prompt of docs/qwen38-ref.json and compare the
 generated token ids with vLLM's, token by token.
 
     tools/qwen38_compare.py --gpu 1 [--chunk 512] [--eager] [--steps 400]
@@ -24,7 +24,7 @@ STOP = "248046,248044"   # <|im_end|>, <|endoftext|> of the Qwen3.8 tokenizer
 
 
 def run_one(args, prompt, steps):
-    cmd = [str(REPO / "target/release/kern-run"),
+    cmd = [str(REPO / "target/release/kern"), "run",
            "--manifest", str(REPO / args.manifest),
            "--kernels", str(REPO / args.kernels),
            "--weights", str(WEIGHTS / "qwen3.8-27b.safetensors"),
@@ -42,7 +42,7 @@ def run_one(args, prompt, steps):
     wall = time.time() - t0
     err = p.stderr
     if p.returncode != 0:
-        sys.exit(f"kern-run failed ({p.returncode}):\n{err[-4000:]}")
+        sys.exit(f"kern run failed ({p.returncode}):\n{err[-4000:]}")
     ids = lambda key: json.loads(re.search(key + r": (?:\d+ tokens )?(\[.*?\])", err).group(1))  # noqa: E731
     info = {
         "prompt_ids": ids("prompt"),
@@ -69,7 +69,7 @@ def main():
     ap.add_argument("--manifest", default="examples/qwen3.8-27b.json")
     ap.add_argument("--kernels", default="kernels-qwen38")
     ap.add_argument("--draft", action="store_true", help="also load the DFlash2 draft artifact")
-    ap.add_argument("--spec", action="store_true", help="kern-run --spec (draft/verify rounds)")
+    ap.add_argument("--spec", action="store_true", help="kern run --spec (draft/verify rounds)")
     args = ap.parse_args()
 
     ref = json.load(open(args.ref))

@@ -5,6 +5,10 @@
 //! sequence. `kern-run` (generation) and `kern-attest` (A/B evidence) both
 //! drive the runtime through it.
 
+pub mod attest;
+pub mod config;
+pub mod run;
+
 use std::collections::BTreeMap;
 
 use anyhow::{bail, ensure, Result};

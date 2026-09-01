@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare kern-run --probe-dir dumps with the vLLM probe (.pt), layer by layer.
+"""Compare kern run --probe-dir dumps with the vLLM probe (.pt), layer by layer.
 
     .venv/bin/python tools/qwen38_probe_cmp.py dumped-kernels/probe-kern dumped-kernels/probe-vllm.pt
 """

@@ -395,7 +395,7 @@ def single(symbol, params, block, grid, shared_mem=None, cubin=None,
 
 
 # 结构输入的先验（domain）：接模型的人才知道 buffer<i32> 是页表不是激活。
-# runtime 写入时校验；kern-attest 据此合成合法值 + 检查产出。激活不声明。
+# runtime 写入时校验；kern test 据此合成合法值 + 检查产出。激活不声明。
 TOKEN_DOMAIN = {"index_into": "model.embed_tokens.weight"}
 DOMAINS = {
     "token_ids": TOKEN_DOMAIN,

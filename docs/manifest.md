@@ -71,7 +71,7 @@ impl 不必重写先验，kernel package 零改动。两种形式互斥：
 描述：verifier 只证明它对着自己的声明自洽（界的类型 vs dtype、
 `index_into` 可解析、min ≤ max），不证明任何 kernel 需要或维护它。**不填
 完全合法**——e2e 一模一样地跑；填了以后 runtime 在 `write_input` 时校验
-host 写入（O(n)，免费），`kern-attest` 据此为整数 buffer 合成合法随机值、
+host 写入（O(n)，免费），`kern test` 据此为整数 buffer 合成合法随机值、
 并检查 kernel 产出的值落在声明域内（后置条件）。浮点 buffer 不写 = 任意
 有限值，attest 自己决定分布。整数 buffer 不写 = attest 跳过它的 fuzz 并
 在报告里列为 unfuzzed。

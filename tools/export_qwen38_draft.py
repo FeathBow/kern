@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """DFlash2 draft checkpoint (incoai/Qwen3.8-27B-DFlash2) -> kern weight
 artifact, plus the constant tables the speculative manifest needs.  Loaded
-next to the target artifact (`kern-run --weights target.safetensors
+next to the target artifact (`kern run --weights target.safetensors
 --weights draft.safetensors`); tensor name = manifest buffer name.
 
 - `draft.fc.{j}.weight` [5120, 5120]: column block j of the 5-tap combiner

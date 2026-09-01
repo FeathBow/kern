@@ -1,4 +1,4 @@
-# DSpark 投机解码（`kern-run --spec`）
+# DSpark 投机解码（`kern run --spec`）
 
 draft 也是个 model，但**不是新的 schema 概念**：`examples/qwen3-4b-dspark.json`
 是一份 manifest，target+draft 权重（`draft.` 前缀）、第二个 KV state、
@@ -45,7 +45,7 @@ elementwise add 由 β=1 一次做完**（`C[1,V] += membed@markov_w2^T`，C 直
   embedding_row 取 `markov_w1[prev]` → gemm_acc 把 markov_w2 偏置累进该行
   base logits → argmax_row 出 draft token 喂下一步。argmax 核天然多行
   （grid.x=行号），verify 的 8 行 argmax 就是既有 kernel 换 env。
-- caller 侧一轮（`kern-run --spec`）：draft（graph）→ 读 7 token → verify
+- caller 侧一轮（`kern run --spec`）：draft（graph）→ 读 7 token → verify
   （graph，[anchor,d0..d6]）→ 读 8 预测 → 前缀匹配接受 → precompute
   接受行（eager，17 dispatch）→ 滚动。回滚免费：paged KV 槽位=position，
   被拒绝的槽下一轮直接覆写。
@@ -68,6 +68,6 @@ CUDA_VISIBLE_DEVICES=0 tools/capture_qwen3_spec.sh   # -> dumped-kernels/pid<M>/
   dumped-kernels/pid<N>/launches.jsonl dumped-kernels/pid<M>
 # 合并权重（target + draft.*，fc 按列切块、markov 头原样）
 .venv/bin/python tools/export_weights.py             # -> weights/qwen3-4b-dspark.safetensors
-./target/release/kern-run --manifest examples/qwen3-4b-dspark.json \
+./target/release/kern run --manifest examples/qwen3-4b-dspark.json \
   --weights weights/qwen3-4b-dspark.safetensors --spec --steps 320
 ```

@@ -63,4 +63,4 @@ deployments.
 - The TileFoundry section describes conceptual alignment. There is no direct
   TileFoundry-to-Kern exporter today.
 - The `<3K` source metric counts production Rust files in `kern-manifest` and
-  `kern-runtime`, including `kern-run`; it excludes tests and tools.
+  `kern-runtime`, including `kern run`; it excludes tests and tools.

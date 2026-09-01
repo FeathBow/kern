@@ -2,7 +2,7 @@
 """Per-layer activation probe of vLLM (eager, TRITON_ATTN + triton GDN) for
 one prompt: embedding output, every decoder layer's output hidden_states
 (= MLP output, kern's `y`) and residual, and the logits, for the prefill
-forward and two decode steps.  Pairs with `kern-run --probe-dir`.
+forward and two decode steps.  Pairs with `kern run --probe-dir`.
 
     CUDA_VISIBLE_DEVICES=0 .venv/bin/python tools/qwen38_probe_vllm.py [prompt_index] [out.pt]
 """
@@ -59,7 +59,7 @@ def install(model):
     lp.register_forward_hook(logits_hook)
 
     # PROBE_LAYER=<i>: also record that layer's submodule outputs (and the
-    # gated norm's input) under "fine"; matches kern-run's KERN_PROBE_LAYER.
+    # gated norm's input) under "fine"; matches kern run's KERN_PROBE_LAYER.
     fl = os.environ.get("PROBE_LAYER")
     if fl is not None:
         layer = inner.layers[int(fl)]

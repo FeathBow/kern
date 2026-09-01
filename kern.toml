@@ -1,0 +1,27 @@
+# kern.toml — what the manifest cannot know: where things are, what to
+# compare against. Targets are names you pick; kern does not read meaning
+# into them. Paths are relative to this file. See crates/kern-run/src/config.rs.
+
+gpu = 0
+capacity = 4096
+
+# The repo's fixture: the mined silu step against the hub one.
+[targets.qwen3-4b]
+manifest  = "examples/qwen3-4b-silu-mined.json"
+reference = "examples/qwen3-4b.json"
+kernels   = "kernels"
+weights   = ["weights/qwen3-4b-decode.safetensors"]
+tokenizer = "weights/tokenizer.json"
+
+[kernels]
+dumps   = ["dumped-kernels"]
+sources = "tools/kernels-src"
+
+[test]
+seed = 0x5eed
+decode_steps = 32
+logit_ulp = 4
+
+[run]
+prompt = "The capital of France is"
+steps = 32

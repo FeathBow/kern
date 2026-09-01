@@ -76,25 +76,26 @@ The loop runs unattended. The engine goes back to being an engine.
 ```bash
 cargo build --release
 
-./target/release/kern-run \
-  --manifest examples/qwen3-4b.json --kernels kernels \
-  --weights weights/qwen3-4b-decode.safetensors --tokenizer weights/tokenizer.json \
-  --gpu 0 --prompt "The capital of France is" --steps 320
+# kern.toml at the repo root names the fixture target (manifest, reference,
+# kernels dir, weights); every flag can still override it.
+./target/release/kern run --steps 320
+./target/release/kern run --manifest examples/qwen3-4b-dspark.json \
+  --weights weights/qwen3-4b-dspark.safetensors --spec --steps 320   # speculative decoding, same runtime
 
-# speculative decoding — same runtime, same schema
-./target/release/kern-run --manifest examples/qwen3-4b-dspark.json \
-  --weights weights/qwen3-4b-dspark.safetensors --spec --steps 320
-
-# the loop: evidence for a kernel swap — diff, tap a real prompt once, then
-# per cut: noise floor, bit-diff, fuzz; eager/TPOT/sweep timing. ~7 s, exit 0 on PASS
-./target/release/kern-attest --a examples/qwen3-4b.json \
-  --b examples/qwen3-4b-silu-mined.json --out attestation.json
+# the loop: evidence for a kernel swap — diff, tap a seeded workload once
+# (random tokens, multi-chunk prefill, N decode steps), then per cut: noise
+# floor, bit-diff, fuzz around the tap; end-to-end logits are the verdict;
+# eager/TPOT/sweep timing. ~10 s, exit 0 on PASS
+./target/release/kern test --out attestation.json
 ```
 
-`kern-run --help` lists all flags. Logs go to stderr (`RUST_LOG`); stdout
-carries only the generated text. The pipeline that produces `kernels/` and
-`weights/` from a live vLLM process is in [docs/runtime.md](docs/runtime.md);
-what `kern-attest` measures and how it decides is in
+`kern <cmd> --help` lists the flags; `crates/kern-run/src/config.rs`
+documents `kern.toml` (targets are names you pick — kern reads no meaning
+into them; anything the manifest already knows stays out of it). Logs go
+to stderr (`RUST_LOG`); stdout carries the generated text or the report.
+The pipeline that produces `kernels/` and `weights/` from a live vLLM
+process is in [docs/runtime.md](docs/runtime.md) (`kern kernels` drives
+it from `kern.toml`); what `kern test` measures and how it decides is in
 [docs/attest.md](docs/attest.md).
 
 ## The contract
@@ -108,7 +109,7 @@ golden-checked in CI:
 | --- | --- |
 | `crates/kern-manifest` | Schema + verifier (pure, no CUDA) |
 | `crates/kern-runtime` | The executor: fetch, verify, replay, CUDA graphs |
-| `crates/kern-run` | `kern-run` (generation) and `kern-attest` (A/B evidence) over the example manifests |
+| `crates/kern-run` | `kern run` (generation) and `kern test` (A/B evidence) over the example manifests |
 | `examples/` | Generated manifests — the artifact a provider ships (`*-silu-mined.json` is the attest fixture) |
 | `docs/` | [design](docs/design.md) · [manifest](docs/manifest.md) · [kernel mining](docs/kernel-mining.md) · [runtime](docs/runtime.md) · [attest](docs/attest.md) · [spec decode](docs/spec-decode.md) · [roadmap](docs/roadmap.md) |
 

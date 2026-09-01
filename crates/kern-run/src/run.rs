@@ -1,6 +1,6 @@
-//! End-to-end bs=1 greedy decode over a kern manifest.
+//! `kern run`: end-to-end bs=1 greedy decode over a kern manifest.
 //!
-//! The runtime library is model-agnostic; this binary is the caller-side
+//! The runtime library is model-agnostic; this is the caller-side
 //! contract for the qwen3-4b-decode manifest: which input buffers exist and
 //! what to put in them each step (token_ids/positions/slot_mapping/seq_lens/
 //! cu_seqlens_q/block_table), prefill expressed as repeated tokens=1 decode.
@@ -13,9 +13,11 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{bail, ensure, Context, Result};
-use clap::Parser;
+use clap::Args;
+
+use crate::config::{Config, Target};
 use kern_manifest::types::Dim;
-use kern_run::{
+use crate::{
     env, i64_from_le, le_bytes_i32, le_bytes_i64, prefill_emits_next_token, Caller, STOP_TOKENS,
 };
 use kern_runtime::Runtime;
@@ -26,67 +28,109 @@ const MASK_TOKEN: i64 = 151669;
 // DSpark block size: 7 draft queries per round, verified as anchor + 7.
 const DRAFT_TOKENS: usize = 7;
 
-/// Greedy bs=1 decode over a kern manifest (qwen3-4b caller contract).
-#[derive(Parser)]
-#[command(version, about)]
-struct Opts {
+/// Flags of `kern run`; anything not given comes from the target in
+/// kern.toml, then from the defaults.
+#[derive(Args, Debug, Clone)]
+pub struct RunOpts {
     /// Manifest JSON (must pass verification)
-    #[arg(long, default_value = "examples/qwen3-4b.json")]
-    manifest: PathBuf,
+    #[arg(long)]
+    pub manifest: Option<PathBuf>,
 
     /// Directory of cubins; steps resolve by their pinned sha256, so one dir
     /// holds every version (file names are labels)
-    #[arg(long, default_value = "kernels")]
-    kernels: PathBuf,
+    #[arg(long)]
+    pub kernels: Option<PathBuf>,
 
-    /// Safetensors weight artifact, tensors bound by name
-    /// Safetensors artifact(s); repeat for a target + draft pair
-    #[arg(long, default_value = "weights/qwen3-4b-decode.safetensors")]
-    weights: Vec<PathBuf>,
+    /// Safetensors artifact(s), tensors bound by name across all of them
+    #[arg(long)]
+    pub weights: Vec<PathBuf>,
 
     /// HF tokenizer.json
-    #[arg(long, default_value = "weights/tokenizer.json")]
-    tokenizer: PathBuf,
+    #[arg(long)]
+    pub tokenizer: Option<PathBuf>,
 
     /// Raw (template-free) prompt
-    #[arg(long, default_value = "The capital of France is")]
-    prompt: String,
+    #[arg(long)]
+    pub prompt: Option<String>,
 
     /// Max new tokens to generate
-    #[arg(long, default_value_t = 32)]
-    steps: usize,
+    #[arg(long)]
+    pub steps: Option<usize>,
 
     /// CUDA device ordinal
-    #[arg(long, default_value_t = 0)]
-    gpu: usize,
+    #[arg(long)]
+    pub gpu: Option<usize>,
 
     /// State capacity in tokens (KV pages etc.); rounded down to the
     /// manifest's page unit
-    #[arg(long, default_value_t = 4096)]
-    capacity: u64,
+    #[arg(long)]
+    pub capacity: Option<u64>,
 
     /// Chunked-prefill chunk size (clamped to the manifest's tokens bound)
-    #[arg(long, default_value_t = 512)]
-    chunk: u64,
+    #[arg(long)]
+    pub chunk: Option<u64>,
 
     /// Skip CUDA graph capture, launch every dispatch eagerly
     #[arg(long)]
-    eager: bool,
+    pub eager: bool,
 
     /// DSpark speculative decoding (needs the dspark manifest programs)
     #[arg(long)]
-    spec: bool,
+    pub spec: bool,
 
     /// Token ids that end generation (comma-separated; default Qwen3's)
     #[arg(long, value_delimiter = ',', default_values_t = STOP_TOKENS)]
-    stop_tokens: Vec<i64>,
+    pub stop_tokens: Vec<i64>,
 
     /// Debug: dump per-layer activations (`y` after every `*.down_proj`,
     /// embedding, logits) of the first prefill chunk and two decode steps
     /// into this directory, then exit. Programs run dispatch-range by
     /// dispatch-range so nothing executes twice.
     #[arg(long)]
+    pub probe_dir: Option<PathBuf>,
+}
+
+/// Resolved options: flag, else kern.toml, else default.
+struct Opts {
+    manifest: PathBuf,
+    kernels: PathBuf,
+    weights: Vec<PathBuf>,
+    tokenizer: PathBuf,
+    prompt: String,
+    steps: usize,
+    gpu: usize,
+    capacity: u64,
+    chunk: u64,
+    eager: bool,
+    spec: bool,
+    stop_tokens: Vec<i64>,
     probe_dir: Option<PathBuf>,
+}
+
+impl RunOpts {
+    fn resolve(self, cfg: Option<&Config>, t: Option<&Target>) -> Result<Opts> {
+        let need = |what: &str| anyhow::anyhow!("no --{what} and no target in {} to take it from", cfg.map_or(crate::config::FILE.to_string(), |c| c.path.display().to_string()));
+        Ok(Opts {
+            manifest: self.manifest.or_else(|| t.map(|t| t.manifest.clone())).ok_or_else(|| need("manifest"))?,
+            kernels: self.kernels.or_else(|| t.map(|t| t.kernels.clone())).ok_or_else(|| need("kernels"))?,
+            weights: if self.weights.is_empty() { t.map(|t| t.weights.clone()).filter(|w| !w.is_empty()).ok_or_else(|| need("weights"))? } else { self.weights },
+            tokenizer: self.tokenizer.or_else(|| t.and_then(|t| t.tokenizer.clone())).ok_or_else(|| need("tokenizer"))?,
+            prompt: self.prompt.or_else(|| cfg.and_then(|c| c.run.prompt.clone())).unwrap_or_else(|| "The capital of France is".into()),
+            steps: self.steps.or_else(|| cfg.and_then(|c| c.run.steps)).unwrap_or(32),
+            gpu: self.gpu.or_else(|| cfg.and_then(|c| c.gpu)).unwrap_or(0),
+            capacity: self.capacity.or_else(|| cfg.and_then(|c| c.capacity)).unwrap_or(4096),
+            chunk: self.chunk.or_else(|| cfg.and_then(|c| c.run.chunk)).unwrap_or(512),
+            eager: self.eager,
+            spec: self.spec,
+            stop_tokens: self.stop_tokens,
+            probe_dir: self.probe_dir,
+        })
+    }
+}
+
+/// `kern run`.
+pub fn run(o: RunOpts, cfg: Option<&Config>, target: Option<&Target>) -> Result<()> {
+    execute(o.resolve(cfg, target)?)
 }
 
 fn human(bytes: u64) -> String {
@@ -106,19 +150,7 @@ fn ellipsize(s: &str, n: usize) -> String {
     }
 }
 
-fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_writer(std::io::stderr)
-        .with_target(false)
-        .without_time()
-        .init();
-
-    let o = Opts::parse();
-
+fn execute(o: Opts) -> Result<()> {
     let manifest_json = std::fs::read_to_string(&o.manifest)
         .with_context(|| format!("reading manifest {}", o.manifest.display()))?;
     let t0 = Instant::now();

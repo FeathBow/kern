@@ -1,4 +1,4 @@
-//! kern-attest: evidence for a kernel swap.
+//! `kern test`: evidence for a kernel swap (the attestation).
 //!
 //! Given two manifests A (the reference — assumed correct) and B (the
 //! candidate), attest:
@@ -35,96 +35,168 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
-use clap::Parser;
+use clap::Args;
 use kern_manifest::types::{Arg, BufferClass, DType, Dim, Dir, Manifest, ParamType, Program};
 use kern_manifest::verify;
-use kern_run::{env, Caller, DRIVEN, TOKENS};
+use crate::config::{Config, Target};
+use crate::{env, Caller, DRIVEN, TOKENS};
 use kern_runtime::{values, Runtime};
 use serde_json::{json, Value};
 
-/// A/B evidence for a kernel swap (qwen3-4b caller contract).
-#[derive(Parser)]
-#[command(version, about)]
-struct Opts {
-    /// Reference manifest (assumed correct)
-    #[arg(long, default_value = "examples/qwen3-4b.json")]
-    a: PathBuf,
-    /// Candidate manifest
+/// Flags of `kern test`; anything not given comes from the target /
+/// `[test]` in kern.toml, then from the defaults.
+#[derive(Args, Clone)]
+pub struct TestOpts {
+    /// Reference manifest A (assumed correct)
     #[arg(long)]
-    b: PathBuf,
+    pub reference: Option<PathBuf>,
+    /// Candidate manifest B
+    #[arg(long)]
+    pub manifest: Option<PathBuf>,
     /// Directory of cubins for both manifests; steps resolve by their pinned
     /// sha256, so one dir holds every version (file names are labels)
-    #[arg(long, default_value = "kernels")]
-    kernels: PathBuf,
-    /// Safetensors artifact(s); repeat for a target + draft pair
-    #[arg(long, default_value = "weights/qwen3-4b-decode.safetensors")]
-    weights: Vec<PathBuf>,
-    #[arg(long, default_value = "weights/tokenizer.json")]
-    tokenizer: PathBuf,
+    #[arg(long)]
+    pub kernels: Option<PathBuf>,
+    /// Safetensors artifact(s), tensors bound by name across all of them
+    #[arg(long)]
+    pub weights: Vec<PathBuf>,
+    /// HF tokenizer.json (only needed with --prompt)
+    #[arg(long)]
+    pub tokenizer: Option<PathBuf>,
     /// Real-text prompt for the tap's prefill instead of seeded random
     /// tokens (decode tokens stay seeded)
     #[arg(long)]
-    prompt: Option<String>,
+    pub prompt: Option<String>,
     /// Prefill length in tokens; 0 = drawn from the seed: half the time
     /// uniform in [1, capacity − steps], half the time a structural
     /// boundary (a page, a chunk, the `tokens` max, ±1)
     #[arg(long, default_value_t = 0)]
-    prefill: u64,
-    /// Decode steps; the seed picks a length in [steps/2, steps]
-    #[arg(long, default_value_t = 32)]
-    decode_steps: u64,
+    pub prefill: u64,
+    /// Decode steps; the seed picks a length in [steps/2, steps] (default 32)
+    #[arg(long)]
+    pub decode_steps: Option<u64>,
     /// How far the end-to-end logits may move, in ulps at the row's scale
     /// (A's max |logit|), and still PASS (with logit evidence), provided
-    /// the argmax agrees except at near-ties
-    #[arg(long, default_value_t = 4)]
-    logit_ulp: u64,
+    /// the argmax agrees except at near-ties (default 4)
+    #[arg(long)]
+    pub logit_ulp: Option<u64>,
     /// Fuzz rounds per cut (0 disables); rounds cycle through the
     /// perturbations of the tapped inputs (jitter, noise, scale, shuffle,
-    /// resample, outliers)
-    #[arg(long, default_value_t = 6)]
-    fuzz: usize,
-    #[arg(long, default_value_t = 0)]
-    gpu: usize,
+    /// resample, outliers) (default 6)
+    #[arg(long)]
+    pub fuzz: Option<usize>,
+    /// CUDA device ordinal (default 0)
+    #[arg(long)]
+    pub gpu: Option<usize>,
     /// State capacity in tokens; rounded down to the manifest's page unit
-    #[arg(long, default_value_t = 4096)]
-    capacity: u64,
+    /// (default 4096)
+    #[arg(long)]
+    pub capacity: Option<u64>,
     /// Prefill chunk; 0 = drawn from the seed among the `tokens` max, 512,
     /// a page and a random size
     #[arg(long, default_value_t = 0)]
-    chunk: u64,
+    pub chunk: u64,
     /// Replays for cut timing (minimum is reported)
     #[arg(long, default_value_t = 20)]
-    iters: usize,
+    pub iters: usize,
     /// Skip capturing both decode programs as CUDA graphs for the step time
     #[arg(long)]
-    no_graph_step: bool,
+    pub no_graph_step: bool,
     /// Skip sweeping prefill over the `tokens` symbol range
     #[arg(long)]
-    no_sweep: bool,
+    pub no_sweep: bool,
     /// Device peak memory bandwidth in GB/s, for the roofline column
     #[arg(long, default_value_t = 8000.0)]
-    peak_bw: f64,
-    /// Write the attestation as JSON here
+    pub peak_bw: f64,
+    /// Write the attestation as JSON here (a directory when several
+    /// targets run: one file per target)
     #[arg(long)]
-    out: Option<PathBuf>,
+    pub out: Option<PathBuf>,
     /// Only print the structural diff
     #[arg(long)]
-    diff_only: bool,
+    pub diff_only: bool,
     /// Skip the timing section
     #[arg(long)]
-    no_perf: bool,
+    pub no_perf: bool,
     /// Skip the noise-floor re-runs
     #[arg(long)]
-    no_noise: bool,
-    /// Seed for the workload and the fuzz generator
-    #[arg(long, default_value_t = 0x5eed)]
-    seed: u64,
+    pub no_noise: bool,
+    /// Seed for the workload and the fuzz generator (default 0x5eed)
+    #[arg(long)]
+    pub seed: Option<u64>,
     /// Report format on stdout
     #[arg(long, value_enum, default_value_t = Format::Text)]
-    format: Format,
+    pub format: Format,
     /// ANSI color (text format only)
     #[arg(long, value_enum, default_value_t = Color::Auto)]
+    pub color: Color,
+}
+
+/// Resolved options: flag, else kern.toml, else default.
+struct Opts {
+    a: PathBuf,
+    b: PathBuf,
+    kernels: PathBuf,
+    weights: Vec<PathBuf>,
+    tokenizer: Option<PathBuf>,
+    prompt: Option<String>,
+    prefill: u64,
+    decode_steps: u64,
+    logit_ulp: u64,
+    fuzz: usize,
+    gpu: usize,
+    capacity: u64,
+    chunk: u64,
+    iters: usize,
+    no_graph_step: bool,
+    no_sweep: bool,
+    peak_bw: f64,
+    out: Option<PathBuf>,
+    diff_only: bool,
+    no_perf: bool,
+    no_noise: bool,
+    seed: u64,
+    format: Format,
     color: Color,
+}
+
+impl TestOpts {
+    fn resolve(self, cfg: Option<&Config>, t: Option<&Target>) -> Result<Opts> {
+        let file = cfg.map_or(crate::config::FILE.to_string(), |c| c.path.display().to_string());
+        let need = |what: &str| anyhow::anyhow!("no --{what} and no target in {file} to take it from");
+        let test = cfg.map(|c| &c.test);
+        Ok(Opts {
+            a: self.reference.or_else(|| t.and_then(|t| t.reference.clone())).ok_or_else(|| need("reference"))?,
+            b: self.manifest.or_else(|| t.map(|t| t.manifest.clone())).ok_or_else(|| need("manifest"))?,
+            kernels: self.kernels.or_else(|| t.map(|t| t.kernels.clone())).ok_or_else(|| need("kernels"))?,
+            weights: if self.weights.is_empty() { t.map(|t| t.weights.clone()).filter(|w| !w.is_empty()).ok_or_else(|| need("weights"))? } else { self.weights },
+            tokenizer: self.tokenizer.or_else(|| t.and_then(|t| t.tokenizer.clone())),
+            prompt: self.prompt.or_else(|| test.and_then(|x| x.prompt.clone())),
+            prefill: self.prefill,
+            decode_steps: self.decode_steps.or_else(|| test.and_then(|x| x.decode_steps)).unwrap_or(32),
+            logit_ulp: self.logit_ulp.or_else(|| test.and_then(|x| x.logit_ulp)).unwrap_or(4),
+            fuzz: self.fuzz.or_else(|| test.and_then(|x| x.fuzz)).unwrap_or(6),
+            gpu: self.gpu.or_else(|| cfg.and_then(|c| c.gpu)).unwrap_or(0),
+            capacity: self.capacity.or_else(|| cfg.and_then(|c| c.capacity)).unwrap_or(4096),
+            chunk: self.chunk,
+            iters: self.iters,
+            no_graph_step: self.no_graph_step,
+            no_sweep: self.no_sweep,
+            peak_bw: self.peak_bw,
+            out: self.out,
+            diff_only: self.diff_only,
+            no_perf: self.no_perf,
+            no_noise: self.no_noise,
+            seed: self.seed.or_else(|| test.and_then(|x| x.seed)).unwrap_or(0x5eed),
+            format: self.format,
+            color: self.color,
+        })
+    }
+}
+
+/// `kern test`: returns the exit code (0 PASS, 1 FAIL, 2 INCONCLUSIVE).
+pub fn run(o: TestOpts, cfg: Option<&Config>, target: Option<&Target>) -> Result<i32> {
+    execute(o.resolve(cfg, target)?)
 }
 
 /// The tap's workload, fully determined by `(seed, manifest, options)`:
@@ -786,13 +858,13 @@ impl Section {
 }
 
 #[derive(Clone, Copy, PartialEq, clap::ValueEnum)]
-enum Format {
+pub enum Format {
     Text,
     Md,
 }
 
 #[derive(Clone, Copy, PartialEq, clap::ValueEnum)]
-enum Color {
+pub enum Color {
     Auto,
     Always,
     Never,
@@ -845,13 +917,13 @@ impl Renderer {
         match self.format {
             Format::Text => println!(
                 "{}   {} {}   {} {}",
-                self.paint(&Cell::bold("kern-attest")),
+                self.paint(&Cell::bold("kern test")),
                 self.paint(&Cell::dim("A")),
                 a,
                 self.paint(&Cell::dim("B")),
                 b
             ),
-            Format::Md => println!("# kern-attest\n\n`A` {a} → `B` {b}"),
+            Format::Md => println!("# kern test\n\n`A` {a} → `B` {b}"),
         }
     }
 
@@ -1030,8 +1102,7 @@ fn summarize(results: &[(String, Cmp)]) -> Cell {
     Cell::bad(format!("{}/{n} cuts differ · worst {} at {}", n - bit - val, cell(&worst.1).s, worst.0))
 }
 
-fn main() -> Result<()> {
-    let o = Opts::parse();
+fn execute(o: Opts) -> Result<i32> {
     let t_start = Instant::now();
     let ja = std::fs::read_to_string(&o.a).with_context(|| format!("reading {}", o.a.display()))?;
     let jb = std::fs::read_to_string(&o.b).with_context(|| format!("reading {}", o.b.display()))?;
@@ -1142,11 +1213,11 @@ fn main() -> Result<()> {
             .collect::<serde_json::Map<_, _>>(),
     });
     if o.diff_only {
-        return Ok(());
+        return Ok(0);
     }
     if segments.is_empty() {
-        println!("\nnothing to attest: the programs are identical.");
-        return Ok(());
+        println!("\nnothing to test: the programs are identical.");
+        return Ok(0);
     }
 
     // ---- load A + B
@@ -1162,7 +1233,8 @@ fn main() -> Result<()> {
     let load_t = t.elapsed();
     let prompt_ids = match &o.prompt {
         Some(text) => {
-            let tokenizer = tokenizers::Tokenizer::from_file(&o.tokenizer).map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
+            let Some(tk) = &o.tokenizer else { bail!("--prompt needs a tokenizer (--tokenizer or the target's `tokenizer`)") };
+            let tokenizer = tokenizers::Tokenizer::from_file(tk).map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
             Some(tokens_of(&tokenizer, text)?)
         }
         None => None,
@@ -1894,8 +1966,5 @@ fn main() -> Result<()> {
     if let Some(p) = &o.out {
         std::fs::write(p, serde_json::to_string_pretty(&report)?)?;
     }
-    if code != 0 {
-        std::process::exit(code);
-    }
-    Ok(())
+    Ok(code)
 }

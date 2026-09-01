@@ -9,7 +9,9 @@ kern-runtime = { path = "../kern-runtime" }
 
 anyhow.workspace = true
 clap.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 tokenizers.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -18,9 +20,5 @@ tracing-subscriber.workspace = true
 path = "src/lib.rs"
 
 [[bin]]
-name = "kern-run"
-path = "src/main.rs"
-
-[[bin]]
-name = "kern-attest"
-path = "src/bin/attest.rs"
+name = "kern"
+path = "src/bin/kern.rs"
