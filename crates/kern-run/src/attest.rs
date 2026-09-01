@@ -39,7 +39,7 @@ use clap::Args;
 use kern_manifest::types::{Arg, BufferKind, Call, DType, Dim, Dir, Manifest, ParamType};
 use kern_manifest::verify;
 use crate::config::{Config, Target};
-use crate::{env, Caller, DRIVEN, TOKENS};
+use crate::{env, Caller, DECODE_LIKE, DRIVEN, TOKENS};
 use kern_runtime::{values, Runtime};
 use serde_json::{json, Value};
 
@@ -1405,14 +1405,20 @@ fn execute(o: Opts) -> Result<i32> {
         n_chunks += 1;
     }
     let n_steps = wl.decode.len();
+    // Decode-step programs this manifest declares; the workload rotates
+    // through them step by step (a caller may switch between them at any
+    // step: same inputs at seqs=1, same state contract).
+    let decode_progs: Vec<&str> = DECODE_LIKE.into_iter().filter(|p| ma.programs.contains_key(*p)).collect();
+    let prog_of = |k: usize| decode_progs[k % decode_progs.len()];
     // A's state after prefill: the image every decode-step-0 replay starts from.
     let s0: BTreeMap<String, Vec<u8>> = shared_states.iter().map(|n| Ok((n.clone(), s.a.rt.read_state(n)?))).collect::<Result<_>>()?;
     for (k, &tok) in wl.decode.iter().enumerate() {
+        let p = prog_of(k);
         s.a.stage_decode(tok)?;
         s.b.stage_decode(tok)?;
         sync_b(&mut s)?;
-        lockstep(&mut s, "decode", &e1, &format!("step {k} "), k == 0, 1)?;
-        a_logits.extend(read_logits(&s.a, "decode", &e1, &format!("step {k}"))?);
+        lockstep(&mut s, p, &e1, &format!("step {k} "), k < decode_progs.len(), 1)?;
+        a_logits.extend(read_logits(&s.a, p, &e1, &format!("step {k}"))?);
         s.a.advance(1);
         s.b.advance(1);
     }
@@ -1435,9 +1441,10 @@ fn execute(o: Opts) -> Result<i32> {
         nc += 1;
     }
     for (k, &tok) in wl.decode.iter().enumerate() {
+        let p = prog_of(k);
         s.b.stage_decode(tok)?;
-        s.b.rt.run("decode", &e1)?;
-        b_logits.extend(read_logits(&s.b, "decode", &e1, &format!("step {k}"))?);
+        s.b.rt.run(p, &e1)?;
+        b_logits.extend(read_logits(&s.b, p, &e1, &format!("step {k}"))?);
         s.b.advance(1);
     }
     let free_t = t_free.elapsed();
@@ -1464,8 +1471,9 @@ fn execute(o: Opts) -> Result<i32> {
         }
         let count = if pname == "prefill" && n_chunks > 1 {
             format!("{n_cuts} cuts × {n_chunks} chunks")
-        } else if pname == "decode" && n_steps > 1 {
-            format!("{n_cuts} cuts × {n_steps} steps")
+        } else if decode_progs.contains(&pname) && n_steps > 1 {
+            let n = (0..n_steps).filter(|&k| prog_of(k) == pname).count();
+            format!("{n_cuts} cuts × {n} steps")
         } else {
             format!("{n_cuts} cuts")
         };
@@ -1837,23 +1845,26 @@ fn execute(o: Opts) -> Result<i32> {
             rows.push(row!["", format!("Σ {n_cuts} cuts (the swap)"), us(st[0].1), us(st[1].1), "", delta(st[0].1, st[1].1)]);
         };
         let n_cuts = |p: &str| cuts_of(p).len();
-        // decode at the position after the workload
-        if n_cuts("decode") > 0 && !undriven.iter().any(|u| u == "decode") {
+        // each decode-step program at the position after the workload
+        for &p in &decode_progs {
+            if n_cuts(p) == 0 || undriven.iter().any(|u| u == p) {
+                continue;
+            }
             s.a.stage_decode(*wl.decode.last().unwrap())?;
             s.b.stage_decode(*wl.decode.last().unwrap())?;
-            let st = step(&mut s, "decode", &e1, o.iters, true)?;
+            let st = step(&mut s, p, &e1, o.iters, true)?;
             let mut graph = None;
             if !o.no_graph_step {
-                s.a.rt.capture("decode", &e1)?;
-                s.b.rt.capture("decode", &e1)?;
-                graph = Some((s.a.rt.time_captured("decode", &e1, 100)?, s.b.rt.time_captured("decode", &e1, 100)?));
+                s.a.rt.capture(p, &e1)?;
+                s.b.rt.capture(p, &e1)?;
+                graph = Some((s.a.rt.time_captured(p, &e1, 100)?, s.b.rt.time_captured(p, &e1, 100)?));
             }
-            push_step(&mut rows, &format!("decode  {TOKENS}=1"), n_cuts("decode"), st, graph);
+            push_step(&mut rows, &format!("{p}  {TOKENS}=1"), n_cuts(p), st, graph);
             let mut j = json!({"tokens": 1, "eager_ms": {"a": st[0].0, "b": st[1].0, "b_derived": derived(st[0].0, st)}, "cut_ms": {"a": st[0].1, "b": st[1].1}});
             if let Some((ga, gb)) = graph {
                 j["graph_ms"] = json!({"a": ga, "b": gb, "b_derived": derived(ga, st)});
             }
-            perf_json.insert("decode".into(), j);
+            perf_json.insert(p.into(), j);
         }
         // prefill: the tapped chunk length plus a sweep over the var range
         if n_cuts("prefill") > 0 && !undriven.iter().any(|u| u == "prefill") {

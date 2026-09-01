@@ -33,8 +33,13 @@ pub fn prefill_emits_next_token(m: &Manifest) -> bool {
 }
 
 /// Programs this driver knows how to stage. A manifest may declare others;
-/// the driver can't produce a workload for them.
-pub const DRIVEN: [&str; 2] = ["prefill", "decode"];
+/// the driver can't produce a workload for them. `decode_batch` takes the
+/// same single-sequence inputs as `decode` at `seqs=1`, so the decode
+/// workload alternates between the two when both exist.
+pub const DRIVEN: [&str; 3] = ["prefill", "decode", "decode_batch"];
+/// The decode-step programs of `DRIVEN`, in the order the workload rotates
+/// through those a manifest declares.
+pub const DECODE_LIKE: [&str; 2] = ["decode", "decode_batch"];
 /// The var a prefill call is sized by.
 pub const TOKENS: &str = "tokens";
 
