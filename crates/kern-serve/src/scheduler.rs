@@ -6,6 +6,13 @@
 //! `seq_lens` / `cu_seqlens_q` / `block_table`, programs `prefill`
 //! (single sequence, chunked), `decode` (single sequence, the manifest's
 //! bs=1 microprogram) and `decode_batch` (`seqs` sequences, one row each).
+//! Two prefill contracts: state only (the last prompt token is the first
+//! decode step's input) or, when `prefill` writes `next_token` (hybrid
+//! GDN models, whose chunked kernels must see every prompt token), every
+//! prompt token through prefill and the first generated token from it.
+//! A manifest with per-sequence states (`bytes_per_seq`) also has line
+//! tables (`[lines, seqs]` inputs indexing them); every call stages them
+//! from the leases, column i = sequence i of the batch.
 //!
 //! Policy, deliberately simple:
 //! - prefill first: each step admits waiting requests (up to a token
@@ -35,8 +42,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
-use kern_manifest::types::Dim;
-use kern_runtime::{Denied, Lease, Runtime};
+use kern_manifest::types::{Arg, Dim};
+use kern_runtime::{Denied, Error, Lease, Runtime};
 use pegainfer_frontend::engine::{
     FinishReason, QueuedRequest, RejectReason, RequestId, RequestLedger, Scheduler,
     SchedulerMetrics, SpecDecodeCounters, MAX_SPEC_TOKENS,
@@ -102,11 +109,18 @@ struct Seq {
 
 pub struct KernScheduler {
     rt: Rt,
-    /// One page no sequence owns: the padding rows of a decode batch write
-    /// their junk here.
+    /// One page (and sequence slot) no sequence owns: the padding rows of
+    /// a decode batch write their junk here.
     pad: Lease,
     policy: Policy,
     spec: Option<SpecPlan>,
+    /// `prefill` emits `next_token` itself (see the module doc).
+    prefill_emits: bool,
+    /// The manifest's line tables over per-sequence states: (name, lines
+    /// per sequence), each shaped `[lines, seqs]`.
+    line_tables: Vec<(String, usize)>,
+    /// The `seqs` bound: a line table's row width.
+    seqs_max: usize,
     waiting: VecDeque<QueuedRequest>,
     running: Vec<Seq>,
     warned_sampling: bool,
@@ -130,7 +144,7 @@ pub struct Facts {
 impl KernScheduler {
     /// Wrap a loaded runtime (weights bound). Validates the manifest against
     /// this caller contract.
-    pub fn new(rt: Runtime, mut policy: Policy) -> Result<(KernScheduler, Facts)> {
+    pub fn new(mut rt: Runtime, mut policy: Policy) -> Result<(KernScheduler, Facts)> {
         let m = &rt.manifest;
         for p in ["prefill", "decode", "decode_batch"] {
             if !m.programs.contains_key(p) {
@@ -148,10 +162,16 @@ impl KernScheduler {
             [Dim::Var(v), Dim::Const(_)] if v == "seqs" => {}
             s => bail!("block_table shape {s:?}, expected [seqs, n]"),
         }
-        let pad = rt.lease(1).map_err(|d| anyhow::anyhow!("no page for the padding rows: {d}"))?;
-        if rt.pages_used() == rt.pages_total() {
-            bail!("capacity {} tokens holds one page; nothing left to serve from", rt.capacity());
-        }
+        let prefill_emits = m.programs["prefill"]
+            .iter()
+            .any(|c| c.args.iter().any(|a| matches!(a, Arg::Buf { buf, .. } if buf == "next_token")));
+        let line_tables = rt
+            .seq_tables()
+            .map(|name| match m.buffers[name].shape.as_slice() {
+                [Dim::Const(rows), Dim::Var(v)] if v == "seqs" => Ok((name.to_string(), *rows as usize)),
+                s => bail!("line table `{name}` shaped {s:?}, expected [lines, seqs]"),
+            })
+            .collect::<Result<Vec<_>>>()?;
         policy.max_seqs = policy.max_seqs.clamp(1, seqs_max);
         policy.chunk = policy.chunk.clamp(1, tokens_max);
         let spec = if policy.spec {
@@ -207,20 +227,26 @@ impl KernScheduler {
         } else {
             None
         };
+        let pad = rt.lease(1).map_err(|e| anyhow::anyhow!("no page for the padding rows: {e}"))?;
+        if rt.pages_used() == rt.pages_total() {
+            bail!("capacity {} tokens holds one page; nothing left to serve from", rt.capacity());
+        }
         let facts = Facts {
             total_blocks: rt.pages_total() - pad.pages(),
             block_size: rt.page() as usize,
             max_request_tokens: rt.max_seq_tokens(),
         };
         info!(
-            "scheduler: {} pages × {} tokens (+1 pad page), ≤{} sequences, ≤{} tokens/sequence, chunk {}, buckets {:?}{}{}",
+            "scheduler: {} pages × {} tokens (+1 pad page){}, ≤{} sequences, ≤{} tokens/sequence, chunk {}, buckets {:?}{}{}{}",
             facts.total_blocks,
             facts.block_size,
+            if rt.seq_slots() > 0 { format!(", {} sequence slots", rt.seq_slots()) } else { String::new() },
             policy.max_seqs,
             facts.max_request_tokens,
             policy.chunk,
             BUCKETS.iter().filter(|&&b| b <= policy.max_seqs).collect::<Vec<_>>(),
             if policy.eager { ", eager" } else { ", graphs captured per bucket on first use" },
+            if prefill_emits { ", prefill emits next_token" } else { "" },
             match &spec {
                 Some(s) => format!(", speculative: {} drafts/round ({} draft + {} verify rows per sequence)", s.n_drafts, s.draft_rows, s.verify_rows),
                 None => String::new(),
@@ -232,6 +258,9 @@ impl KernScheduler {
                 pad,
                 policy,
                 spec,
+                prefill_emits,
+                line_tables,
+                seqs_max,
                 waiting: VecDeque::new(),
                 running: Vec::new(),
                 warned_sampling: false,
@@ -280,17 +309,18 @@ impl KernScheduler {
             }
             let pages = match self.rt.0.lease(worst) {
                 Ok(pages) => pages,
-                Err(Denied::Busy) => break, // wait for pages
-                Err(Denied::ExceedsRow { limit }) => {
+                Err(Error::Denied(Denied::Busy)) => break, // wait for pages / a slot
+                Err(Error::Denied(Denied::ExceedsRow { limit })) => {
                     ledger.reject(id, RejectReason::ContextLength { prompt_tokens: prompt, max_tokens, limit });
                     self.waiting.pop_front();
                     continue;
                 }
-                Err(Denied::ExceedsPool) => {
+                Err(Error::Denied(Denied::ExceedsPool)) => {
                     ledger.reject(id, RejectReason::KvBudget { prompt_tokens: prompt, worst_case_tokens: worst });
                     self.waiting.pop_front();
                     continue;
                 }
+                Err(e) => return Err(e.into()),
             };
             let q = self.waiting.pop_front().unwrap();
             if !q.request.params.is_greedy() && !self.warned_sampling {
@@ -303,21 +333,22 @@ impl KernScheduler {
             ledger.admit(id);
             let ids: Vec<i64> = q.request.prompt_tokens.iter().map(|&t| t as i64).collect();
             let t0 = Instant::now();
-            // Everything but the last prompt token goes through `prefill`
-            // (state only); the last one is the first decode step's input,
-            // whose logits yield the first generated token.
-            self.prefill(&pages, &ids[..prompt - 1])?;
+            // Every prompt token goes through `prefill` when it emits the
+            // first generated token itself; otherwise everything but the
+            // last, which is the first decode step's input.
+            let n_pre = if self.prefill_emits { prompt } else { prompt - 1 };
+            let first = self.prefill(&pages, &ids[..n_pre])?;
             self.stat_prefill_ns += t0.elapsed().as_nanos();
-            self.stat_prefill_tokens += (prompt - 1) as u64;
-            budget_used += prompt - 1;
+            self.stat_prefill_tokens += n_pre as u64;
+            budget_used += n_pre;
             debug!(
-                "admitted {id}: {prompt} prompt tokens, max_tokens {max_tokens}, {} pages, prefill {:?}",
-                pages.pages(),
+                "admitted {id}: {prompt} prompt tokens, max_tokens {max_tokens}, {:?}, prefill {:?}",
+                pages,
                 t0.elapsed()
             );
             let mut seq = Seq {
                 id,
-                pos: prompt - 1,
+                pos: n_pre,
                 next: *q.request.prompt_tokens.last().unwrap(),
                 generated: 0,
                 max_tokens,
@@ -326,12 +357,19 @@ impl KernScheduler {
                 prompt_len: prompt,
                 admitted: t0,
             };
-            if self.spec.is_some() {
-                // The last prompt token goes through `decode_spec` now (a
-                // round needs an anchor and its tap in the draft KV); its
-                // token is the first one emitted.
-                let tok = self.first_token(&seq)?;
-                seq.pos += 1;
+            let first = match first {
+                Some(tok) => Some(tok),
+                None if self.spec.is_some() => {
+                    // The last prompt token goes through `decode_spec` now
+                    // (a round needs an anchor and its tap in the draft
+                    // KV); its token is the first one emitted.
+                    let tok = self.first_token(&seq)?;
+                    seq.pos += 1;
+                    Some(tok)
+                }
+                None => None,
+            };
+            if let Some(tok) = first {
                 seq.generated += 1;
                 let reason = if !seq.ignore_eos && self.policy.stop_tokens.contains(&tok) {
                     Some(FinishReason::Stop)
@@ -361,11 +399,13 @@ impl KernScheduler {
     }
 
     /// Chunked single-sequence prefill of `ids` starting at position 0 of
-    /// a sequence holding `pages`.
-    fn prefill(&mut self, pages: &Lease, ids: &[i64]) -> Result<()> {
+    /// a sequence holding `pages`; the first generated token when the
+    /// manifest's prefill emits it.
+    fn prefill(&mut self, pages: &Lease, ids: &[i64]) -> Result<Option<u32>> {
         let chunk = self.policy.chunk;
         let mut row = Vec::new();
         pages.extend_row("block_table", &mut row)?;
+        self.stage_lines(&[pages])?;
         let mut pos = 0usize;
         while pos < ids.len() {
             let c = (ids.len() - pos).min(chunk);
@@ -388,7 +428,18 @@ impl KernScheduler {
             }
             pos += c;
         }
-        Ok(())
+        if !self.prefill_emits || ids.is_empty() {
+            return Ok(None);
+        }
+        let out = self.rt.0.read_output("next_token")?;
+        Ok(Some(i64::from_le_bytes(out[..8].try_into().unwrap()) as u32))
+    }
+
+    /// Stage every line table: column i names sequence i's lines, the
+    /// columns past the batch the pad's (a manifest without per-sequence
+    /// states has no line tables; nothing is written).
+    fn stage_lines(&mut self, seqs: &[&Lease]) -> Result<()> {
+        stage_lines(&mut self.rt.0, &self.line_tables, self.seqs_max, &self.pad, seqs)
     }
 
     /// Speculative admission: the last prompt token through `decode_spec`
@@ -398,6 +449,7 @@ impl KernScheduler {
         let env = env(1, 1);
         let mut row = Vec::new();
         s.pages.extend_row("block_table", &mut row)?;
+        self.stage_lines(&[&s.pages])?;
         let rt = &mut self.rt.0;
         rt.write_input_at("token_ids", &le_i64(&[s.next as i64]), &env)?;
         rt.write_input_at("positions", &le_i64(&[s.pos as i64]), &env)?;
@@ -619,6 +671,8 @@ impl KernScheduler {
         let cu: Vec<i32> = (0..=b as i32).collect();
         let program = if b == 1 { "decode" } else { "decode_batch" };
         let t0 = Instant::now();
+        let leases: Vec<&Lease> = self.running.iter().map(|s| &s.pages).collect();
+        stage_lines(&mut self.rt.0, &self.line_tables, self.seqs_max, &self.pad, &leases)?;
         let rt = &mut self.rt.0;
         rt.write_input_at("token_ids", &le_i64(&token_ids), &env)?;
         rt.write_input_at("positions", &le_i64(&positions), &env)?;
@@ -743,6 +797,24 @@ fn run_program(rt: &mut Runtime, program: &str, env: &BTreeMap<String, u64>, eag
         info!("captured `{program}` at {env:?} ({:?})", t.elapsed());
     }
     Ok(rt.run_captured(program, env)?)
+}
+
+/// See [`KernScheduler::stage_lines`].
+fn stage_lines(rt: &mut Runtime, tables: &[(String, usize)], seqs_max: usize, pad: &Lease, seqs: &[&Lease]) -> Result<()> {
+    for (name, rows) in tables {
+        let mut t = vec![0i32; rows * seqs_max];
+        for r in 0..*rows {
+            let fill = pad.seq_line(name, r)?;
+            for (i, entry) in t[r * seqs_max..(r + 1) * seqs_max].iter_mut().enumerate() {
+                *entry = match seqs.get(i) {
+                    Some(l) => l.seq_line(name, r)?,
+                    None => fill,
+                };
+            }
+        }
+        rt.write_input(name, &le_i32(&t))?;
+    }
+    Ok(())
 }
 
 fn i64s(bytes: &[u8]) -> Vec<i64> {

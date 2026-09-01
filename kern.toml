@@ -31,3 +31,17 @@ manifest  = "examples/qwen3-4b-dspark.json"
 kernels   = "kernels"
 weights   = ["weights/qwen3-4b-dspark.safetensors"]
 tokenizer = "weights/tokenizer.json"
+
+# Qwen3.8-27B (hybrid GDN + attention): `kern run qwen3.8-27b`.
+[targets."qwen3.8-27b"]
+manifest  = "examples/qwen3.8-27b.json"
+kernels   = "kernels-qwen38"
+weights   = ["/mnt/shared/weights/kern/qwen3.8-27b/qwen3.8-27b.safetensors"]
+tokenizer = "/mnt/shared/weights/kern/qwen3.8-27b/tokenizer.json"
+
+# With its DFlash2 draft: `kern run qwen3.8-27b-dflash2 --spec`.
+[targets."qwen3.8-27b-dflash2"]
+manifest  = "examples/qwen3.8-27b-dflash2.json"
+kernels   = "kernels-qwen38-dflash2"
+weights   = ["/mnt/shared/weights/kern/qwen3.8-27b/qwen3.8-27b.safetensors", "/mnt/shared/weights/kern/qwen3.8-27b/qwen3.8-27b-dflash2-draft.safetensors"]
+tokenizer = "/mnt/shared/weights/kern/qwen3.8-27b/tokenizer.json"

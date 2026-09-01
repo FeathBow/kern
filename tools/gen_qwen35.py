@@ -119,8 +119,15 @@ V_BYTE_OFF = HEAD_DIM * BF16             # v = k + 256 elems inside a head
 CONV_STATE_BYTES = CONV_DIM * 3 * BF16   # 61440
 SSM_STATE_BYTES = GDN_V_HEADS * GDN_D * GDN_D * 4   # 3145728
 GDN_LINE_BYTES = 3211264                 # conv + ssm + 4096 pad (vLLM page)
-GDN_LINES = len(GDN_LAYERS) + 1          # line 0 = null
+GDN_LINES = len(GDN_LAYERS) + 1          # line 0 = null (speculative layout, bs=1)
 GDN_STATE_BYTES = GDN_LINES * GDN_LINE_BYTES
+# Serving layout: the GDN state is per sequence (`bytes_per_seq`), one line
+# per GDN layer; the runtime provisions MAX_SEQS + 2 slots (slot 0 = null
+# lines, one spare for a batched caller's padding) and the line table
+# `gdn.line_index[layer, seq]` = slot × 48 + layer.
+MAX_SEQS = 128                           # `seqs` bound: decode_batch rows, GDN slots
+GDN_SEQ_BYTES = len(GDN_LAYERS) * GDN_LINE_BYTES
+GDN_TOTAL_LINES = (MAX_SEQS + 2) * len(GDN_LAYERS)   # num_cache_lines the conv kernels see
 
 # --- DFlash2 speculative decoding (examples/qwen3.8-27b-dflash2.json, --spec)
 SPEC_BLOCK = 8                           # draft block: anchor + 7 masks = verify rows
@@ -543,6 +550,7 @@ DOMAINS = {
     "positions": {"index_into": "rope.cos"},
     "slot_mapping": {"index_into": "kv"},
     "block_table": {"index_into": "kv", "stride": BLOCK_SIZE},
+    "gdn.line_index": {"index_into": "gdn", "stride": GDN_LINE_BYTES},
     "seq_lens": {"min": 1},
     "cu_seqlens_q": {"min": 0, "max": "tokens", "monotone": True},
     "next_token": TOKEN_DOMAIN,
@@ -557,14 +565,15 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
     path, "pins": {tag: (cubin, sha)}, "attn_draft": DSpark's pinned
     non-causal unified-attention step} — adds the DFlash2 programs."""
     T = var("tokens")
+    S = var("seqs")
     # GDN state layout: one page per layer (Stage 1) or 8 checkpoint pages
     # per layer under speculation; the kernels' page stride is a constexpr
     if spec:
         page_bytes, ssm_off, line_table, gdn_state_bytes = SPEC_PAGE_BYTES, SPEC_SSM_OFF, "gdn.spec_line_index", SPEC_STATE_BYTES
         n_pages = SPEC_PAGES
     else:
-        page_bytes, ssm_off, line_table, gdn_state_bytes = GDN_LINE_BYTES, CONV_STATE_BYTES, "gdn.line_index", GDN_STATE_BYTES
-        n_pages = GDN_LINES
+        page_bytes, ssm_off, line_table = GDN_LINE_BYTES, CONV_STATE_BYTES, "gdn.line_index"
+        n_pages = GDN_TOTAL_LINES
 
     def gdn_page(i):
         """First page of GDN layer i (its conv line and SSM checkpoint 0)."""
@@ -574,11 +583,13 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
         "token_ids": {"dtype": "i64", "shape": ["tokens"], "kind": "input"},
         "positions": {"dtype": "i64", "shape": ["tokens"], "kind": "input"},
         "slot_mapping": {"dtype": "i64", "shape": ["tokens"], "kind": "input"},
-        "block_table": {"dtype": "i32", "shape": [BLOCK_TABLE_LEN], "kind": "input"},
-        "seq_lens": {"dtype": "i32", "shape": [1], "kind": "input"},
-        "cu_seqlens_q": {"dtype": "i32", "shape": [2], "kind": "input"},
-        "logits": {"dtype": "bf16", "shape": [1, VOCAB], "kind": "workspace"},
-        "next_token": {"dtype": "i64", "shape": [1], "kind": "output"},
+        # one row per sequence of a decode_batch step (prefill / decode are
+        # seqs=1: row 0 / the first two cu_seqlens entries)
+        "block_table": {"dtype": "i32", "shape": ["seqs", BLOCK_TABLE_LEN], "kind": "input"},
+        "seq_lens": {"dtype": "i32", "shape": ["seqs"], "kind": "input"},
+        "cu_seqlens_q": {"dtype": "i32", "shape": [MAX_SEQS + 1], "kind": "input"},
+        "logits": {"dtype": "bf16", "shape": ["seqs", VOCAB], "kind": "workspace"},
+        "next_token": {"dtype": "i64", "shape": ["seqs"], "kind": "output"},
     }
     ws = {
         "residual": ["tokens", HIDDEN], "x": ["tokens", HIDDEN], "y": ["tokens", HIDDEN],
@@ -600,7 +611,10 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
     for name, shape in ws.items():
         buffers[name] = {"dtype": "bf16", "shape": shape, "kind": "workspace"}
     for name, shape in {"g": ["tokens", GDN_V_HEADS], "beta": ["tokens", GDN_V_HEADS],
-                        "g_cum": ["tokens", GDN_V_HEADS], "A": ["tokens", GDN_V_HEADS, FLA_CHUNK]}.items():
+                        "g_cum": ["tokens", GDN_V_HEADS], "A": ["tokens", GDN_V_HEADS, FLA_CHUNK],
+                        # the sequence's SSM state line, gathered for the FLA
+                        # chunk kernel (h0/ht by pointer) and scattered back
+                        "h0": [GDN_V_HEADS, GDN_D, GDN_D]}.items():
         buffers[name] = {"dtype": "f32", "shape": shape, "kind": "workspace"}
 
     def weight(name, shape, dtype="bf16"):
@@ -616,7 +630,10 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
     weight("fla.chunk_offsets", [2], "i64")
     weight("conv.batch_ptr", [CHUNK_MAX // CONV_BLOCK_M], "i32")
     weight("conv.token_chunk_offset", [CHUNK_MAX // CONV_BLOCK_M], "i32")
-    weight("gdn.line_index", [64], "i32")
+    # line table over the per-sequence GDN state: row = GDN layer, column =
+    # sequence of the batch (runtime-filled from the lease; a prefill or
+    # bs=1 decode reads column 0)
+    buffers["gdn.line_index"] = {"dtype": "i32", "shape": [len(GDN_LAYERS), "seqs"], "kind": "input"}
     weight("gdn.has_initial", [16], "u8")
     for i in range(LAYERS):
         p = f"model.layers.{i}."
@@ -820,13 +837,23 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
                           "out buffer<bf16>", "in buffer<bf16>", "in buffer<f32>", "in buffer<i32>",
                           "in buffer<i32>", "i32"] + I2,
                          [cdiv(T, FLA_CHUNK), GDN_V_HEADS, 1]),
-        # h0/ht are the SSM state line itself: each program loads its h0
-        # tile first and stores ht last, so in-place is race-free
+        # h0/ht are one SSM state line: each program loads its h0 tile
+        # first and stores ht last, so in-place is race-free. The kernel
+        # takes them by pointer, so the per-sequence layout gathers the
+        # sequence's line into `h0` and scatters it back (vLLM does the
+        # same); the speculative layout (bs=1) points at the line itself.
         "chunk_h": tri("chunk_h",
                        ["in buffer<bf16>", "in buffer<bf16>", "in buffer<bf16>", "out buffer<bf16>",
-                        "in buffer<f32>", "out buffer<bf16>", "inout state", "inout state",
-                        "in buffer<i32>", "in buffer<i64>", "i32"] + I2,
+                        "in buffer<f32>", "out buffer<bf16>"]
+                       + (["inout state", "inout state"] if spec else ["inout buffer<f32>", "inout buffer<f32>"])
+                       + ["in buffer<i32>", "in buffer<i64>", "i32"] + I2,
                        [GDN_D // 32, GDN_V_HEADS, 1]),
+        "line_gather": single("kern_line_gather",
+                              ["in buffer<i32>", "inout state", "out buffer<f32>", "i64", "i64", "i64"],
+                              [256, 1, 1], [SSM_STATE_BYTES // 16 // 256, 1, 1], **hw("line_copy")),
+        "line_scatter": single("kern_line_scatter",
+                               ["in buffer<i32>", "inout state", "in buffer<f32>", "i64", "i64", "i64"],
+                               [256, 1, 1], [SSM_STATE_BYTES // 16 // 256, 1, 1], **hw("line_copy")),
         "chunk_o": tri("chunk_o",
                        ["in buffer<bf16>", "in buffer<bf16>", "in buffer<bf16>", "in buffer<bf16>",
                         "in buffer<f32>", "out buffer<bf16>", "in buffer<i32>", "in buffer<i32>",
@@ -834,17 +861,22 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
                        [GDN_D // 64, cdiv(T, FLA_CHUNK), GDN_V_HEADS]),
         "gated_norm": layer_norm_kernel(pre, [mul(T, GDN_V_HEADS // LN_ROWS_PER_BLOCK), 1, 1],
                                         ["tokens", GDN_V_HEADS]),
-        # --- GDN decode
+        # --- GDN decode: vLLM's decode kernels are batch-native — one row
+        # per sequence, the state line from `state_indices[seq]`; grids from
+        # their launchers (causal_conv1d_update: (batch, cdiv(dim, BLOCK_N));
+        # fused_recurrent_..._packed_decode: (NV, B·HV); layer_norm_fwd:
+        # cdiv(rows, ROWS_PER_BLOCK) with ROWS_PER_BLOCK = 1 in the bs=1
+        # instance). `batch` is a plain runtime arg of the conv kernel.
         "conv_update": tri("conv_update",
                            ["in buffer<bf16>", "in buffer<bf16>", "inout state", "in buffer<i32>",
                             "out buffer<bf16>", "i32", "i32", "i64", "i64"] + I2,
-                           [1, CONV_DIM // 256, 1], src=dec),
+                           [S, CONV_DIM // 256, 1], src=dec),
         "recurrent": tri("recurrent",
                          ["in buffer<bf16>", "in buffer<bf16>", "in buffer<bf16>", "in buffer<f32>",
                           "in buffer<bf16>", "out buffer<bf16>", "inout state", "inout state",
                           "in buffer<i32>", "f32"] + I2,
-                         [GDN_D // 32, GDN_V_HEADS, 1], src=dec),
-        "gated_norm_decode": layer_norm_kernel(dec, [GDN_V_HEADS, 1, 1], [1, GDN_V_HEADS]),
+                         [GDN_D // 32, mul(S, GDN_V_HEADS), 1], src=dec),
+        "gated_norm_decode": layer_norm_kernel(dec, [mul(S, GDN_V_HEADS), 1, 1], ["seqs", GDN_V_HEADS]),
         # --- attention
         # one generic instance for both programs (decode's launch in vLLM is
         # the num_tokens==1 specialization: same arithmetic, one arg fewer)
@@ -855,6 +887,31 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
                                   "in buffer<i64>", "in buffer<f32>", "in buffer<f32>"] + ["i64"] * 9,
                                  [T, 1, 1]),
         "attn_prefill": tri("unified", ATTN_IFACE, [cdiv(T, BLOCK_Q), KV_HEADS, 1]),
+        # batched decode attention: the same 2D causal instance, one query
+        # row per sequence (vLLM itself decodes through it past its
+        # num_seqs threshold). grid.x covers vLLM's q-block index space
+        # tokens//BLOCK_Q + num_seqs; no two-var sum in the expression set,
+        # so ceil((BLOCK_Q+1)·tokens/BLOCK_Q) ≥ tokens//BLOCK_Q + seqs
+        # (seqs ≤ tokens); the extra blocks return early in the kernel.
+        "attn_batch": tri("unified", ATTN_IFACE, [cdiv(mul(T, BLOCK_Q + 1), BLOCK_Q), KV_HEADS, 1]),
+        # row argmax over `tokens` rows (decode_batch / verify)
+        "argmax": {
+            "params": ["in buffer<bf16>", "out buffer<i64>", "i32"],
+            "impl": {
+                "scratch": {"pmax": {"dtype": "f32", "shape": ["tokens", 64]},
+                            "pidx": {"dtype": "i32", "shape": ["tokens", 64]}},
+                "launches": [
+                    step("kern_argmax_partial_bf16",
+                         ["in buffer<bf16>", "out buffer<f32>", "out buffer<i32>", "i32"],
+                         [1024, 1, 1], [T, 64, 1], [a(0), scr("pmax"), scr("pidx"), a(2)],
+                         **hw("argmax")),
+                    step("kern_argmax_final_i64",
+                         ["in buffer<f32>", "in buffer<i32>", "out buffer<i64>", "i32"],
+                         [64, 1, 1], [T, 1, 1], [scr("pmax"), scr("pidx"), a(1), i32(64)],
+                         **hw("argmax")),
+                ],
+            },
+        },
         "attn": {
             "params": ATTN_IFACE,
             "impl": {
@@ -909,23 +966,6 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
                                            "out buffer<bf16>", "inout state", "inout state", "in buffer<i32>",
                                            "in buffer<i32>", "in buffer<i32>", "f32", "i64", "i64"] + I2,
                                           [1, GDN_D // 32, GDN_V_HEADS]),
-            "argmax": {
-                "params": ["in buffer<bf16>", "out buffer<i64>", "i32"],
-                "impl": {
-                    "scratch": {"pmax": {"dtype": "f32", "shape": [SPEC_BLOCK, 64]},
-                                "pidx": {"dtype": "i32", "shape": [SPEC_BLOCK, 64]}},
-                    "launches": [
-                        step("kern_argmax_partial_bf16",
-                             ["in buffer<bf16>", "out buffer<f32>", "out buffer<i32>", "i32"],
-                             [1024, 1, 1], [T, 64, 1], [a(0), scr("pmax"), scr("pidx"), a(2)],
-                             **hw("argmax")),
-                        step("kern_argmax_final_i64",
-                             ["in buffer<f32>", "in buffer<i32>", "out buffer<i64>", "i32"],
-                             [64, 1, 1], [T, 1, 1], [scr("pmax"), scr("pidx"), a(1), i32(64)],
-                             **hw("argmax")),
-                    ],
-                },
-            },
             # --- draft (vLLM CUDA kernels + the borrowed non-causal attention instance)
             "d_rms_norm": spec_kernel("d_rms_norm", RMS_PARAMS, [T, 1, 1]),
             "d_head_norm": spec_kernel("d_head_norm", RMS_PARAMS, [mul(T, D_HEADS), 1, 1]),
@@ -971,17 +1011,28 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
                  [buf("x"), buf(x_in), buf("residual"), buf(w), i32(HIDDEN), T,
                   i32(HIDDEN), i32(HIDDEN), f32(eps)])
 
-    def gdn_layer(i, decode, nacc=None):
+    def gdn_layer(i, decode, nacc=None, batch=False):
         """decode=False: the chunked FLA prefill chain.  decode=True: the
-        recurrent chain — Stage 1's packed kernels, or, when `nacc` names
-        the num_accepted_tokens buffer, vLLM's speculative kernels over the
-        `tokens` rows (SSM checkpoint per row, resume from slot nacc-1)."""
+        recurrent chain — the packed decode kernels over `seqs` rows, or,
+        when `nacc` names the num_accepted_tokens buffer, vLLM's speculative
+        kernels over the `tokens` rows (SSM checkpoint per row, resume from
+        slot nacc-1)."""
         p = f"model.layers.{i}.linear_attn."
         l = f"l{i}."
         g = GDN_LAYERS.index(i)
         line = g + 1
-        idx = buf(line_table, 4 * line)
+        # this layer's row of the line table: [seqs] entries (per-sequence
+        # layout) or the one constant line (speculative layout)
+        idx = buf(line_table, 4 * line) if spec else buf(line_table, 4 * MAX_SEQS * g)
         page = gdn_page(i)
+        if spec:
+            h0 = ht = state("gdn", page * page_bytes + ssm_off)
+            gather, scatter = [], []
+        else:
+            h0 = ht = buf("h0")
+            line_args = [i64(GDN_LINE_BYTES), i64(CONV_STATE_BYTES), i64(SSM_STATE_BYTES)]
+            gather = [d(l + "h0_gather", "line_gather", [idx, state("gdn"), buf("h0")] + line_args)]
+            scatter = [d(l + "ht_scatter", "line_scatter", [idx, state("gdn"), buf("h0")] + line_args)]
         ds = [
             gemm(l + "in_proj_qkvz", "x", p + "in_proj_qkvz.weight", "qkvz", T, QKVZ_DIM, HIDDEN),
             gemm(l + "in_proj_ba", "x", p + "in_proj_ba.weight", "ba", T, BA_DIM, HIDDEN),
@@ -993,7 +1044,7 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
                 d(l + "conv", "conv_fwd",
                   [buf("qkvz"), buf(p + "conv1d.weight"), state("gdn"), idx, buf("gdn.has_initial"),
                    buf("cu_seqlens_q"), buf("conv.batch_ptr"), buf("conv.token_chunk_offset"),
-                   buf("conv_out"), i32(GDN_LINES), i64(QKVZ_DIM), i64(CONV_DIM)] + Z2),
+                   buf("conv_out"), i32(GDN_LINES if spec else n_pages), i64(QKVZ_DIM), i64(CONV_DIM)] + Z2),
                 # a/b are strided views into ba (vLLM copies them contiguous;
                 # the kernel takes row strides, so no copy here)
                 d(l + "post_conv", "post_conv",
@@ -1010,11 +1061,11 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
                 d(l + "recompute_wu", "recompute",
                   [buf("gdn_k"), buf("gdn_v"), buf("beta"), buf("w"), buf("u"), buf("Ai"),
                    buf("g_cum"), buf("cu_seqlens_q"), buf("fla.chunk_indices"), T] + Z2),
+            ] + gather + [
                 d(l + "chunk_h", "chunk_h",
-                  [buf("gdn_k"), buf("u"), buf("w"), buf("v_new"), buf("g_cum"), buf("h"),
-                   state("gdn", page * page_bytes + ssm_off),
-                   state("gdn", page * page_bytes + ssm_off),
+                  [buf("gdn_k"), buf("u"), buf("w"), buf("v_new"), buf("g_cum"), buf("h"), h0, ht,
                    buf("cu_seqlens_q"), buf("fla.chunk_offsets"), T] + Z2),
+            ] + scatter + [
                 d(l + "chunk_o", "chunk_o",
                   [buf("gdn_q"), buf("gdn_k"), buf("v_new"), buf("h"), buf("g_cum"),
                    buf("core_attn_out"), buf("cu_seqlens_q"), buf("fla.chunk_indices"),
@@ -1029,16 +1080,23 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
             ds += [
                 d(l + "conv_update", "conv_update",
                   [buf("qkvz"), buf(p + "conv1d.weight"), state("gdn"), idx, buf("qkvz"),
-                   i32(1), i32(n_pages), i64(1), i64(1)] + Z2),
+                   S, i32(n_pages), i64(1), i64(1)] + Z2),
                 d(l + "recurrent", "recurrent",
                   [buf("qkvz"), a_, b_, buf(p + "A_log"), buf(p + "dt_bias"), buf("core_attn_out"),
                    state("gdn", ssm_off), state("gdn", ssm_off), idx,
                    f32(gdn_scale)] + Z2),
-                d(l + "gated_norm", "gated_norm_decode",
-                  [buf("core_attn_out"), buf("core_attn_out"), buf(p + "norm.weight"),
-                   buf("qkvz", Z_OFF * BF16), i32(GDN_D), i32(GDN_D), i32(GDN_D), i32(GDN_V_HEADS),
-                   f32(eps)] + Z2),
             ]
+            # the gated norm views x/z as [tokens·heads, 128] rows of one
+            # stride: z must be contiguous per token — a copy out of the
+            # fused qkvz row, except at bs=1 where the row's 48 heads are
+            # the whole tensor
+            if batch:
+                ds.append(d(l + "z_copy", "copy_rows",
+                            [buf("z_c"), buf("qkvz", Z_OFF * BF16), i32(GDN_V), i32(QKVZ_DIM), i32(GDN_V)]))
+            ds.append(d(l + "gated_norm", "gated_norm_decode",
+                        [buf("core_attn_out"), buf("core_attn_out"), buf(p + "norm.weight"),
+                         buf("z_c") if batch else buf("qkvz", Z_OFF * BF16),
+                         i32(GDN_D), i32(GDN_D), i32(GDN_D), expr(mul(S, GDN_V_HEADS)), f32(eps)] + Z2))
         else:
             # vLLM's spec-decode GDN path: conv update with the accepted-token
             # offset (seqlen 8 baked: it reads/writes 8 qkvz rows, rows past
@@ -1068,7 +1126,7 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
         ds.append(gemm(l + "out_proj", "core_attn_out", p + "out_proj.weight", "y", T, HIDDEN, GDN_V))
         return ds
 
-    def attn_layer(i, decode):
+    def attn_layer(i, decode, batch=False):
         p = f"model.layers.{i}.self_attn."
         l = f"l{i}."
         koff = ATTN_LAYERS.index(i) * LAYER_KV_BYTES
@@ -1090,28 +1148,29 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
                buf("slot_mapping"), ks, vs,
                i64(KV_DIM), i64(QKV_DIM), i64(BLOCK_STRIDE), i64(2 * HEAD_DIM), i64(0), i64(0),
                i64(KV_HEADS * 2 * HEAD_DIM), i64(0), i64(0)]),
-            d(l + "attn", "attn" if decode else "attn_prefill",
+            d(l + "attn", "attn_batch" if batch else "attn" if decode else "attn_prefill",
               [buf("attn_out"), buf("q_n"), kv_k, kv_v, buf("block_table"), buf("seq_lens"),
                f32(attn_scale), ks, vs, f32(1.0), f32(0.0),
                i64(BLOCK_TABLE_LEN), i64(Q_DIM), i64(HEAD_DIM), i64(Q_DIM), i64(HEAD_DIM), i64(0),
                buf("seq_lens"),
                i64(BLOCK_STRIDE), i64(KV_HEADS * 2 * HEAD_DIM), i64(2 * HEAD_DIM),
                i64(BLOCK_STRIDE), i64(KV_HEADS * 2 * HEAD_DIM), i64(2 * HEAD_DIM),
-               buf("cu_seqlens_q"), i32(1)] + Z2),
+               buf("cu_seqlens_q"), S if batch else i32(1)] + Z2),
             d(l + "gate", "sigmoid_mul",
               [buf("gated"), buf("attn_out"), buf("qkv", GATE_OFF * BF16), i32(HEADS), i32(HEAD_DIM),
                i32(QKV_DIM), i32(2 * HEAD_DIM)]),
             gemm(l + "o_proj", "gated", p + "o_proj.weight", "y", T, HIDDEN, Q_DIM),
         ]
 
-    def forward(decode, taps=False, nacc=None, tail=None):
+    def forward(decode, taps=False, nacc=None, tail=None, batch=False):
         """Target forward.  decode: recurrent GDN + split-KV attention (else
-        chunked FLA + 2D attention over the `tokens` rows).  taps: the five
-        fc GEMMs into `fc_out` at the DFlash taps (after layers 5/19/33/47/61:
-        residual = hidden + residual there).  tail: "prefill" (last row ->
-        next_token), "decode" (row 0 -> next_token), "verify" (all rows ->
-        verify_tokens)."""
-        tail = tail or ("decode" if decode else "prefill")
+        chunked FLA + 2D attention over the `tokens` rows); batch: recurrent
+        GDN + 2D attention, one row per sequence (tokens = seqs).  taps: the
+        five fc GEMMs into `fc_out` at the DFlash taps (after layers
+        5/19/33/47/61: residual = hidden + residual there).  tail: "prefill"
+        (last row -> next_token), "decode" (row 0 -> next_token), "batch"
+        (every row -> next_token), "verify" (all rows -> verify_tokens)."""
+        tail = tail or ("batch" if batch else "decode" if decode else "prefill")
         ds = [
             d("embed", "embedding",
               [buf("token_ids"), buf("model.embed_tokens.weight"), buf("residual"), T, i32(HIDDEN)]),
@@ -1126,7 +1185,7 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
         for i in range(LAYERS):
             p = f"model.layers.{i}."
             l = f"l{i}."
-            ds += attn_layer(i, decode) if i in ATTN_LAYERS else gdn_layer(i, decode, nacc)
+            ds += attn_layer(i, decode, batch) if i in ATTN_LAYERS else gdn_layer(i, decode, nacc, batch)
             ds += [
                 fused(l + "post_attn_norm", "y", p + "post_attention_layernorm.weight_p1"),
                 gemm(l + "gate_up", "x", p + "mlp.gate_up_proj.weight", "gate_up", T, 2 * FFN, HIDDEN),
@@ -1150,6 +1209,9 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
         if tail == "decode":
             ds.append(gemm("lm_head", "x", "lm_head.weight", "logits", i32(1), VOCAB, HIDDEN))
             ds.append(d("sample", "argmax_row", [buf("logits"), buf("next_token"), i32(VOCAB)]))
+        elif tail == "batch":
+            ds.append(gemm("lm_head", "x", "lm_head.weight", "logits", S, VOCAB, HIDDEN))
+            ds.append(d("sample", "argmax", [buf("logits"), buf("next_token"), i32(VOCAB)]))
         elif tail == "verify":
             ds.append(gemm("lm_head", "x", "lm_head.weight", "logits_blk", T, VOCAB, HIDDEN))
             ds.append(d("sample", "argmax", [buf("logits_blk"), buf("verify_tokens"), i32(VOCAB)]))
@@ -1284,7 +1346,8 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
             ]
         return ds
 
-    states = {"kv": {"bytes_per_token": KV_BYTES_PER_TOKEN}, "gdn": {"bytes": gdn_state_bytes}}
+    states = {"kv": {"bytes_per_token": KV_BYTES_PER_TOKEN},
+              "gdn": {"bytes": gdn_state_bytes} if spec else {"bytes_per_seq": GDN_SEQ_BYTES}}
     head = {"schema_version": 3, "model": "qwen3.8-27b"}
     if spec:
         one = buf("gdn.one")
@@ -1319,6 +1382,8 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
         programs = {
             "prefill": forward(False),
             "decode": forward(True),
+            # `seqs` sequences, one row each (tokens = seqs)
+            "decode_batch": forward(True, batch=True),
         }
     for name, dom in DOMAINS.items():
         if name in buffers:
@@ -1334,7 +1399,7 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
     return normalize(head | {
         # bs=1; prefill per chunk (tokens <= CHUNK_MAX) over *all* prompt
         # tokens (it emits next_token), decode at tokens=1
-        "vars": {"tokens": {"max": CHUNK_MAX}},
+        "vars": {"tokens": {"max": CHUNK_MAX}, "seqs": {"max": MAX_SEQS}},
         "states": states,
         "buffers": buffers,
         "ops": kernels,
