@@ -529,8 +529,13 @@
 
 /* ---------------------------------------------------------------- footer */
 
-.schema-footer {
+/* the landing page styles every <footer> as a dark block; this one is a
+   plain colophon on paper */
+.schema-page footer.schema-footer {
+  display: block;
   padding: clamp(48px, 8vh, 88px) 0 72px;
+  background: var(--paper);
+  color: var(--ink);
 }
 
 .curl-block {
