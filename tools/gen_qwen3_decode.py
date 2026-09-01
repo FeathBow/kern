@@ -100,6 +100,7 @@ DRAFT_BLOCK_STRIDE = DRAFT_LAYERS * BLOCK_ELEMS_PER_LAYER
 DRAFT_KV_BYTES_PER_TOKEN = DRAFT_LAYERS * 2 * KV_DIM * BF16  # 20480
 V_BYTE_OFF = 2 * HEAD_DIM                              # 挖矿实测 k/v 相距 256B
 MAX_BLOCKS = MAX_POS // 16                             # block_table_stride=256 实测吻合
+MAX_SEQS = 256                # `seqs` var 上限：decode_batch 一步的最大序列数
 
 SYMS = {
     "rms": "rms_norm_kernelIN3c108BFloat16ELi8ELi2",
@@ -445,15 +446,19 @@ def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
         "token_ids": {"dtype": "i64", "shape": ["tokens"], "kind": "input"},
         "positions": {"dtype": "i64", "shape": ["tokens"], "kind": "input"},
         "slot_mapping": {"dtype": "i64", "shape": ["tokens"], "kind": "input"},
-        "block_table": {"dtype": "i32", "shape": [MAX_BLOCKS], "kind": "input"},
-        # bs=1：seq_lens 内容 = 已见 token 数，cu_seqlens_q = [0, 本次 q 数]，
-        # caller 每次调用前填
-        "seq_lens": {"dtype": "i32", "shape": [1], "kind": "input"},
-        "cu_seqlens_q": {"dtype": "i32", "shape": [2], "kind": "input"},
-        # logits/next_token 只属于 decode（tokens=1），定常形状——否则按
-        # CHUNK_MAX 上界分配要多付 ~600MB
-        "logits": {"dtype": "bf16", "shape": [1, VOCAB], "kind": "workspace"},
-        "next_token": {"dtype": "i64", "shape": [1], "kind": "output"},
+        # attention 元数据按序列：block_table 一行一个序列（行距 MAX_BLOCKS
+        # 就是 kernel 收到的 block_table_stride），seq_lens[i] = 序列 i 已见
+        # token 数（含本次），cu_seqlens_q = 各序列 query 行数的前缀和
+        # （seqs+1 项；shape 维度不能是表达式，按上界声明，尾部不被读）。
+        # prefill 恒 seqs=1：只填第 0 行 / 前两项
+        "block_table": {"dtype": "i32", "shape": ["seqs", MAX_BLOCKS], "kind": "input"},
+        "seq_lens": {"dtype": "i32", "shape": ["seqs"], "kind": "input"},
+        "cu_seqlens_q": {"dtype": "i32", "shape": [MAX_SEQS + 1], "kind": "input"},
+        # logits/next_token 一序列一行（decode 的 tokens = seqs），按 seqs
+        # 上界分配（256 × 151936 × 2 B ≈ 74 MB），不挂 tokens（CHUNK_MAX
+        # 上界要多付 ~600 MB）
+        "logits": {"dtype": "bf16", "shape": ["seqs", VOCAB], "kind": "workspace"},
+        "next_token": {"dtype": "i64", "shape": ["seqs"], "kind": "output"},
     }
     for name, shape in {
         "residual": ["tokens", HIDDEN],
@@ -533,6 +538,7 @@ def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
         return by[tag][0]["dynamic_shared_mem_bytes"]
 
     T = var("tokens")
+    S = var("seqs")
     RMS_PARAMS = ["out buffer<bf16>", "in buffer<bf16>", "i64", "i64", "i64",
                   "i64", "i64", "in buffer<bf16>", "i64", "f32", "i32", "i32"]
     # unified 的完整 launch ABI（31 参数）；接口砍掉三个 segm 分部和缓冲
@@ -612,6 +618,17 @@ def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
                                [cdiv(T, BLOCK_Q), KV_HEADS, 1],
                                shared_mem=pf_smem, cubin=causal_cubin,
                                sha256=causal_sha),
+        # batched decode attention：还是这份 2D causal 实例（vLLM 自己在
+        # num_seqs 超过 3D 阈值时 decode 就走它；挖到的 reduce_segments 是
+        # num_seqs=1 特化实例，3D 路只能 bs=1）。grid.x 要盖住 vLLM 的
+        # q-block 索引空间 tokens//BLOCK_Q + num_seqs（seq i 的首 block 在
+        # cu_seqlens_q[i]//BLOCK_Q + i）；表达式集合没有两个 var 相加，用
+        # ceil(5·tokens/4) ≥ tokens//4 + seqs（seqs ≤ tokens 的契约下恒成立），
+        # 多出的 block 在核内按 query 行数提前返回
+        "attn_batch": single(pf_sym, ATTN_IFACE, pf_block,
+                             [cdiv(mul(T, 5), BLOCK_Q), KV_HEADS, 1],
+                             shared_mem=pf_smem, cubin=causal_cubin,
+                             sha256=causal_sha),
         "silu_mul": single(
             by["silu"][0]["symbol"],
             ["out buffer<bf16>", "in buffer<bf16>", "i32", "i32", "f32", "i32"],
@@ -738,6 +755,9 @@ def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
         markov 链展开。taps=True 时在 layer 0/8/16/24/32 的 next_input_norm
         之后各放一个 fc 分块 GEMM（首块 β=0 初始化 fc_out，其余 β=1 累加）
         ——residual 此刻恰是 DSpark 要的 aux（hidden+residual）。"""
+        # unified 的 num_seqs：3D 微程序（`attn`）的 reduce 是 num_seqs=1 特化
+        # 实例，契约就是 bs=1，写死 1；2D 实例接 `seqs` var
+        num_seqs = i32(1) if attn_kernel == "attn" else S
         ds = [
             d("embed", "embedding",
               [buf("token_ids"), buf(mp + "embed_tokens.weight"),
@@ -785,7 +805,7 @@ def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
                    i64(2 * HEAD_DIM),
                    i64(block_stride), i64(KV_HEADS * 2 * HEAD_DIM),
                    i64(2 * HEAD_DIM),
-                   buf("cu_seqlens_q"), i32(1),
+                   buf("cu_seqlens_q"), num_seqs,
                    i64(0), i64(0)]),
                 gemm(l + "o_proj", "attn_out", p + "self_attn.o_proj.weight",
                      "y", T, HIDDEN, Q_DIM),
@@ -811,9 +831,9 @@ def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
                             [buf("residual"), buf(f"draft.fc.{j}.weight"),
                              buf("fc_out"), T, i32(HIDDEN), i32(HIDDEN)]))
         if tail == "decode":
-            # decode 恒 tokens=1：只算 x 第 0 行的 logits，m=1 字面量
+            # decode 的 tokens = seqs：x 的前 seqs 行各出一行 logits
             ds.append(gemm("lm_head", "x", lm_head_w, "logits",
-                           i32(1), VOCAB, HIDDEN))
+                           S, VOCAB, HIDDEN))
             ds.append(d("sample", "argmax",
                         [buf("logits"), buf("next_token"), i32(VOCAB)]))
         elif tail == "verify":
@@ -890,7 +910,11 @@ def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
     states = {"kv": {"bytes_per_token": KV_BYTES_PER_TOKEN}}
     programs = {
         "prefill": forward("attn_prefill", None, taps=spec),
+        # decode：bs=1 契约（seqs=1），3D split-KV 微程序；decode_batch：
+        # seqs 个序列各一行（tokens = seqs），2D 实例。哪个 bs 走哪个核是
+        # manifest 的选择，caller 按 seqs 选 program，runtime 不知情
         "decode": forward("attn", "decode"),
+        "decode_batch": forward("attn_batch", "decode"),
     }
     if spec:
         states["draft_kv"] = {"bytes_per_token": DRAFT_KV_BYTES_PER_TOKEN}
@@ -912,10 +936,11 @@ def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
     return normalize({
         "schema_version": 3,
         "model": "qwen3-4b-dspark" if spec else "qwen3-4b",
-        # bs=1；prefill 按 chunk 调用（tokens ≤ CHUNK_MAX），decode 恒 tokens=1；
+        # prefill 按 chunk 调用（tokens ≤ CHUNK_MAX，seqs=1），decode 恒
+        # tokens=seqs=1，decode_batch 以 tokens=seqs=b 调用；
         # spec 附加契约：draft 以 tokens=7、verify 以 tokens=8、
         # draft_precompute 以 tokens=有效行数 调用
-        "vars": {"tokens": {"max": CHUNK_MAX}},
+        "vars": {"tokens": {"max": CHUNK_MAX}, "seqs": {"max": MAX_SEQS}},
         "states": states,
         "buffers": buffers,
         "ops": kernels,

@@ -18,7 +18,8 @@ use clap::Args;
 use crate::config::{Config, Target};
 use kern_manifest::types::Dim;
 use crate::{
-    env, i64_from_le, le_bytes_i32, le_bytes_i64, prefill_emits_next_token, Caller, STOP_TOKENS,
+    env, first_i64, i64_from_le, le_bytes_i32, le_bytes_i64, prefill_emits_next_token, Caller,
+    STOP_TOKENS,
 };
 use kern_runtime::Runtime;
 use tracing::info;
@@ -207,10 +208,7 @@ fn execute(o: Opts) -> Result<()> {
         for (li, (l, module)) in op.imp.launches.iter().zip(&modules).enumerate() {
             let label = if li == 0 { name.clone() } else { format!("  ·launch{li}") };
             let sm = match l.kernel().and_then(|k| k.shared_mem.as_ref()) {
-                Some(e) => format!(
-                    ", shmem {:?}",
-                    e.eval(&BTreeMap::from([("tokens".into(), 1)])).unwrap_or(0)
-                ),
+                Some(e) => format!(", shmem {:?}", e.eval(&env(1)).unwrap_or(0)),
                 None => String::new(),
             };
             let block = l.kernel().map_or(String::new(), |k| format!(", block {:?}", k.block));
@@ -504,7 +502,6 @@ fn spec_decode(
             bail!("--spec needs program `{p}` (not in this manifest)");
         }
     }
-    let env = |t: u64| BTreeMap::from([("tokens".to_string(), t)]);
     let n_drafts = match rt.manifest.buffers["draft_tokens"].shape.as_slice() {
         [Dim::Const(n)] => *n as usize,
         s => bail!("unexpected draft_tokens shape {s:?}"),
@@ -530,7 +527,7 @@ fn spec_decode(
         rt.run("decode_spec", &env(1))?;
         rt.run("draft_precompute", &env(1))?;
         pos += 1;
-        let first = i64::from_le_bytes(rt.read_output("next_token")?.try_into().unwrap());
+        let first = first_i64(&rt.read_output("next_token")?);
         if o.stop_tokens.contains(&first) {
             info!("stop token {first} at pos {pos}");
             return Ok(Vec::new());

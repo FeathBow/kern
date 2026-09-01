@@ -50,8 +50,17 @@ pub fn i64_from_le(b: &[u8]) -> Vec<i64> {
     b.chunks_exact(8).map(|c| i64::from_le_bytes(c.try_into().unwrap())).collect()
 }
 
+/// Var env of a single-sequence call: `tokens` rows of one sequence. A
+/// manifest without a `seqs` var ignores the extra key (the runtime only
+/// looks up the vars it declares).
 pub fn env(tokens: u64) -> BTreeMap<String, u64> {
-    BTreeMap::from([("tokens".to_string(), tokens)])
+    BTreeMap::from([("tokens".to_string(), tokens), ("seqs".to_string(), 1)])
+}
+
+/// First element of an i64 output buffer (the buffer may be allocated for
+/// more rows than this single-sequence caller uses).
+pub fn first_i64(bytes: &[u8]) -> i64 {
+    i64::from_le_bytes(bytes[..8].try_into().unwrap())
 }
 
 /// A runtime plus the single sequence's position cursor.
@@ -77,14 +86,19 @@ impl Caller {
             .collect();
         ensure!(tables.iter().any(|n| n == "block_table"), "manifest has no `block_table` input");
         for name in tables {
+            // One row per sequence when the table is 2-D (`[seqs, n]`);
+            // this single-sequence caller uses row 0 but every row must
+            // hold valid page ids.
             let b = &rt.manifest.buffers[&name];
-            let n_entries = match b.shape.as_slice() {
-                [Dim::Const(n)] => *n as i64,
+            let (rows, n_entries) = match b.shape.as_slice() {
+                [Dim::Const(n)] => (1, *n as i64),
+                [Dim::Var(v), Dim::Const(n)] => (rt.manifest.vars[v].max, *n as i64),
                 s => bail!("unexpected {name} shape {s:?}"),
             };
             let stride = b.domain.as_ref().map_or(16, |d| d.stride) as i64;
             let n_pages = (rt.capacity() as i64 / stride).max(1);
-            let table: Vec<i32> = (0..n_entries).map(|i| i.min(n_pages - 1) as i32).collect();
+            let row: Vec<i32> = (0..n_entries).map(|i| i.min(n_pages - 1) as i32).collect();
+            let table: Vec<i32> = row.iter().copied().cycle().take(row.len() * rows as usize).collect();
             rt.write_input(&name, &le_bytes_i32(&table))?;
         }
         Ok(Caller { rt, pos: 0 })
@@ -162,6 +176,6 @@ impl Caller {
     }
 
     pub fn next_token(&self) -> Result<i64> {
-        Ok(i64::from_le_bytes(self.rt.read_output("next_token")?.try_into().unwrap()))
+        Ok(first_i64(&self.rt.read_output("next_token")?))
     }
 }

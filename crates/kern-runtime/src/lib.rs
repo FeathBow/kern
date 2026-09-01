@@ -67,14 +67,16 @@ pub struct Runtime {
     /// Per kernel: the module each impl step resolved to (introspection).
     resolution: Vec<(String, Vec<String>)>,
     n_modules: usize,
-    /// Program name -> instantiated CUDA graph + the dense var values it
-    /// was captured with (grid dims and scalar args are baked in at capture).
-    graphs: BTreeMap<String, (sys::CUgraphExec, Vec<u64>)>,
+    /// (program, dense var values) -> instantiated CUDA graph. Grid dims
+    /// and scalar args are baked in at capture, so one program holds one
+    /// graph per var assignment it was captured at (a batched decode keeps
+    /// one per batch bucket).
+    graphs: BTreeMap<(String, Vec<u64>), sys::CUgraphExec>,
 }
 
 impl Drop for Runtime {
     fn drop(&mut self) {
-        for (exec, _) in self.graphs.values() {
+        for exec in self.graphs.values() {
             unsafe { sys::cuGraphExecDestroy(*exec) };
         }
     }
@@ -538,20 +540,14 @@ impl Runtime {
         env: &BTreeMap<String, u64>,
         iters: usize,
     ) -> Result<f32> {
-        let Some((exec, captured)) = self.graphs.get(program) else {
-            bail!(Api, "program `{program}` has not been captured");
-        };
-        let env = self.dense_env(env)?;
-        if *captured != env {
-            bail!(Api, "graph for `{program}` was captured with different var values");
-        }
+        let exec = self.graph(program, env)?;
         self.ctx.bind_to_thread()?;
         let iters = iters.max(1);
         let events = Events::new(iters + 1)?;
         events.record(0, &self.stream)?;
         for i in 0..iters {
             cuda_check(
-                unsafe { sys::cuGraphLaunch(*exec, self.stream.cu_stream()) },
+                unsafe { sys::cuGraphLaunch(exec, self.stream.cu_stream()) },
                 "cuGraphLaunch",
             )?;
             events.record(i + 1, &self.stream)?;
@@ -639,29 +635,49 @@ impl Runtime {
         let r = unsafe { sys::cuGraphInstantiateWithFlags(&mut exec, graph, 0) };
         unsafe { sys::cuGraphDestroy(graph) };
         cuda_check(r, "cuGraphInstantiateWithFlags")?;
-        if let Some((old, _)) = self.graphs.insert(program.to_string(), (exec, env)) {
+        if let Some(old) = self.graphs.insert((program.to_string(), env), exec) {
             unsafe { sys::cuGraphExecDestroy(old) };
         }
         Ok(())
     }
 
+    /// Whether `capture(program, env)` has been done for exactly these var
+    /// values.
+    pub fn is_captured(&self, program: &str, env: &BTreeMap<String, u64>) -> bool {
+        self.dense_env(env)
+            .is_ok_and(|env| self.graphs.contains_key(&(program.to_string(), env)))
+    }
+
+    /// The graph captured for (program, env), or an `Api` error naming the
+    /// var values that were captured instead.
+    fn graph(&self, program: &str, env: &BTreeMap<String, u64>) -> Result<sys::CUgraphExec> {
+        let dense = self.dense_env(env)?;
+        if let Some(exec) = self.graphs.get(&(program.to_string(), dense.clone())) {
+            return Ok(*exec);
+        }
+        let others: Vec<String> = self
+            .graphs
+            .keys()
+            .filter(|(p, _)| p == program)
+            .map(|(_, e)| format!("{{{}}}", self.fmt_env(e)))
+            .collect();
+        if others.is_empty() {
+            bail!(Api, "program `{program}` has not been captured");
+        }
+        bail!(
+            Api,
+            "program `{program}` called with {{{}}} but captured at {}",
+            self.fmt_env(&dense),
+            others.join(", ")
+        )
+    }
+
     /// Replay a previously captured program, then synchronize.
     pub fn run_captured(&self, program: &str, env: &BTreeMap<String, u64>) -> Result<()> {
-        let Some((exec, captured)) = self.graphs.get(program) else {
-            bail!(Api, "program `{program}` has not been captured");
-        };
-        let env = self.dense_env(env)?;
-        if *captured != env {
-            bail!(
-                Api,
-                "graph for `{program}` was captured with {{{}}}, called with {{{}}}",
-                self.fmt_env(captured),
-                self.fmt_env(&env)
-            );
-        }
+        let exec = self.graph(program, env)?;
         self.ctx.bind_to_thread()?;
         cuda_check(
-            unsafe { sys::cuGraphLaunch(*exec, self.stream.cu_stream()) },
+            unsafe { sys::cuGraphLaunch(exec, self.stream.cu_stream()) },
             "cuGraphLaunch",
         )?;
         self.stream.synchronize()?;

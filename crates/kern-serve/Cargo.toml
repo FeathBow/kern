@@ -1,25 +1,17 @@
 [package]
-name = "kern-run"
+name = "kern-serve"
 version.workspace = true
 edition.workspace = true
+description = "OpenAI-compatible serving over a kern manifest: a continuous-batching scheduler behind the pegainfer frontend"
 
 [dependencies]
 kern-manifest.workspace = true
 kern-runtime = { path = "../kern-runtime" }
-kern-serve.workspace = true
+pegainfer-frontend.workspace = true
 
 anyhow.workspace = true
 clap.workspace = true
-serde.workspace = true
 serde_json.workspace = true
-toml.workspace = true
-tokenizers.workspace = true
+tokio.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
-
-[lib]
-path = "src/lib.rs"
-
-[[bin]]
-name = "kern"
-path = "src/bin/kern.rs"
+tracing-log.workspace = true

@@ -39,6 +39,14 @@ enum Cmd {
         #[command(flatten)]
         opts: TestOpts,
     },
+    /// Serve an OpenAI-compatible HTTP endpoint over a target's manifest
+    /// (continuous batching; frontend files from an HF model directory)
+    Serve {
+        /// Target in kern.toml (needed when it declares several)
+        target: Option<String>,
+        #[command(flatten)]
+        opts: kern_serve::ServeOpts,
+    },
     /// Build the handwritten cubins (`[kernels].sources`) and land every
     /// cubin pinned by each target's manifest and reference into its
     /// kernels dir, from `[kernels].dumps` and the builds
@@ -94,6 +102,18 @@ fn main() -> Result<()> {
                 std::process::exit(worst);
             }
             Ok(())
+        }
+        Cmd::Serve { target, opts } => {
+            let Some(c) = cfg.as_ref().filter(|c| !c.targets.is_empty()) else {
+                bail!("kern serve needs a kern.toml target (manifest, kernels, weights)");
+            };
+            let (_, t) = c.one(target.as_deref())?;
+            ensure!(!t.weights.is_empty(), "target declares no weights");
+            kern_serve::serve(
+                opts,
+                kern_serve::Artifacts { manifest: t.manifest.clone(), kernels: t.kernels.clone(), weights: t.weights.clone() },
+                kern_serve::Defaults { gpu: c.gpu, capacity: c.capacity, chunk: c.run.chunk },
+            )
         }
         Cmd::Kernels { targets } => kernels(cfg.as_ref(), &targets),
     }
