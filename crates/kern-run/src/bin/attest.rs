@@ -5,11 +5,16 @@
 //!   1. diffs them structurally: which kernels changed (interface / impl /
 //!      added / removed) and, per program, the aligned dispatch segments
 //!      that differ ("cuts") — everything else is shared;
-//!   2. taps a real workload once: A and B run prefill + one decode step in
-//!      lockstep; at every cut B gets A's frontier inputs and A's state
-//!      pre-image, so what B writes is the cut's own doing (cut-local);
-//!      A's inputs/outputs are snapshotted. Then B free-runs the same
-//!      workload with nothing injected: end-to-end outputs and states;
+//!   2. taps a seeded workload once (random tokens; prefill length, chunk
+//!      and decode steps drawn from the seed, biased to page/chunk/max
+//!      boundaries — or `--prompt` text): A and B run in lockstep; each
+//!      program run B starts from A's state, at every cut B gets A's
+//!      frontier inputs, so what B writes is the cut's own doing
+//!      (cut-local); A's inputs/outputs are snapshotted. Then B free-runs
+//!      the same workload with nothing injected and the **logits** of every
+//!      step are compared end-to-end: the oracle. A token flip where A's
+//!      own top-1/top-2 margin is below the logit delta is a near-tie, not
+//!      an error;
 //!   3. measures the noise floor per cut: A's cut re-run from its own
 //!      snapshot against its own output;
 //!   4. fuzzes each cut from the snapshot: float frontier inputs perturbed
@@ -56,9 +61,23 @@ struct Opts {
     weights: Vec<PathBuf>,
     #[arg(long, default_value = "weights/tokenizer.json")]
     tokenizer: PathBuf,
-    /// Prompt for the real-workload tap
-    #[arg(long, default_value = DEFAULT_PROMPT)]
-    prompt: String,
+    /// Real-text prompt for the tap's prefill instead of seeded random
+    /// tokens (decode tokens stay seeded)
+    #[arg(long)]
+    prompt: Option<String>,
+    /// Prefill length in tokens; 0 = drawn from the seed: half the time
+    /// uniform in [1, capacity − steps], half the time a structural
+    /// boundary (a page, a chunk, the `tokens` max, ±1)
+    #[arg(long, default_value_t = 0)]
+    prefill: u64,
+    /// Decode steps; the seed picks a length in [steps/2, steps]
+    #[arg(long, default_value_t = 32)]
+    decode_steps: u64,
+    /// How far the end-to-end logits may move, in ulps at the row's scale
+    /// (A's max |logit|), and still PASS (with logit evidence), provided
+    /// the argmax agrees except at near-ties
+    #[arg(long, default_value_t = 4)]
+    logit_ulp: u64,
     /// Fuzz rounds per cut (0 disables); rounds cycle through the
     /// perturbations of the tapped inputs (jitter, noise, scale, shuffle,
     /// resample, outliers)
@@ -69,7 +88,9 @@ struct Opts {
     /// State capacity in tokens; rounded down to the manifest's page unit
     #[arg(long, default_value_t = 4096)]
     capacity: u64,
-    #[arg(long, default_value_t = 512)]
+    /// Prefill chunk; 0 = drawn from the seed among the `tokens` max, 512,
+    /// a page and a random size
+    #[arg(long, default_value_t = 0)]
     chunk: u64,
     /// Replays for cut timing (minimum is reported)
     #[arg(long, default_value_t = 20)]
@@ -95,7 +116,7 @@ struct Opts {
     /// Skip the noise-floor re-runs
     #[arg(long)]
     no_noise: bool,
-    /// Seed for the fuzz generator
+    /// Seed for the workload and the fuzz generator
     #[arg(long, default_value_t = 0x5eed)]
     seed: u64,
     /// Report format on stdout
@@ -106,8 +127,113 @@ struct Opts {
     color: Color,
 }
 
-const DEFAULT_PROMPT: &str =
-    "The lighthouse keeper had not spoken to another person in eleven days when the boat appeared";
+/// The tap's workload, fully determined by `(seed, manifest, options)`:
+/// anyone can re-run it, and it does not depend on A's numerics (decode
+/// tokens are drawn, not A's argmax).
+struct Workload {
+    prefill: Vec<i64>,
+    chunk: usize,
+    decode: Vec<i64>,
+    vocab: u64,
+    how: &'static str,
+}
+
+fn sample_workload(o: &Opts, m: &Manifest, capacity: u64, page: u64, prompt: Option<Vec<i64>>) -> Result<Workload> {
+    let mut rng = Rng(o.seed ^ 0x776f_726b_6c6f_6164);
+    let tmax = m.symbols[TOKENS].max.max(1);
+    let vocab = m
+        .buffers
+        .get("token_ids")
+        .and_then(|b| b.domain.as_ref())
+        .map(|d| d.resolve(m, &env(1), capacity))
+        .transpose()?
+        .and_then(|r| r.hi)
+        .map(|hi| hi as u64 + 1)
+        .ok_or_else(|| anyhow::anyhow!("`token_ids` has no domain to take the vocabulary from"))?;
+    let steps = if o.decode_steps <= 1 { 1 } else { o.decode_steps / 2 + rng.below(o.decode_steps - o.decode_steps / 2 + 1) };
+    let hi = capacity.saturating_sub(steps).max(1);
+    let chunk = if o.chunk > 0 { o.chunk } else { [tmax, 512.min(tmax), page.min(tmax), 1 + rng.below(tmax)][rng.below(4) as usize] }.clamp(1, tmax);
+    let (n_pre, how) = match &prompt {
+        Some(p) => {
+            anyhow::ensure!(p.len() as u64 <= hi, "prompt is {} tokens; capacity {capacity} leaves room for {hi} before {steps} decode steps", p.len());
+            (p.len() as u64, "prompt")
+        }
+        None if o.prefill > 0 => (o.prefill.min(hi), "given"),
+        None if rng.below(2) == 0 => (1 + rng.below(hi), "uniform"),
+        None => {
+            // where kernels break: the last partial chunk, the first token
+            // of a new page, exactly the symbol max
+            let mut c: Vec<u64> = vec![1, page - 1, page, page + 1, 2 * page + 1, chunk - 1, chunk, chunk + 1, 2 * chunk + 1, 3 * chunk - 1, tmax, tmax + 1, hi];
+            c.retain(|&x| (1..=hi).contains(&x));
+            c.sort_unstable();
+            c.dedup();
+            (c[rng.below(c.len() as u64) as usize], "boundary")
+        }
+    };
+    let prefill = prompt.unwrap_or_else(|| (0..n_pre).map(|_| rng.below(vocab) as i64).collect());
+    let decode = (0..steps).map(|_| rng.below(vocab) as i64).collect();
+    Ok(Workload { prefill, chunk: chunk as usize, decode, vocab, how })
+}
+
+/// One end-to-end logits comparison: A (lockstep, uninjected) vs B (free
+/// run) on one row of a `logits*` buffer after one program run.
+struct LogitRow {
+    label: String,
+    cmp: Cmp,
+    max_abs: f64,
+    /// `max_abs` in ulps of the row's scale (A's max |logit|): the
+    /// granularity the bf16 row is stored at. Element-wise ulps are
+    /// meaningless here — a 1-ulp change of the hidden state moves every
+    /// logit by about the same absolute amount, which is thousands of
+    /// ulps for a logit near zero, and decides nothing.
+    scale_ulps: f64,
+    scale: f64,
+    argmax_a: usize,
+    argmax_b: usize,
+    /// A's top-1 − top-2: how far the argmax was from flipping on its own
+    margin_a: f64,
+    kl: f64,
+}
+
+impl LogitRow {
+    fn flip(&self) -> bool {
+        self.argmax_a != self.argmax_b
+    }
+    /// The delta could have flipped A's own argmax: not B's doing alone.
+    fn near_tie(&self) -> bool {
+        self.flip() && self.margin_a <= self.max_abs
+    }
+}
+
+/// Spacing of `dt` at magnitude `x`.
+fn ulp_at(dt: DType, x: f64) -> f64 {
+    let mant = match dt {
+        DType::Bf16 => 7,
+        DType::F16 => 10,
+        DType::F32 => 23,
+        DType::Fp8E4m3 => 3,
+        _ => 0,
+    };
+    let e = if x.abs() > 0.0 && x.is_finite() { x.abs().log2().floor() } else { 0.0 };
+    2f64.powf(e - mant as f64)
+}
+
+fn logit_row(label: String, dt: DType, a: &[u8], b: &[u8]) -> LogitRow {
+    let (va, vb) = (values::to_f64(dt, a), values::to_f64(dt, b));
+    let cmp = compare(dt, a, b);
+    let max_abs = va.iter().zip(&vb).map(|(x, y)| (x - y).abs()).filter(|d| d.is_finite()).fold(0.0, f64::max);
+    let argmax = |v: &[f64]| v.iter().enumerate().fold((0usize, f64::NEG_INFINITY), |m, (i, &x)| if x > m.1 { (i, x) } else { m });
+    let (argmax_a, top1) = argmax(&va);
+    let top2 = va.iter().enumerate().filter(|(i, _)| *i != argmax_a).map(|(_, &x)| x).fold(f64::NEG_INFINITY, f64::max);
+    let (argmax_b, _) = argmax(&vb);
+    let lse = |v: &[f64], m: f64| m + v.iter().map(|x| (x - m).exp()).sum::<f64>().ln();
+    let (ma_, mb_) = (top1, vb.iter().cloned().fold(f64::NEG_INFINITY, f64::max));
+    let (la, lb) = (lse(&va, ma_), lse(&vb, mb_));
+    let kl = va.iter().zip(&vb).map(|(x, y)| (x - la).exp() * ((x - la) - (y - lb))).sum::<f64>();
+    let scale = va.iter().filter(|x| x.is_finite()).fold(0.0f64, |m, x| m.max(x.abs()));
+    let scale_ulps = if max_abs == 0.0 { 0.0 } else if max_abs.is_finite() { max_abs / ulp_at(dt, scale) } else { f64::INFINITY };
+    LogitRow { label, cmp, max_abs, scale_ulps, scale, argmax_a, argmax_b, margin_a: top1 - top2, kl: if kl.is_finite() { kl } else { f64::INFINITY } }
+}
 
 // ---------------------------------------------------------------- static diff
 
@@ -492,6 +618,11 @@ struct Snap {
     /// back, and writes the post-image back when it is done. States are
     /// opaque; this is byte-level, no model knowledge.
     pre_states: BTreeMap<String, Vec<(usize, Vec<u8>)>>,
+    /// Which run's state image the replay starts from: 0 = zeros (prefill
+    /// chunk 0), 1 = A's state after prefill (decode step 0). The write-set
+    /// alone is not enough once later runs have moved bytes the cut reads
+    /// but did not change.
+    image: usize,
 }
 
 /// How B's write to a state compares with A's, on this cut: bytes of A's
@@ -553,8 +684,8 @@ fn tokens_of(tok: &tokenizers::Tokenizer, s: &str) -> Result<Vec<i64>> {
         .iter()
         .map(|&u| u as i64)
         .collect();
-    if ids.len() < 2 {
-        bail!("prompt too short: {s:?}");
+    if ids.is_empty() {
+        bail!("prompt is empty: {s:?}");
     }
     Ok(ids)
 }
@@ -1029,16 +1160,21 @@ fn main() -> Result<()> {
     let mut s = Sides { a: load_side(&ja, &o, &refs)?, b: load_side(&jb, &o, &refs)? };
     drop(blobs);
     let load_t = t.elapsed();
-    let tokenizer = tokenizers::Tokenizer::from_file(&o.tokenizer)
-        .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
-    let ids = tokens_of(&tokenizer, &o.prompt)?;
+    let prompt_ids = match &o.prompt {
+        Some(text) => {
+            let tokenizer = tokenizers::Tokenizer::from_file(&o.tokenizer).map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
+            Some(tokens_of(&tokenizer, text)?)
+        }
+        None => None,
+    };
+    let wl = sample_workload(&o, &ma, s.a.rt.capacity(), s.a.rt.page(), prompt_ids)?;
     let e1 = env(1);
     let cuts_of = |p: &str| -> Vec<Segment> {
         segments.get(p).map(|sg| sg.iter().filter(|s| s.kind == Kind::Changed).cloned().collect()).unwrap_or_default()
     };
 
     // ---- 2. tap: A and B in lockstep on the prompt, snapshot at every cut
-    let mut sec = Section::new("TAP", &format!("A and B lockstep · prompt {} tokens · at every cut B runs from A's inputs and A's state pre-image (cut-local) · then B free-runs the workload (end-to-end) · runtimes loaded in {:.1?}", ids.len(), load_t));
+    let mut sec = Section::new("TAP", &format!("workload seed {:#x}: prefill {} tokens ({}) in chunks of {} · {} decode steps · vocab {} · lockstep: each run B starts from A's state, each cut from A's inputs (cut-local) · runtimes loaded in {:.1?}", o.seed, wl.prefill.len(), wl.how, wl.chunk, wl.decode.len(), wl.vocab, load_t));
     let mut snaps: Vec<Snap> = Vec::new();
     let mut snap_state_bytes = 0usize;
     // program -> buffer -> [(cut label, cmp)]
@@ -1051,7 +1187,7 @@ fn main() -> Result<()> {
     s.b.reset();
     // Run one program in lockstep; at each cut snapshot A's frontier inputs
     // (from A, before the cut), A's outputs after, and compare B's outputs.
-    let mut lockstep = |s: &mut Sides, pname: &str, e: &BTreeMap<String, u64>, label_prefix: &str, keep: bool| -> Result<()> {
+    let mut lockstep = |s: &mut Sides, pname: &str, e: &BTreeMap<String, u64>, label_prefix: &str, keep: bool, image: usize| -> Result<()> {
         let Some(segs) = segments.get(pname) else {
             s.a.rt.run(pname, e)?;
             s.b.rt.run(pname, e)?;
@@ -1087,30 +1223,40 @@ fn main() -> Result<()> {
             // layers' history, and it moves between now and any replay).
             // B runs the cut from A's pre-image of that write-set, so what
             // B writes there is this cut's doing, not its own history's.
+            // Per-cut state work (whole-state reads) only on the snapshotted
+            // run; every other run B starts from a copy of A's state, which
+            // gives the same pre-image per cut (layers' write-sets are
+            // disjoint) at one copy per run instead of four reads per cut.
             let mut a_pre = BTreeMap::new();
-            for st in &touched {
-                a_pre.insert(st.clone(), s.a.rt.read_state(st)?);
+            if keep {
+                for st in &touched {
+                    a_pre.insert(st.clone(), s.a.rt.read_state(st)?);
+                }
             }
             s.a.rt.run_range(pname, e, seg.a.0, seg.a.1)?;
             let mut a_post = BTreeMap::new();
             let mut pre_states = BTreeMap::new();
-            for st in &touched {
-                let post = s.a.rt.read_state(st)?;
-                let runs = diff_runs(&a_pre[st], &post);
-                for (off, bytes) in &runs {
-                    s.b.rt.write_state_at(st, *off, bytes)?;
+            if keep {
+                for st in &touched {
+                    let post = s.a.rt.read_state(st)?;
+                    let runs = diff_runs(&a_pre[st], &post);
+                    for (off, bytes) in &runs {
+                        s.b.rt.write_state_at(st, *off, bytes)?;
+                    }
+                    pre_states.insert(st.clone(), runs);
+                    a_post.insert(st.clone(), post);
                 }
-                pre_states.insert(st.clone(), runs);
-                a_post.insert(st.clone(), post);
             }
             let mut b_pre = BTreeMap::new();
-            for st in &touched {
-                b_pre.insert(st.clone(), s.b.rt.read_state(st)?);
+            if keep {
+                for st in &touched {
+                    b_pre.insert(st.clone(), s.b.rt.read_state(st)?);
+                }
             }
             s.b.rt.run_range(pname, e, seg.b.0, seg.b.1)?;
             let (bufs, _, one_sided) = compare_written(&s.a, &s.b, &aa, &ab, e, false)?;
             let mut states = BTreeMap::new();
-            for st in &touched {
+            for st in touched.iter().filter(|_| keep) {
                 let b_post = s.b.rt.read_state(st)?;
                 let ap = &a_post[st];
                 let runs = &pre_states[st];
@@ -1147,44 +1293,94 @@ fn main() -> Result<()> {
                     ref_out.insert(n.clone(), s.a.rt.read_buffer_prefix(n, live_bytes(&ma, n, e))?);
                 }
                 snap_state_bytes += pre_states.values().flatten().map(|(_, b)| b.len()).sum::<usize>();
-                snaps.push(Snap { program: pname.into(), seg: seg.clone(), env: e.clone(), inputs, ref_out, ref_states: a_post, pre_states });
+                snaps.push(Snap { program: pname.into(), seg: seg.clone(), env: e.clone(), inputs, ref_out, ref_states: a_post, pre_states, image });
             }
         }
         Ok(())
     };
-    let pre = &ids[..ids.len() - 1];
-    let chunk = o.chunk.min(ma.symbols[TOKENS].max).max(1) as usize;
+    let shared_states: Vec<String> = ma.states.keys().filter(|n| mb.states.contains_key(*n)).cloned().collect();
+    // B starts every program run from A's state: with per-layer write-sets
+    // this is the per-cut pre-image for every cut of the run.
+    let sync_b = |s: &mut Sides| -> Result<()> {
+        for name in &shared_states {
+            let img = s.a.rt.read_state(name)?;
+            s.b.rt.write_state_at(name, 0, &img)?;
+        }
+        Ok(())
+    };
+    // `logits*` buffers a program writes: the end-to-end oracle.
+    let logits_of = |prog: &str| -> Vec<String> {
+        access(&ma, prog, 0, ma.programs[prog].dispatches.len()).writes.into_iter().filter(|n| n.starts_with("logits") && mb.buffers.contains_key(n)).collect()
+    };
+    // (run label, buffer, env, bytes)
+    let read_logits = |c: &Caller, prog: &str, e: &BTreeMap<String, u64>, label: &str| -> Result<Vec<(String, String, BTreeMap<String, u64>, Vec<u8>)>> {
+        logits_of(prog).into_iter().map(|n| Ok((label.to_string(), n.clone(), e.clone(), c.rt.read_buffer_prefix(&n, live_bytes(&ma, &n, e))?))).collect()
+    };
+    let pre = &wl.prefill;
+    let chunk = wl.chunk;
+    let mut a_logits = Vec::new();
     let mut i = 0;
     while i < pre.len() {
         let c = (pre.len() - i).min(chunk);
         let e = s.a.stage_prefill(&pre[i..i + c])?;
         s.b.stage_prefill(&pre[i..i + c])?;
-        lockstep(&mut s, "prefill", &e, &format!("chunk {n_chunks} "), n_chunks == 0)?;
+        sync_b(&mut s)?;
+        lockstep(&mut s, "prefill", &e, &format!("chunk {n_chunks} "), n_chunks == 0, 0)?;
+        a_logits.extend(read_logits(&s.a, "prefill", &e, &format!("prefill chunk {n_chunks}"))?);
         s.a.advance(c as u64);
         s.b.advance(c as u64);
         i += c;
         n_chunks += 1;
     }
-    s.a.stage_decode(*ids.last().unwrap())?;
-    s.b.stage_decode(*ids.last().unwrap())?;
-    lockstep(&mut s, "decode", &e1, "", true)?;
+    let n_steps = wl.decode.len();
+    // A's state after prefill: the image every decode-step-0 replay starts from.
+    let s0: BTreeMap<String, Vec<u8>> = shared_states.iter().map(|n| Ok((n.clone(), s.a.rt.read_state(n)?))).collect::<Result<_>>()?;
+    for (k, &tok) in wl.decode.iter().enumerate() {
+        s.a.stage_decode(tok)?;
+        s.b.stage_decode(tok)?;
+        sync_b(&mut s)?;
+        lockstep(&mut s, "decode", &e1, &format!("step {k} "), k == 0, 1)?;
+        a_logits.extend(read_logits(&s.a, "decode", &e1, &format!("step {k}"))?);
+        s.a.advance(1);
+        s.b.advance(1);
+    }
     // B free-runs the same workload from zero state, nothing injected: what
     // a caller would get. A's state is untouched by the lockstep (only B
     // received writes), so A is already the end-to-end reference.
     let t_free = Instant::now();
     s.b.rt.zero_states()?;
     s.b.reset();
+    let mut b_logits = Vec::new();
     let mut i = 0;
+    let mut nc = 0;
     while i < pre.len() {
         let c = (pre.len() - i).min(chunk);
         let e = s.b.stage_prefill(&pre[i..i + c])?;
         s.b.rt.run("prefill", &e)?;
+        b_logits.extend(read_logits(&s.b, "prefill", &e, &format!("prefill chunk {nc}"))?);
         s.b.advance(c as u64);
         i += c;
+        nc += 1;
     }
-    s.b.stage_decode(*ids.last().unwrap())?;
-    s.b.rt.run("decode", &e1)?;
+    for (k, &tok) in wl.decode.iter().enumerate() {
+        s.b.stage_decode(tok)?;
+        s.b.rt.run("decode", &e1)?;
+        b_logits.extend(read_logits(&s.b, "decode", &e1, &format!("step {k}"))?);
+        s.b.advance(1);
+    }
     let free_t = t_free.elapsed();
+    // ---- end-to-end logits, row by row
+    let mut logit_rows: Vec<LogitRow> = Vec::new();
+    for ((label, name, e, a), (_, _, _, b)) in a_logits.iter().zip(&b_logits) {
+        let dt = ma.buffers[name].dtype;
+        let row = row_elems(&ma, name, e) * dt.bytes() as usize;
+        let rows = if row > 0 { a.len() / row } else { 0 };
+        for r in 0..rows.max(1) {
+            let (lo, hi) = if rows > 1 { (r * row, (r + 1) * row) } else { (0, a.len()) };
+            let lbl = if a_logits.iter().filter(|x| x.0 == *label).count() > 1 || rows > 1 { format!("{label} {name}{}", if rows > 1 { format!("[{r}]") } else { String::new() }) } else { label.clone() };
+            logit_rows.push(logit_row(lbl, dt, &a[lo..hi], &b[lo..hi]));
+        }
+    }
     let mut local_identical = true;
     let mut local_bit = true;
     let mut rows = Vec::new();
@@ -1194,7 +1390,13 @@ fn main() -> Result<()> {
         if n_cuts == 0 || undriven.iter().any(|u| u == pname) {
             continue;
         }
-        let count = if pname == "prefill" && n_chunks > 1 { format!("{n_cuts} cuts × {n_chunks} chunks") } else { format!("{n_cuts} cuts") };
+        let count = if pname == "prefill" && n_chunks > 1 {
+            format!("{n_cuts} cuts × {n_chunks} chunks")
+        } else if pname == "decode" && n_steps > 1 {
+            format!("{n_cuts} cuts × {n_steps} steps")
+        } else {
+            format!("{n_cuts} cuts")
+        };
         let mut first = true;
         if let Some(bufs) = local_res.get(pname) {
             for (buf, res) in bufs {
@@ -1220,7 +1422,7 @@ fn main() -> Result<()> {
                     }
                     Cell::bad(t)
                 };
-                rows.push(row![if first { pname.to_string() } else { String::new() }, count.clone(), format!("state {st}"), txt]);
+                rows.push(row![if first { pname.to_string() } else { String::new() }, format!("{n_cuts} cuts (first run)"), format!("state {st}"), txt]);
                 first = false;
             }
         }
@@ -1252,7 +1454,7 @@ fn main() -> Result<()> {
         e2e_states.insert(name.clone(), json!({"differ": d, "bytes": a.len()}));
     }
     sec.table(rows);
-    sec.note(Cell::dim(format!("end-to-end: B re-ran the whole workload from zero state with nothing injected ({:.1?}); the cut rows above are B on A's inputs", free_t)));
+    sec.note(Cell::dim(format!("end-to-end: B re-ran the whole workload from zero state with nothing injected ({:.1?}); the cut rows above are B on A's inputs and A's state", free_t)));
     let snap_bytes: usize = snaps.iter().map(|sn| sn.inputs.iter().map(|(_, b)| b.len()).sum::<usize>() + sn.ref_out.values().map(|b| b.len()).sum::<usize>()).sum();
     sec.note(Cell::dim(format!("{} cuts snapshotted ({} of frontier inputs + reference outputs)", snaps.len(), kb(snap_bytes))));
     if snap_state_bytes > 0 {
@@ -1267,6 +1469,37 @@ fn main() -> Result<()> {
     r.section(&sec);
     report["local"] = json!({"value_identical": local_identical, "bit_identical": local_bit, "cuts": local_json,
         "end_to_end": {"outputs": out_cmp, "states": e2e_states, "outputs_identical": e2e_outputs_identical}});
+
+    // ---- 2b. logits: the end-to-end oracle
+    let have_logits = !logit_rows.is_empty();
+    let logits_bit = have_logits && logit_rows.iter().all(|r| r.cmp.identical());
+    let logits_max_ulp = logit_rows.iter().map(|r| r.scale_ulps).fold(0.0, f64::max);
+    let n_flips = logit_rows.iter().filter(|r| r.flip()).count();
+    let n_near = logit_rows.iter().filter(|r| r.near_tie()).count();
+    let wide_flip = logit_rows.iter().find(|r| r.flip() && !r.near_tie());
+    let logits_within = have_logits && logits_max_ulp <= o.logit_ulp as f64 && wide_flip.is_none();
+    {
+        let mut sec = Section::new("LOGITS", &format!("end-to-end oracle · A (lockstep, nothing injected into A) vs B (free run) · {} rows over {} runs", logit_rows.len(), a_logits.len()));
+        let mut rows = Vec::new();
+        if !have_logits {
+            rows.push(row![Cell::warn("no logits"), "no driven program writes a `logits*` buffer — the verdict falls back to cut identity"]);
+        } else {
+            let worst = logit_rows.iter().max_by(|x, y| x.scale_ulps.total_cmp(&y.scale_ulps).then(x.cmp.n_diff.cmp(&y.cmp.n_diff))).unwrap();
+            let worst_kl = logit_rows.iter().max_by(|x, y| x.kl.total_cmp(&y.kl)).unwrap();
+            rows.push(row!["argmax", if n_flips == 0 { Cell::good(format!("agrees on all {} rows", logit_rows.len())) } else if wide_flip.is_none() { Cell::warn(format!("{n_flips} flip{} on {} rows, all near-ties (A's own margin ≤ Δ)", if n_flips == 1 { "" } else { "s" }, logit_rows.len())) } else { Cell::bad(format!("{} wide-margin flip{} ({n_near} near-tie) on {} rows", n_flips - n_near, if n_flips - n_near == 1 { "" } else { "s" }, logit_rows.len())) }]);
+            rows.push(row!["max Δ", if logits_bit { Cell::good("bit-identical everywhere") } else { Cell::from(format!("{:.4} = {:.2} ulp at the row's scale (max |logit| {:.1}) at {} · {}/{} elements differ", worst.max_abs, worst.scale_ulps, worst.scale, worst.label, worst.cmp.n_diff, worst.cmp.n)) }]);
+            rows.push(row!["KL(A‖B)", format!("max {:.3e} at {}", worst_kl.kl, worst_kl.label)]);
+            for r in logit_rows.iter().filter(|r| r.flip()) {
+                let t = format!("A {} → B {} · A's margin {:.4} · Δ max {:.4}", r.argmax_a, r.argmax_b, r.margin_a, r.max_abs);
+                rows.push(row![r.label.clone(), if r.near_tie() { Cell::warn(format!("near-tie · {t}")) } else { Cell::bad(format!("✗ {t}")) }]);
+            }
+        }
+        sec.table(rows);
+        r.section(&sec);
+    }
+    report["logits"] = json!({
+        "bit_identical": logits_bit, "max_ulp": logits_max_ulp, "flips": n_flips, "near_ties": n_near, "within_limit": logits_within, "limit_ulp": o.logit_ulp,
+        "rows": logit_rows.iter().map(|r| json!({"label": r.label, "cmp": r.cmp.to_json(), "max_abs": r.max_abs, "scale_ulps": r.scale_ulps, "scale": r.scale, "argmax_a": r.argmax_a, "argmax_b": r.argmax_b, "margin_a": r.margin_a, "kl": r.kl, "near_tie": r.near_tie()})).collect::<Vec<_>>()});
 
     // Replay one snapshot's cut on a side from its inputs; returns the
     // written buffers (live prefix) and states.
@@ -1299,16 +1532,24 @@ fn main() -> Result<()> {
         out.iter().map(|(n, b)| (n.clone(), compare(m.buffers[n].dtype, &sn.ref_out[n], b))).collect()
     };
 
-    // From here on B's state is a byte copy of A's: every replay restores
-    // the same pre-image on both sides, so a full-state A/B comparison after
-    // a replay attributes to that replay alone.
-    {
-        let names: BTreeSet<&String> = snaps.iter().flat_map(|sn| sn.ref_states.keys()).collect();
-        for name in names {
-            let img = s.a.rt.read_state(name)?;
-            s.b.rt.write_state_at(name, 0, &img)?;
+    // Replays start from the image of the state before the snapshotted run
+    // — zeros for prefill chunk 0, A's post-prefill state for decode step 0
+    // — on both sides. A cut reads its own layer's slice, which the run's
+    // earlier cuts do not touch, so that image is every cut's pre-state;
+    // the per-cut pre-image then only undoes the previous replay of the
+    // same cut. Re-imaged whenever the replay sequence switches runs.
+    let image = |s: &mut Sides, img: usize| -> Result<()> {
+        for c in [&mut s.a, &mut s.b] {
+            if img == 0 {
+                c.rt.zero_states()?;
+            } else {
+                for (n, b) in &s0 {
+                    c.rt.write_state_at(n, 0, b)?;
+                }
+            }
         }
-    }
+        Ok(())
+    };
 
     // ---- 3. noise floor: A's cut re-run from its own snapshot
     let mut noise_res: BTreeMap<String, BTreeMap<String, Vec<(String, Cmp)>>> = BTreeMap::new();
@@ -1317,7 +1558,12 @@ fn main() -> Result<()> {
     if !o.no_noise {
         let mut sec = Section::new("NOISE FLOOR", &format!("A re-run from each snapshot (inout state restored) vs A's own output · {} cuts", snaps.len()));
         let mut state_noise = Vec::new();
+        let mut cur = None;
         for sn in &snaps {
+            if cur != Some(sn.image) {
+                image(&mut s, sn.image)?;
+                cur = Some(sn.image);
+            }
             let (out, st) = replay(&mut s.a, &ma, sn, false, &sn.inputs)?;
             for (n, c) in cmp_out(&ma, sn, &out) {
                 noise_clean &= c.identical();
@@ -1370,7 +1616,12 @@ fn main() -> Result<()> {
             let mut worst: BTreeMap<String, Cmp> = BTreeMap::new();
             let mut violations: BTreeMap<String, Vec<String>> = BTreeMap::new();
             let mut state_diffs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            let mut cur = None;
             for sn in &snaps {
+                if cur != Some(sn.image) {
+                    image(&mut s, sn.image)?;
+                    cur = Some(sn.image);
+                }
                 let mut inputs = Vec::new();
                 for (name, tapped) in &sn.inputs {
                     let decl = &ma.buffers[name];
@@ -1399,7 +1650,9 @@ fn main() -> Result<()> {
                     }
                 };
                 for (name, b) in &st_b {
-                    let d = st_a[name].iter().zip(b).filter(|(p, q)| p != q).count();
+                    // on the cut's write-set, like the tap
+                    let a = &st_a[name];
+                    let d: usize = sn.pre_states[name].iter().map(|(off, r)| (0..r.len()).filter(|i| a[off + i] != b[off + i]).count()).sum();
                     if d > 0 {
                         state_diffs.entry(sn.program.clone()).or_default().push(format!("state {name}: {d} bytes at {}", seg_label(&sn.seg)));
                     }
@@ -1512,10 +1765,10 @@ fn main() -> Result<()> {
             rows.push(row!["", format!("Σ {n_cuts} cuts (the swap)"), us(st[0].1), us(st[1].1), "", delta(st[0].1, st[1].1)]);
         };
         let n_cuts = |p: &str| cuts_of(p).len();
-        // decode at the tapped position
+        // decode at the position after the workload
         if n_cuts("decode") > 0 && !undriven.iter().any(|u| u == "decode") {
-            s.a.stage_decode(*ids.last().unwrap())?;
-            s.b.stage_decode(*ids.last().unwrap())?;
+            s.a.stage_decode(*wl.decode.last().unwrap())?;
+            s.b.stage_decode(*wl.decode.last().unwrap())?;
             let st = step(&mut s, "decode", &e1, o.iters, true)?;
             let mut graph = None;
             if !o.no_graph_step {
@@ -1612,24 +1865,31 @@ fn main() -> Result<()> {
     });
 
     // ---- verdict
+    let n_rows = logit_rows.len();
     let (code, verdict) = if !fuzz_ok {
-        (1, "B violates a declared domain (or crashed) under fuzz")
+        (1, "B violates a declared domain (or crashed) under fuzz".to_string())
+    } else if let (Some(f), true) = (wide_flip, noise_clean) {
+        (1, format!("B changes the argmax end-to-end at {}: A {} → B {} with A's margin {:.4} above the logit Δ {:.4}", f.label, f.argmax_a, f.argmax_b, f.margin_a, f.max_abs))
     } else if !undriven.is_empty() {
-        (2, "a changed program was not tapped — the workload driver can't stage it")
+        (2, "a changed program was not tapped — the workload driver can't stage it".to_string())
     } else if local_bit && fuzz_bit {
-        (0, "bit-identical at every cut, real and perturbed inputs")
+        (0, "bit-identical at every cut, real and perturbed inputs".to_string())
     } else if local_identical && fuzz_identical {
-        (0, "value-identical at every cut (only signed zeros differ)")
+        (0, "value-identical at every cut (only signed zeros differ)".to_string())
+    } else if logits_bit {
+        (0, format!("cuts differ, but the end-to-end logits are bit-identical on all {n_rows} rows"))
+    } else if logits_within {
+        (0, format!("logit evidence: end-to-end logits move ≤ {logits_max_ulp:.2} ulp at their scale (limit {}) on {n_rows} rows, argmax agrees{}", o.logit_ulp, if n_near > 0 { format!(" except {n_near} near-tie{}", if n_near == 1 { "" } else { "s" }) } else { String::new() }))
     } else if within_noise && fuzz_identical {
-        (0, "differences at every cut lie within A's own noise floor")
-    } else if !e2e_outputs_identical {
-        (2, "cuts differ beyond bit/value identity, and the outputs differ end-to-end on this prompt — not adjudicated here")
+        (0, "differences at every cut lie within A's own noise floor".to_string())
+    } else if have_logits {
+        (2, format!("cuts differ; end-to-end logits move up to {logits_max_ulp:.2} ulp at their scale on {n_rows} rows (limit {}), {n_flips} argmax flip{} ({n_near} near-tie){}", o.logit_ulp, if n_flips == 1 { "" } else { "s" }, if !noise_clean { " — A itself is not deterministic at some cuts" } else { "" }))
     } else {
-        (2, "cuts differ beyond bit/value identity; outputs identical end-to-end on this prompt — no oracle for the rest")
+        (2, "cuts differ beyond bit/value identity and no driven program writes logits — no oracle".to_string())
     };
-    r.verdict(code, verdict, t_start.elapsed(), o.out.as_deref());
+    r.verdict(code, &verdict, t_start.elapsed(), o.out.as_deref());
     report["verdict"] = json!({"code": code, "pass": code == 0, "summary": verdict,
-        "noise_clean": noise_clean, "within_noise": within_noise, "end_to_end_outputs_identical": e2e_outputs_identical, "end_to_end_outputs_differ": e2e_differs, "local_value_identical": local_identical, "local_bit_identical": local_bit,
+        "noise_clean": noise_clean, "within_noise": within_noise, "end_to_end_outputs_identical": e2e_outputs_identical, "end_to_end_outputs_differ": e2e_differs, "logits_bit_identical": logits_bit, "logits_within_limit": logits_within, "local_value_identical": local_identical, "local_bit_identical": local_bit,
         "fuzz_ok": fuzz_ok, "fuzz_value_identical": fuzz_identical, "fuzz_bit_identical": fuzz_bit});
     if let Some(p) = &o.out {
         std::fs::write(p, serde_json::to_string_pretty(&report)?)?;

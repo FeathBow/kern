@@ -45,6 +45,9 @@ pub struct Runtime {
     /// Token capacity every state was provisioned for (`index_into` a
     /// state resolves against it).
     capacity: u64,
+    /// Page unit in tokens: lcm of the `unit` of every domain that indexes
+    /// a state; `capacity` is a multiple of it.
+    page: u64,
     /// Name-keyed because names are the caller API (`write_input`,
     /// `read_output`, weight binding); execution never looks these up —
     /// their device pointers are baked into `programs`.
@@ -209,6 +212,7 @@ impl Runtime {
             stream,
             blt,
             capacity: state_capacity_tokens,
+            page,
             buffers,
             states,
             staging,
@@ -356,6 +360,11 @@ impl Runtime {
 
     pub fn capacity(&self) -> u64 {
         self.capacity
+    }
+
+    /// Page unit in tokens (1 if no state is paged).
+    pub fn page(&self) -> u64 {
+        self.page
     }
 
     pub fn dispatch_count(&self, program: &str) -> Result<usize> {
