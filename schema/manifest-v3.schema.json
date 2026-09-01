@@ -4,11 +4,14 @@
       "anyOf": [
         {
           "additionalProperties": false,
+          "description": "A buffer plus an optional byte offset into it, e.g. the v slice of a fused qkv buffer.",
           "properties": {
             "buf": {
+              "description": "Buffer name, e.g. `\"qkv\"`.",
               "type": "string"
             },
             "offset": {
+              "description": "Byte offset added to the base pointer (default `0`), e.g. `4096`.",
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
@@ -21,13 +24,16 @@
         },
         {
           "additionalProperties": false,
+          "description": "A state plus an optional byte offset into it, e.g. one layer's region of a KV cache.",
           "properties": {
             "offset": {
+              "description": "Byte offset added to the base pointer (default `0`), e.g. `65536`.",
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
             },
             "state": {
+              "description": "State name, e.g. `\"kv\"`.",
               "type": "string"
             }
           },
@@ -38,6 +44,7 @@
         },
         {
           "additionalProperties": false,
+          "description": "The current value of a var, e.g. `{\"var\": \"tokens\"}`.",
           "properties": {
             "var": {
               "type": "string"
@@ -50,7 +57,7 @@
         },
         {
           "additionalProperties": false,
-          "description": "Var-derived integer scalar, e.g. `{\"expr\": {\"mul\": [\"tokens\", 32]}}`.\nSame closed expression set as launch grids; f32 params cannot bind one.",
+          "description": "The value of a var expression, e.g. `{\"expr\": {\"mul\": [\"tokens\", 32]}}`.",
           "properties": {
             "expr": {
               "$ref": "#/$defs/Expr"
@@ -63,6 +70,7 @@
         },
         {
           "additionalProperties": false,
+          "description": "A literal `i32`.",
           "properties": {
             "i32": {
               "format": "int32",
@@ -76,6 +84,7 @@
         },
         {
           "additionalProperties": false,
+          "description": "A literal `i64`.",
           "properties": {
             "i64": {
               "format": "int64",
@@ -89,6 +98,7 @@
         },
         {
           "additionalProperties": false,
+          "description": "A literal `f32`.",
           "properties": {
             "f32": {
               "format": "float",
@@ -102,6 +112,7 @@
         },
         {
           "additionalProperties": false,
+          "description": "A literal `u8`.",
           "properties": {
             "u8": {
               "format": "uint8",
@@ -116,7 +127,7 @@
           "type": "object"
         }
       ],
-      "description": "A call argument. Explicitly tagged so a buffer name can never be\nmistaken for a var name: `{\"buf\": \"hidden\"}`, `{\"state\": \"kv\"}`,\n`{\"var\": \"tokens\"}`, `{\"i32\": 2560}`, `{\"i64\": 4096}`, `{\"f32\": 1e-6}`.\n\nBuffer and state args carry an optional byte `offset` (default 0): the\nkernel receives base + offset. This is how a provider addresses a view\ninside a fused buffer (q/k/v slices of a merged qkv projection) or a\nper-layer region inside an opaque state — the offset is a literal from\nthe provider's own layout arithmetic, the runtime just adds it."
+      "description": "A call argument, e.g. `{\"buf\": \"hidden\"}`, `{\"state\": \"kv\", \"offset\": 65536}`, `{\"var\": \"tokens\"}`, `{\"i32\": 2560}`."
     },
     "Bound": {
       "anyOf": [
@@ -132,10 +143,11 @@
           "$ref": "#/$defs/Expr"
         }
       ],
-      "description": "A domain bound: a literal integer, a literal float, or a var expression\n(evaluated at the caller's var values)."
+      "description": "A domain bound: an integer, a float, or a var expression, e.g. `0`, `1e-6`, `\"tokens\"`."
     },
     "Buffer": {
       "additionalProperties": false,
+      "description": "A typed tensor, e.g. `{\"dtype\": \"bf16\", \"shape\": [\"tokens\", 2560], \"kind\": \"workspace\"}`.",
       "properties": {
         "domain": {
           "anyOf": [
@@ -146,15 +158,18 @@
               "type": "null"
             }
           ],
-          "description": "Optional prior on the buffer's *contents*. Never required: a manifest\nwithout domains runs exactly the same. With one, the runtime rejects\nout-of-domain input writes, and attestation can synthesize valid\nvalues for the buffer (and check produced values against it)."
+          "description": "Optional prior on the contents; the runtime rejects out-of-domain input writes and `kern test` synthesizes values from it."
         },
         "dtype": {
-          "$ref": "#/$defs/DType"
+          "$ref": "#/$defs/DType",
+          "description": "Element type, e.g. `\"bf16\"`."
         },
         "kind": {
-          "$ref": "#/$defs/BufferKind"
+          "$ref": "#/$defs/BufferKind",
+          "description": "Who provides the buffer and how long its contents live."
         },
         "shape": {
+          "description": "Extents, constants or var names, e.g. `[\"tokens\", 2560]`.",
           "items": {
             "$ref": "#/$defs/Dim"
           },
@@ -173,48 +188,51 @@
       "oneOf": [
         {
           "const": "input",
-          "description": "Written by the runtime before program execution.",
+          "description": "Written by the runtime before each run, e.g. `token_ids`.",
           "type": "string"
         },
         {
           "const": "output",
-          "description": "Read back by the runtime after program execution.",
+          "description": "Read back by the runtime after each run, e.g. `next_token`.",
           "type": "string"
         },
         {
           "const": "weight",
-          "description": "Bound by name from the weight artifact at load time.",
+          "description": "Bound by name from the weights file at load time, e.g. `model.embed_tokens.weight`.",
           "type": "string"
         },
         {
           "const": "workspace",
-          "description": "Planned and owned by the runtime; contents dead across program runs.",
+          "description": "Runtime-owned scratch, dead between runs, e.g. `hidden`.",
           "type": "string"
         },
         {
           "const": "carry",
-          "description": "Written by one program, read by another; contents persist across\nprogram runs. Which program runs first is the caller's contract —\nthe verifier only requires that *some* program writes it.",
+          "description": "Written by one program and read by another, kept between runs, e.g. the `fc_out` hidden states a draft reads.",
           "type": "string"
         }
       ]
     },
     "Call": {
       "additionalProperties": false,
-      "description": "A call site: which op, with which args. No geometry — grid/block belong\nto the op's implementation. `label` is for humans and diagnostics only.",
+      "description": "One op call, e.g. `{\"label\": \"l0.attn\", \"op\": \"attn\", \"args\": [{\"buf\": \"q\"}, {\"state\": \"kv\"}, ...]}`.",
       "properties": {
         "args": {
+          "description": "One argument per interface param, in order.",
           "items": {
             "$ref": "#/$defs/Arg"
           },
           "type": "array"
         },
         "label": {
+          "description": "Human-readable name for diagnostics, e.g. `\"l0.attn\"`.",
           "type": [
             "string",
             "null"
           ]
         },
         "op": {
+          "description": "Name of the op called, e.g. `\"attn\"`.",
           "type": "string"
         }
       },
@@ -225,7 +243,7 @@
       "type": "object"
     },
     "DType": {
-      "description": "Element type of a buffer or scratch declaration.",
+      "description": "Element type of a buffer or scratch, e.g. `\"bf16\"`.",
       "enum": [
         "bf16",
         "f16",
@@ -249,13 +267,14 @@
           "type": "string"
         }
       ],
-      "description": "One shape extent: a constant or the name of a var."
+      "description": "One shape extent: a constant or a var name, e.g. `2560` or `\"tokens\"`."
     },
     "Domain": {
       "additionalProperties": false,
-      "description": "A prior on buffer contents, declared by whoever wires the model — the\nonly party that knows a `buffer<i32>` is a page table and not an\nactivation. It is unary (one buffer, no relations between buffers) and\nsays nothing about kernel behaviour: a kernel that misbehaves on\nin-domain input is a kernel bug the harness can now provoke.\n\nTwo forms, mutually exclusive:\n- `min`/`max`: inclusive bounds, integers, floats or a var expression;\n  either may be omitted. Float buffers without a domain are implicitly\n  \"any finite value\".\n- `index_into`: every element indexes a row of the named buffer or a\n  token slot of the named state, `stride` rows/tokens per index (a paged\n  KV block table indexes 16 tokens at a time).\n\n`monotone` additionally requires a non-decreasing sequence (prefix sums\nsuch as `cu_seqlens`).",
+      "description": "A prior on a buffer's contents: bounds (`{\"min\": 0, \"max\": \"tokens\"}`) or an index into a buffer/state (`{\"index_into\": \"kv\", \"stride\": 16}`).",
       "properties": {
         "index_into": {
+          "description": "Buffer or state whose rows / token slots the elements index, e.g. `\"model.embed_tokens.weight\"`.",
           "type": [
             "string",
             "null"
@@ -269,7 +288,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Inclusive upper bound, a literal or a var expression, e.g. `\"tokens\"`."
         },
         "min": {
           "anyOf": [
@@ -279,12 +299,15 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Inclusive lower bound, e.g. `0`."
         },
         "monotone": {
+          "description": "Require a non-decreasing sequence, e.g. `cu_seqlens`.",
           "type": "boolean"
         },
         "stride": {
+          "description": "Rows or token slots per index (default `1`), e.g. `16` for a paged KV block table.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -295,15 +318,17 @@
     "Expr": {
       "anyOf": [
         {
+          "description": "A constant, e.g. `64`.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
         },
         {
-          "description": "A var by name — the same bare-string form a shape uses.",
+          "description": "A var by name, e.g. `\"tokens\"`.",
           "type": "string"
         },
         {
+          "description": "`ceil(e / c)`, e.g. `{\"ceil_div\": [\"tokens\", 128]}`.",
           "properties": {
             "ceil_div": {
               "maxItems": 2,
@@ -327,6 +352,7 @@
           "type": "object"
         },
         {
+          "description": "`e * c`, e.g. `{\"mul\": [\"tokens\", 32]}`.",
           "properties": {
             "mul": {
               "maxItems": 2,
@@ -350,13 +376,14 @@
           "type": "object"
         }
       ],
-      "description": "The closed scalar-expression set: a constant, a var name (`\"tokens\"`),\n`{\"ceil_div\": [e, c]}`, `{\"mul\": [e, c]}`. This is deliberately not a\nlanguage: grid geometry, dynamic shared memory and var-derived scalar\nargs are the only runtime-dependent numbers a provider may compute, and\nonly with these forms."
+      "description": "A scalar expression: a constant, a var name, `{\"ceil_div\": [e, c]}` or `{\"mul\": [e, c]}`, e.g. `{\"ceil_div\": [\"tokens\", 128]}`."
     },
     "ExternLaunch": {
       "additionalProperties": false,
-      "description": "A runtime built-in: `entry` is `extern:<name>` (`cublaslt_bf16_tn`,\n`cublaslt_bf16_tn_acc`). No module, no geometry — the runtime owns both.",
+      "description": "A runtime built-in launch, e.g. `{\"entry\": \"extern:cublaslt_bf16_tn\"}`.",
       "properties": {
         "args": {
+          "description": "Where each launch param comes from (default: the op's params in order).",
           "items": {
             "$ref": "#/$defs/LaunchArg"
           },
@@ -366,10 +393,11 @@
           ]
         },
         "entry": {
-          "description": "`extern:<name>`.",
+          "description": "`extern:<name>`: `cublaslt_bf16_tn` (C = A·Wᵀ) or `cublaslt_bf16_tn_acc` (C += A·Wᵀ).",
           "type": "string"
         },
         "params": {
+          "description": "This launch's own ABI when it differs from the op's params.",
           "items": {
             "$ref": "#/$defs/ParamType"
           },
@@ -386,9 +414,10 @@
     },
     "Impl": {
       "additionalProperties": false,
-      "description": "An implementation is a micro-program: private scratch buffers (sized by\nvar expressions, provisioned by the runtime, dead outside one call) and\none or more launches. Launch geometry lives here, not at the call site —\nit belongs to the implementation.",
+      "description": "An op implementation: private scratch buffers and one or more launches in order.",
       "properties": {
         "launches": {
+          "description": "Launches in execution order.",
           "items": {
             "$ref": "#/$defs/Launch"
           },
@@ -398,6 +427,7 @@
           "additionalProperties": {
             "$ref": "#/$defs/Scratch"
           },
+          "description": "Implementation-private buffers, e.g. `{\"pmax\": {\"dtype\": \"f32\", \"shape\": [1, 64]}}`.",
           "type": "object"
         }
       },
@@ -408,10 +438,10 @@
     },
     "KernelLaunch": {
       "additionalProperties": false,
-      "description": "A device entry point. Every kernel launch names its module: the manifest\nis the complete dependency list, and the runtime loads nothing it does\nnot name.",
+      "description": "A device kernel launch, e.g. `{\"module\": \"argmax\", \"entry\": \"kern_argmax_partial_bf16\", \"block\": [1024, 1, 1], \"grid\": [1, 64, 1]}`.",
       "properties": {
         "args": {
-          "description": "Wiring: where each launch param comes from — a forwarded interface\nparam, a scratch buffer, or an implementation-private literal.\nAbsent: `[{\"param\": 0}, {\"param\": 1}, ...]` over the op's params.",
+          "description": "Where each launch param comes from (default: the op's params in order), e.g. `[{\"param\": 0}, {\"scratch\": \"pmax\"}, {\"i32\": 64}]`.",
           "items": {
             "$ref": "#/$defs/LaunchArg"
           },
@@ -421,6 +451,7 @@
           ]
         },
         "block": {
+          "description": "Threads per block, e.g. `[1024, 1, 1]`.",
           "items": {
             "format": "uint32",
             "minimum": 0,
@@ -431,10 +462,11 @@
           "type": "array"
         },
         "entry": {
-          "description": "Entry point (CUDA symbol) in the module. Same-named instances in one\nmodule (a Triton kernel's constexpr variants) are told apart by\n`params`.",
+          "description": "Kernel symbol in the module, e.g. `\"kern_argmax_partial_bf16\"`.",
           "type": "string"
         },
         "grid": {
+          "description": "Blocks per launch, as expressions, e.g. `[{\"ceil_div\": [\"tokens\", 128]}, 1, 1]`.",
           "items": {
             "$ref": "#/$defs/Expr"
           },
@@ -443,11 +475,11 @@
           "type": "array"
         },
         "module": {
-          "description": "Name of the `modules` entry the entry point lives in.",
+          "description": "Name of a `modules` entry, e.g. `\"argmax\"`.",
           "type": "string"
         },
         "params": {
-          "description": "This launch's own ABI (what the entry actually takes). Absent: the\nop's `params`.",
+          "description": "This launch's own ABI when it differs from the op's params, e.g. `[\"in buffer<bf16>\", \"out buffer<f32>\", \"i32\"]`.",
           "items": {
             "$ref": "#/$defs/ParamType"
           },
@@ -465,7 +497,7 @@
               "type": "null"
             }
           ],
-          "description": "Dynamic shared memory in bytes, if the launch needs any."
+          "description": "Dynamic shared memory in bytes, e.g. `{\"mul\": [\"tokens\", 512]}`."
         }
       },
       "required": [
@@ -485,12 +517,13 @@
           "$ref": "#/$defs/ExternLaunch"
         }
       ],
-      "description": "One launch inside an implementation: a device entry point in a pinned\nmodule, or a runtime built-in. The common single-launch op whose ABI\n*is* the interface writes only `module`, `entry`, `block`, `grid`:\n`params` defaults to the op's params and `args` to forwarding them in\norder."
+      "description": "One launch of an implementation: a kernel entry in a pinned module, or a runtime built-in."
     },
     "LaunchArg": {
       "anyOf": [
         {
           "additionalProperties": false,
+          "description": "Forward the op's param at this index.",
           "properties": {
             "param": {
               "format": "uint",
@@ -505,6 +538,7 @@
         },
         {
           "additionalProperties": false,
+          "description": "Pass the named scratch buffer.",
           "properties": {
             "scratch": {
               "type": "string"
@@ -517,6 +551,7 @@
         },
         {
           "additionalProperties": false,
+          "description": "A literal `i32`.",
           "properties": {
             "i32": {
               "format": "int32",
@@ -530,6 +565,7 @@
         },
         {
           "additionalProperties": false,
+          "description": "A literal `i64`.",
           "properties": {
             "i64": {
               "format": "int64",
@@ -543,6 +579,7 @@
         },
         {
           "additionalProperties": false,
+          "description": "A literal `f32`.",
           "properties": {
             "f32": {
               "format": "float",
@@ -556,6 +593,7 @@
         },
         {
           "additionalProperties": false,
+          "description": "A literal `u8`.",
           "properties": {
             "u8": {
               "format": "uint8",
@@ -570,16 +608,18 @@
           "type": "object"
         }
       ],
-      "description": "A launch argument. `{\"param\": 0}` forwards the call's arg #0 verbatim;\n`{\"scratch\": \"pmax\"}` passes a private scratch pointer; scalar literals\nare implementation constants the interface never sees (a partial-count\nbaked into a two-stage reduction, a mined ABI's strides and flags)."
+      "description": "A launch argument: a forwarded op param, a scratch buffer, or a literal, e.g. `{\"param\": 0}`, `{\"scratch\": \"pmax\"}`, `{\"i32\": 64}`."
     },
     "Module": {
       "additionalProperties": false,
-      "description": "A code artifact the launches pin: a local file name (`argmax.cubin`) or a\nregistry ref (`hf:org/repo/path[@rev]`). The runtime never resolves by\n`source`: it loads every artifact in the kernel dir (plus fetched\nregistry refs), hashes each, and matches by `sha256` — so one dir can hold\nevery version of a kernel, and a rebuilt artifact with different bytes\nis a different module. `source` is a label and, for registry refs, a URL.",
+      "description": "A code artifact, e.g. `{\"source\": \"hf:kernels-community/activation/build/.../_activation.abi3.so\", \"sha256\": \"73748b54...\"}`.",
       "properties": {
         "sha256": {
+          "description": "Hex sha256 of the artifact bytes; the runtime matches modules by this.",
           "type": "string"
         },
         "source": {
+          "description": "Local file name (`argmax.cubin`) or registry ref (`hf:org/repo/path[@rev]`); a label, not the identity.",
           "type": "string"
         }
       },
@@ -591,13 +631,14 @@
     },
     "Op": {
       "additionalProperties": false,
-      "description": "An op is an **interface** (the typed params a call passes — the only\nthing a call site knows) plus an **implementation**: how those args are\nlowered onto actual launches. Swapping the implementation — a faster\nkernel from elsewhere with the same interface — touches only `impl`;\nevery call stays untouched.",
+      "description": "An operator: the typed interface a call binds, plus the launches that implement it.",
       "properties": {
         "impl": {
-          "$ref": "#/$defs/Impl"
+          "$ref": "#/$defs/Impl",
+          "description": "The implementation; swapping it leaves every call untouched."
         },
         "params": {
-          "description": "The interface: typed, directional params. Call-site semantics\n(what each position means) are the contract implementations must\nhonor; the verifier can only check shape, not meaning.",
+          "description": "Interface params in call order, e.g. `[\"out buffer<bf16>\", \"in buffer<bf16>\"]`.",
           "items": {
             "$ref": "#/$defs/ParamType"
           },
@@ -611,18 +652,20 @@
       "type": "object"
     },
     "ParamType": {
-      "description": "One parameter: a by-value scalar (`\"i32\"`, `\"i64\"`, `\"f32\"`, `\"u8\"`) or a directional pointer — `\"in\"`/`\"out\"`/`\"inout\"` followed by `\"state\"` (opaque state base) or `\"buffer<dtype>\"`.",
+      "description": "One parameter: a scalar (`\"i32\"`, `\"i64\"`, `\"f32\"`, `\"u8\"`) or a directional pointer (`\"in buffer<bf16>\"`, `\"out buffer<f32>\"`, `\"inout state\"`).",
       "pattern": "^(i32|i64|f32|u8|(in|out|inout) (state|buffer<(bf16|f16|f32|fp8e4m3|i32|u32|i64|u8)>))$",
       "type": "string"
     },
     "Scratch": {
       "additionalProperties": false,
-      "description": "One scratch buffer declaration: like a workspace buffer, but private to\nthe implementation.",
+      "description": "A private buffer of one implementation, sized like a workspace buffer.",
       "properties": {
         "dtype": {
-          "$ref": "#/$defs/DType"
+          "$ref": "#/$defs/DType",
+          "description": "Element type, e.g. `\"f32\"`."
         },
         "shape": {
+          "description": "Extents, constants or var names, e.g. `[\"tokens\", 8]`.",
           "items": {
             "$ref": "#/$defs/Dim"
           },
@@ -637,14 +680,16 @@
     },
     "Spec": {
       "additionalProperties": false,
-      "description": "How a driver stages the `draft` / `verify` programs of a speculative\nmanifest: `draft` runs over `block` rows = the anchor token followed by\n`block - 1` copies of `mask_token`, `verify` over `block` rows = the\nanchor followed by the `block - 1` drafted tokens.",
+      "description": "Speculative-decoding contract: `draft` and `verify` run over `block` rows — the anchor token followed by `block - 1` mask tokens (draft) or drafted tokens (verify).",
       "properties": {
         "block": {
+          "description": "Rows per draft/verify call, e.g. `8`.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
         },
         "mask_token": {
+          "description": "Token id filling the undrafted rows, e.g. `248070`.",
           "format": "int64",
           "type": "integer"
         }
@@ -657,14 +702,16 @@
     },
     "State": {
       "additionalProperties": false,
-      "description": "Opaque persistent memory. The runtime knows only how many bytes to\nprovision — per token slot (`bytes_per_token`, scaled by the capacity:\npaged KV) or one fixed block regardless of capacity (`bytes`:\nper-sequence recurrent state such as a Mamba/GDN conv + SSM state).\nExactly one of the two is non-zero. The internal layout belongs to the\nprovider's kernels, which receive the base pointer as a `state` param.",
+      "description": "Opaque persistent memory; the runtime provisions the bytes and hands the base pointer to `inout state` params.",
       "properties": {
         "bytes": {
+          "description": "Fixed byte count independent of capacity — a recurrent conv/SSM state, e.g. `1409286144`; `0` for a per-token state.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
         },
         "bytes_per_token": {
+          "description": "Bytes per token slot, scaled by the capacity — a paged KV cache, e.g. `147456`; `0` for a fixed-size state.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -674,9 +721,10 @@
     },
     "Var": {
       "additionalProperties": false,
-      "description": "A per-call scalar the caller supplies (e.g. the token count this step),\nbounded `1..=max`. Vars are the only thing that may size a shape or a\nlaunch grid; any other caller-supplied number is data and goes through an\ninput buffer. Verification runs at the bounds; the runtime rejects an\nout-of-range value at call time.",
+      "description": "A per-call scalar the caller supplies, bounded `1..=max`; the only kind of number that may size a shape or a grid.",
       "properties": {
         "max": {
+          "description": "Upper bound, e.g. `2048` for the token count of a prefill chunk.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -691,28 +739,31 @@
   "$id": "https://kern-baa.pages.dev/schema/manifest-v3.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
+  "description": "The whole contract a model ships as: one JSON file naming its vars, states, buffers, modules, ops and programs.",
   "properties": {
     "buffers": {
       "additionalProperties": {
         "$ref": "#/$defs/Buffer"
       },
+      "description": "Typed tensors: inputs, outputs, weights, workspace and carries.",
       "type": "object"
     },
     "model": {
-      "description": "Free-form label; the runtime assigns no meaning to it.",
+      "description": "Free-form model label, e.g. `\"qwen3-4b\"`.",
       "type": "string"
     },
     "modules": {
       "additionalProperties": {
         "$ref": "#/$defs/Module"
       },
-      "description": "The dependency list: every code artifact a kernel launch pins, by\nname. Complete by construction — a launch without a module is a\nruntime built-in — so the runtime loads exactly these.",
+      "description": "Code artifacts the launches pin, by name, e.g. `{\"argmax\": {\"source\": \"argmax.cubin\", \"sha256\": \"2537…\"}}`.",
       "type": "object"
     },
     "ops": {
       "additionalProperties": {
         "$ref": "#/$defs/Op"
       },
+      "description": "Operators: a typed interface plus the launches that implement it.",
       "type": "object"
     },
     "programs": {
@@ -722,11 +773,11 @@
         },
         "type": "array"
       },
-      "description": "Each program is a straight-line list of op calls.",
+      "description": "Named straight-line call lists, e.g. `\"decode\": [{\"op\": \"embedding\", \"args\": [...]}, ...]`.",
       "type": "object"
     },
     "schema_version": {
-      "description": "Wire-format version. Only [`SCHEMA_VERSION`] is accepted.",
+      "description": "Wire-format version; must be `3`.",
       "format": "uint32",
       "minimum": 0,
       "type": "integer"
@@ -740,18 +791,20 @@
           "type": "null"
         }
       ],
-      "description": "Caller contract of a speculative-decoding manifest (absent for plain\nprefill/decode ones). The runtime assigns no meaning to it."
+      "description": "Speculative-decoding caller contract; absent for plain prefill/decode manifests."
     },
     "states": {
       "additionalProperties": {
         "$ref": "#/$defs/State"
       },
+      "description": "Opaque persistent memory the runtime provisions by size, e.g. a paged KV cache.",
       "type": "object"
     },
     "vars": {
       "additionalProperties": {
         "$ref": "#/$defs/Var"
       },
+      "description": "Per-call scalars the caller supplies, e.g. `{\"tokens\": {\"max\": 2048}}`.",
       "type": "object"
     }
   },
