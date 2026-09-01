@@ -64,8 +64,38 @@ Rust server crates，git dep 钉 pegainfer main 的一个 rev），kern 只贡�
   2/8 在 ~25 token 处的近平局分叉，两边都连贯——batch 大小改变 GEMM 选核
   和 attention 归约顺序，和 vLLM 一样不 batch-invariant。
 
+## 投机解码（`--spec`，2026-09-01）
+
+```bash
+target/release/kern-serve qwen3-4b-dspark --model-path /mnt/shared/weights/Qwen3-4B --spec
+```
+
+manifest 得带 `draft` / `verify` / `draft_precompute` / `decode_spec`
+（`examples/qwen3-4b-dspark.json`）。开了之后**每一步都是一轮**：
+
+- admission：prefill 每个 chunk 后跑一次 `draft_precompute`（prompt 的 tap
+  进 draft KV）；最后一个 prompt token 走 bs=1 `decode_spec` + precompute，
+  它的输出是第一个 token，当轮的 anchor。租约是 `prompt + max_tokens +
+  n_drafts`：最后一轮被拒的行也要有 slot（整页取整，通常就是多一页）。
+- 一轮：`draft`（每序列 `[anchor, mask×6]` 一段，非因果，7·b 行）→ 读
+  `draft_tokens [seqs, 7]` → `verify`（每序列 `[anchor, d0..d6]`，8·b 行）
+  → 读 `verify_tokens [seqs, 8]` → `draft_precompute` 在 verify 的全部 8·b
+  行上跑（被拒行落在各序列新 pos 之后，下一轮覆写，和 target KV 的免费
+  回滚是一回事，所以不用按接受数 compact）→ host 逐序列前缀匹配，emit
+  `a+1` 个 token。三段各按 bucket 捕成图；pad 序列的行写 pad 页。
+- greedy only；`--spec` 是能力开关，不按 bs 自动切换——每轮 verify 是
+  8·b 行的 target 前向，bs 大到算力瓶颈后一轮比一步贵得多，划不划算由
+  用户按模型和负载定。
+
+**验证**（GB300，Qwen3-4B + DSpark，docs 段落做 prompt，128 token）：
+conc=1 与 `kern run --spec` 逐字节一致；接受率 conc=1 20.8%、conc=32
+19.2%（2.4 / 2.3 tok/round）；不同 bs 之间的输出分叉率与普通模式的
+`decode` vs `decode_batch` 对照组同量级（都是 bucket 变化 + bf16
+near-tie）。吞吐：conc 1 / 8 / 32 ≈ 600 / 2560 / 5850 tok/s，普通模式
+353 / 2048 / 6800——这组 prompt 上交叉点在 bs 16–32。
+
 ## 没做（按需要加）
 
 混批（chunked prefill 进 decode 步）、抢占 / 动态页分配、prefix cache、
-真采样（temperature/top-p 作为 manifest 内的 `sample` op）、logprobs / echo、
+真采样（temperature/top-p 作为 manifest 内的 `sample` op；投机下是 rejection sampling）、logprobs / echo、
 bs 2–16 的 split-KV decode、步间 host 空转（token 反馈进图）。

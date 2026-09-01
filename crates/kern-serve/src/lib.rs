@@ -79,6 +79,12 @@ pub struct ServeOpts {
     #[arg(long)]
     pub eager: bool,
 
+    /// Speculative decoding: every step is one draft/verify round over the
+    /// batch (the manifest must carry the `draft`, `verify`,
+    /// `draft_precompute` and `decode_spec` programs)
+    #[arg(long)]
+    pub spec: bool,
+
     /// Extra stop token ids (generation_config.json's eos ids always apply)
     #[arg(long, value_delimiter = ',')]
     pub stop_tokens: Vec<u32>,
@@ -136,6 +142,7 @@ pub fn serve(o: ServeOpts, art: Artifacts, d: Defaults) -> Result<()> {
         eager: o.eager,
         max_seqs: o.max_seqs,
         stop_tokens,
+        spec: o.spec,
     };
     let join = std::thread::Builder::new()
         .name("kern-scheduler".into())

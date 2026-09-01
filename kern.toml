@@ -24,3 +24,10 @@ logit_ulp = 4
 [run]
 prompt = "The capital of France is"
 steps = 32
+
+# The same target with its DSpark draft: `kern run --spec`, `kern-serve --spec`.
+[targets.qwen3-4b-dspark]
+manifest  = "examples/qwen3-4b-dspark.json"
+kernels   = "kernels"
+weights   = ["weights/qwen3-4b-dspark.safetensors"]
+tokenizer = "weights/tokenizer.json"

@@ -18,7 +18,18 @@
 //!   program is CUDA-graph-captured once; padding rows write into a page
 //!   the scheduler leases for them and nobody reads;
 //! - greedy only: the manifest's `argmax` is the sampler. Non-greedy
-//!   sampling params are logged once and served greedily.
+//!   sampling params are logged once and served greedily;
+//! - `--spec` (a manifest with `draft` / `verify` / `draft_precompute` /
+//!   `decode_spec`): every step is one speculative round over the batch —
+//!   `draft` proposes `n` tokens per sequence, `verify` runs the target
+//!   over `[anchor, drafts]` per sequence, `draft_precompute` projects the
+//!   target's taps into the draft's context KV for every row (rejected
+//!   rows land past the sequence's position and are overwritten next
+//!   round, exactly like the target KV's free rollback), and the host
+//!   accepts each sequence's longest matching prefix. The lease grows by
+//!   `n` tokens so the last round's rejected rows have slots. Whether a
+//!   round beats a plain step at a given batch size is the operator's
+//!   call, not the scheduler's: the flag picks the mode for the process.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
@@ -28,7 +39,7 @@ use kern_manifest::types::Dim;
 use kern_runtime::{Denied, Lease, Runtime};
 use pegainfer_frontend::engine::{
     FinishReason, QueuedRequest, RejectReason, RequestId, RequestLedger, Scheduler,
-    SchedulerMetrics,
+    SchedulerMetrics, SpecDecodeCounters, MAX_SPEC_TOKENS,
 };
 use tracing::{debug, info, warn};
 
@@ -55,6 +66,23 @@ pub struct Policy {
     pub max_seqs: usize,
     /// Token ids that end a request unless it asked `ignore_eos`.
     pub stop_tokens: Vec<u32>,
+    /// Speculative rounds instead of decode steps (needs the spec programs).
+    pub spec: bool,
+}
+
+/// DSpark's mask token when the manifest declares no `spec` block.
+const DSPARK_MASK_TOKEN: i64 = 151669;
+
+/// The manifest's speculative contract, one row-group per sequence.
+struct SpecPlan {
+    /// Tokens `draft` proposes per sequence (`draft_tokens` is `[seqs, n]`).
+    n_drafts: usize,
+    /// Rows per sequence in `draft`: `[anchor, mask, ...]`.
+    draft_rows: usize,
+    /// Rows per sequence in `verify`: `[anchor, drafts...]` = n + 1.
+    verify_rows: usize,
+    mask_token: i64,
+    counters: SpecDecodeCounters,
 }
 
 struct Seq {
@@ -78,6 +106,7 @@ pub struct KernScheduler {
     /// their junk here.
     pad: Lease,
     policy: Policy,
+    spec: Option<SpecPlan>,
     waiting: VecDeque<QueuedRequest>,
     running: Vec<Seq>,
     warned_sampling: bool,
@@ -125,26 +154,84 @@ impl KernScheduler {
         }
         policy.max_seqs = policy.max_seqs.clamp(1, seqs_max);
         policy.chunk = policy.chunk.clamp(1, tokens_max);
+        let spec = if policy.spec {
+            for p in ["decode_spec", "draft", "verify", "draft_precompute"] {
+                if !m.programs.contains_key(p) {
+                    bail!("--spec needs program `{p}` (not in this manifest)");
+                }
+            }
+            let rows_per_seq = |name: &str| -> Result<usize> {
+                match m.buffers.get(name).map(|b| b.shape.as_slice()) {
+                    Some([Dim::Var(v), Dim::Const(n)]) if v == "seqs" => Ok(*n as usize),
+                    s => bail!("--spec needs `{name}` shaped [seqs, n] (one row per sequence), got {s:?}"),
+                }
+            };
+            let n_drafts = rows_per_seq("draft_tokens")?;
+            let verify_rows = rows_per_seq("verify_tokens")?;
+            if verify_rows != n_drafts + 1 {
+                bail!("--spec: verify_tokens has {verify_rows} per sequence, expected {} (anchor + drafts)", n_drafts + 1);
+            }
+            match m.buffers.get("anchor_token").map(|b| b.shape.as_slice()) {
+                Some([Dim::Var(v)]) if v == "seqs" => {}
+                s => bail!("--spec needs `anchor_token` shaped [seqs], got {s:?}"),
+            }
+            if m.buffers.contains_key("num_accepted_tokens") {
+                bail!("--spec: this manifest resumes a recurrent state from `num_accepted_tokens`; that is one value per call, not per sequence — not batched yet");
+            }
+            if n_drafts > MAX_SPEC_TOKENS {
+                bail!("--spec: {n_drafts} drafts per round, the frontend's metrics hold {MAX_SPEC_TOKENS}");
+            }
+            let (draft_rows, mask_token) = match &m.spec {
+                Some(s) => (s.block as usize, s.mask_token),
+                None => (n_drafts, DSPARK_MASK_TOKEN),
+            };
+            let rows = draft_rows.max(verify_rows);
+            if rows > rt.page() as usize {
+                bail!("--spec: {rows} rows per sequence per round exceed the {}-token pad page", rt.page());
+            }
+            // A round's rows: every sequence's row-group must fit `tokens`.
+            policy.max_seqs = policy.max_seqs.min(tokens_max / rows).max(1);
+            Some(SpecPlan {
+                n_drafts,
+                draft_rows,
+                verify_rows,
+                mask_token,
+                counters: SpecDecodeCounters {
+                    num_spec_tokens: n_drafts as u64,
+                    num_drafts: 0,
+                    num_draft_tokens: 0,
+                    num_accepted_tokens: 0,
+                    num_accepted_tokens_per_pos: [0; MAX_SPEC_TOKENS],
+                },
+            })
+        } else {
+            None
+        };
         let facts = Facts {
             total_blocks: rt.pages_total() - pad.pages(),
             block_size: rt.page() as usize,
             max_request_tokens: rt.max_seq_tokens(),
         };
         info!(
-            "scheduler: {} pages × {} tokens (+1 pad page), ≤{} sequences, ≤{} tokens/sequence, chunk {}, buckets {:?}{}",
+            "scheduler: {} pages × {} tokens (+1 pad page), ≤{} sequences, ≤{} tokens/sequence, chunk {}, buckets {:?}{}{}",
             facts.total_blocks,
             facts.block_size,
             policy.max_seqs,
             facts.max_request_tokens,
             policy.chunk,
             BUCKETS.iter().filter(|&&b| b <= policy.max_seqs).collect::<Vec<_>>(),
-            if policy.eager { ", eager" } else { ", graphs captured per bucket on first use" }
+            if policy.eager { ", eager" } else { ", graphs captured per bucket on first use" },
+            match &spec {
+                Some(s) => format!(", speculative: {} drafts/round ({} draft + {} verify rows per sequence)", s.n_drafts, s.draft_rows, s.verify_rows),
+                None => String::new(),
+            }
         );
         Ok((
             KernScheduler {
                 rt: Rt(rt),
                 pad,
                 policy,
+                spec,
                 waiting: VecDeque::new(),
                 running: Vec::new(),
                 warned_sampling: false,
@@ -179,7 +266,9 @@ impl KernScheduler {
             }
             let prompt = q.request.prompt_tokens.len();
             let max_tokens = q.request.max_tokens;
-            let worst = prompt + max_tokens;
+            // A speculative round writes `n_drafts` rows past the token it
+            // may still have to emit; the last round's rejects need slots.
+            let worst = prompt + max_tokens + self.spec.as_ref().map_or(0, |s| s.n_drafts);
             if prompt == 0 {
                 let limit = self.rt.0.max_seq_tokens();
                 ledger.reject(id, RejectReason::ContextLength { prompt_tokens: prompt, max_tokens, limit });
@@ -226,7 +315,7 @@ impl KernScheduler {
                 pages.pages(),
                 t0.elapsed()
             );
-            self.running.push(Seq {
+            let mut seq = Seq {
                 id,
                 pos: prompt - 1,
                 next: *q.request.prompt_tokens.last().unwrap(),
@@ -236,7 +325,28 @@ impl KernScheduler {
                 pages,
                 prompt_len: prompt,
                 admitted: t0,
-            });
+            };
+            if self.spec.is_some() {
+                // The last prompt token goes through `decode_spec` now (a
+                // round needs an anchor and its tap in the draft KV); its
+                // token is the first one emitted.
+                let tok = self.first_token(&seq)?;
+                seq.pos += 1;
+                seq.generated += 1;
+                let reason = if !seq.ignore_eos && self.policy.stop_tokens.contains(&tok) {
+                    Some(FinishReason::Stop)
+                } else {
+                    ledger.push_tokens(id, &[tok], &[]);
+                    self.stat_tokens += 1;
+                    (seq.generated >= seq.max_tokens).then_some(FinishReason::Length)
+                };
+                if let Some(r) = reason {
+                    ledger.finish(id, r);
+                    continue;
+                }
+                seq.next = tok;
+            }
+            self.running.push(seq);
         }
         Ok(())
     }
@@ -269,18 +379,204 @@ impl KernScheduler {
             rt.write_input_at("seq_lens", &le_i32(&[(pos + c) as i32]), &env)?;
             rt.write_input_at("cu_seqlens_q", &le_i32(&[0, c as i32]), &env)?;
             rt.write_input_at("block_table", &le_i32(&row), &env)?;
-            if !self.policy.eager && c == chunk {
-                if !rt.is_captured("prefill", &env) {
-                    let t = Instant::now();
-                    rt.capture("prefill", &env)?;
-                    info!("captured `prefill` at tokens={c} ({:?})", t.elapsed());
-                }
-                rt.run_captured("prefill", &env)?;
-            } else {
-                rt.run("prefill", &env)?;
+            let eager = self.policy.eager || c != chunk;
+            run_program(rt, "prefill", &env, eager)?;
+            if self.spec.is_some() {
+                // The chunk's taps (`fc_out`) into the draft's context KV;
+                // positions/slot_mapping are still the chunk's.
+                run_program(rt, "draft_precompute", &env, eager)?;
             }
             pos += c;
         }
+        Ok(())
+    }
+
+    /// Speculative admission: the last prompt token through `decode_spec`
+    /// (bs=1, taps) and its row into the draft KV; returns the first
+    /// generated token.
+    fn first_token(&mut self, s: &Seq) -> Result<u32> {
+        let env = env(1, 1);
+        let mut row = Vec::new();
+        s.pages.extend_row("block_table", &mut row)?;
+        let rt = &mut self.rt.0;
+        rt.write_input_at("token_ids", &le_i64(&[s.next as i64]), &env)?;
+        rt.write_input_at("positions", &le_i64(&[s.pos as i64]), &env)?;
+        rt.write_input_at("slot_mapping", &le_i64(&[s.pages.slot(s.pos)]), &env)?;
+        rt.write_input_at("seq_lens", &le_i32(&[s.pos as i32 + 1]), &env)?;
+        rt.write_input_at("cu_seqlens_q", &le_i32(&[0, 1]), &env)?;
+        rt.write_input_at("block_table", &le_i32(&row), &env)?;
+        run_program(rt, "decode_spec", &env, self.policy.eager)?;
+        run_program(rt, "draft_precompute", &env, self.policy.eager)?;
+        let out = rt.read_output("next_token")?;
+        Ok(i64::from_le_bytes(out[..8].try_into().unwrap()) as u32)
+    }
+
+    /// One speculative round over every running sequence: draft, verify,
+    /// precompute, accept.
+    fn spec_round(&mut self, ledger: &mut RequestLedger) -> Result<()> {
+        self.running.retain(|s| {
+            let live = !ledger.is_aborted(s.id);
+            if !live {
+                ledger.retire(s.id);
+            }
+            live
+        });
+        let n = self.running.len();
+        if n == 0 {
+            return Ok(());
+        }
+        let b = self.bucket(n);
+        let plan = self.spec.as_ref().unwrap();
+        let (nd, dr, vr, mask) = (plan.n_drafts, plan.draft_rows, plan.verify_rows, plan.mask_token);
+        let t0 = Instant::now();
+
+        // A batch of row-groups: `rows` per sequence, padding sequences
+        // write their rows into the pad page.
+        struct Group<'a> {
+            ids: Vec<i64>,
+            positions: Vec<i64>,
+            slots: Vec<i64>,
+            seq_lens: Vec<i32>,
+            cu: Vec<i32>,
+            table: Vec<i32>,
+            pad: &'a Lease,
+        }
+        impl<'a> Group<'a> {
+            fn new(rows: usize, pad: &'a Lease) -> Group<'a> {
+                Group {
+                    ids: Vec::with_capacity(rows),
+                    positions: Vec::with_capacity(rows),
+                    slots: Vec::with_capacity(rows),
+                    seq_lens: Vec::new(),
+                    cu: vec![0],
+                    table: Vec::new(),
+                    pad,
+                }
+            }
+            fn push(&mut self, ids: &[i64], pos: usize, pages: &Lease) -> Result<()> {
+                let rows = ids.len();
+                self.ids.extend_from_slice(ids);
+                self.positions.extend((pos..pos + rows).map(|p| p as i64));
+                self.slots.extend(pages.slots(pos..pos + rows));
+                self.seq_lens.push((pos + rows) as i32);
+                self.cu.push(self.cu.last().unwrap() + rows as i32);
+                Ok(pages.extend_row("block_table", &mut self.table)?)
+            }
+            fn pad_to(&mut self, b: usize, rows: usize) -> Result<()> {
+                let pad = self.pad;
+                while self.seq_lens.len() < b {
+                    self.push(&vec![0; rows], 0, pad)?;
+                }
+                Ok(())
+            }
+            fn stage(&self, rt: &mut Runtime, env: &BTreeMap<String, u64>) -> Result<()> {
+                rt.write_input_at("token_ids", &le_i64(&self.ids), env)?;
+                rt.write_input_at("positions", &le_i64(&self.positions), env)?;
+                rt.write_input_at("slot_mapping", &le_i64(&self.slots), env)?;
+                rt.write_input_at("seq_lens", &le_i32(&self.seq_lens), env)?;
+                rt.write_input_at("cu_seqlens_q", &le_i32(&self.cu), env)?;
+                rt.write_input_at("block_table", &le_i32(&self.table), env)?;
+                Ok(())
+            }
+        }
+
+        // Draft: [anchor, mask × (dr-1)] per sequence at pos.., non-causal.
+        let mut g = Group::new(b * dr, &self.pad);
+        let mut anchors = Vec::with_capacity(b);
+        let mut ids = vec![mask; dr];
+        for s in &self.running {
+            ids[0] = s.next as i64;
+            g.push(&ids, s.pos, &s.pages)?;
+            anchors.push(s.next as i64);
+        }
+        g.pad_to(b, dr)?;
+        anchors.resize(b, 0);
+        let env_d = env(b * dr, b);
+        let eager = self.policy.eager;
+        let rt = &mut self.rt.0;
+        g.stage(rt, &env_d)?;
+        rt.write_input_at("anchor_token", &le_i64(&anchors), &env_d)?;
+        run_program(rt, "draft", &env_d, eager)?;
+        let drafts = i64s(&rt.read_output("draft_tokens")?);
+
+        // Verify: [anchor, d0..] per sequence at pos.., causal; row i of a
+        // group answers "what follows position pos+i".
+        let mut g = Group::new(b * vr, &self.pad);
+        let mut ids = vec![0i64; vr];
+        for (i, s) in self.running.iter().enumerate() {
+            ids[0] = s.next as i64;
+            ids[1..].copy_from_slice(&drafts[i * nd..i * nd + nd]);
+            g.push(&ids, s.pos, &s.pages)?;
+        }
+        g.pad_to(b, vr)?;
+        let env_v = env(b * vr, b);
+        let rt = &mut self.rt.0;
+        g.stage(rt, &env_v)?;
+        run_program(rt, "verify", &env_v, eager)?;
+        let vt = i64s(&rt.read_output("verify_tokens")?);
+        // Every row's tap into the draft KV (positions/slot_mapping are
+        // still verify's): rejected rows land past the sequence's new
+        // position and the next round overwrites them.
+        run_program(rt, "draft_precompute", &env_v, eager)?;
+        self.stat_decode_ns += t0.elapsed().as_nanos();
+        self.stat_steps += 1;
+
+        // Accept the longest matching prefix; vt[a] is the correction (or
+        // the bonus token when everything matched).
+        let plan = self.spec.as_mut().unwrap();
+        let stop = &self.policy.stop_tokens;
+        let mut emitted = 0u64;
+        let mut i = 0;
+        self.running.retain_mut(|s| {
+            let d = &drafts[i * nd..i * nd + nd];
+            let v = &vt[i * vr..i * vr + vr];
+            i += 1;
+            let mut a = 0;
+            while a < nd && d[a] == v[a] {
+                plan.counters.num_accepted_tokens_per_pos[a] += 1;
+                a += 1;
+            }
+            plan.counters.num_drafts += 1;
+            plan.counters.num_draft_tokens += nd as u64;
+            plan.counters.num_accepted_tokens += a as u64;
+            s.pos += a + 1;
+            let mut out = Vec::with_capacity(a + 1);
+            let mut reason = None;
+            for &tok in &v[..=a] {
+                let tok = tok as u32;
+                s.generated += 1;
+                // The stop token itself is not emitted (pegainfer
+                // convention); it still counts against max_tokens.
+                if !s.ignore_eos && stop.contains(&tok) {
+                    reason = Some(FinishReason::Stop);
+                    break;
+                }
+                out.push(tok);
+                if s.generated >= s.max_tokens {
+                    reason = Some(FinishReason::Length);
+                    break;
+                }
+            }
+            if !out.is_empty() {
+                ledger.push_tokens(s.id, &out, &[]);
+                emitted += out.len() as u64;
+            }
+            match reason {
+                Some(r) => {
+                    debug!(
+                        "finished {}: {r:?}, {} prompt + {} generated in {:?}",
+                        s.id, s.prompt_len, s.generated, s.admitted.elapsed()
+                    );
+                    ledger.finish(s.id, r);
+                    false
+                }
+                None => {
+                    s.next = v[a] as u32;
+                    true
+                }
+            }
+        });
+        self.stat_tokens += emitted;
         Ok(())
     }
 
@@ -330,16 +626,7 @@ impl KernScheduler {
         rt.write_input_at("seq_lens", &le_i32(&seq_lens), &env)?;
         rt.write_input_at("cu_seqlens_q", &le_i32(&cu), &env)?;
         rt.write_input_at("block_table", &le_i32(&table), &env)?;
-        if self.policy.eager {
-            rt.run(program, &env)?;
-        } else {
-            if !rt.is_captured(program, &env) {
-                let t = Instant::now();
-                rt.capture(program, &env)?;
-                info!("captured `{program}` at seqs={b} ({:?})", t.elapsed());
-            }
-            rt.run_captured(program, &env)?;
-        }
+        run_program(rt, program, &env, self.policy.eager)?;
         let out = rt.read_output("next_token")?;
         self.stat_decode_ns += t0.elapsed().as_nanos();
         self.stat_steps += 1;
@@ -383,13 +670,26 @@ impl KernScheduler {
         if dt.as_secs() < 5 || self.stat_steps == 0 && self.stat_prefill_tokens == 0 {
             return;
         }
+        let spec = match &self.spec {
+            Some(p) => {
+                let c = &p.counters;
+                format!(
+                    " | spec {:.2} tok/round, {:.0}% drafts accepted (cumulative)",
+                    (c.num_accepted_tokens + c.num_drafts) as f64 / c.num_drafts.max(1) as f64,
+                    c.num_accepted_tokens as f64 * 100.0 / c.num_draft_tokens.max(1) as f64,
+                )
+            }
+            None => String::new(),
+        };
         info!(
-            "{} running, {} waiting, {}/{} pages | decode {} steps, {:.2} ms/step, {:.0} tok/s | prefill {} tokens, {:.0} tok/s",
+            "{} running, {} waiting, {}/{} pages | {} {} {}, {:.2} ms each, {:.0} tok/s | prefill {} tokens, {:.0} tok/s{spec}",
             self.running.len(),
             self.waiting.len(),
             self.kv_used(),
             self.kv_total(),
+            if self.spec.is_some() { "spec" } else { "decode" },
             self.stat_steps,
+            if self.spec.is_some() { "rounds" } else { "steps" },
             self.stat_decode_ns as f64 / 1e6 / self.stat_steps.max(1) as f64,
             self.stat_tokens as f64 / dt.as_secs_f64(),
             self.stat_prefill_tokens,
@@ -411,7 +711,11 @@ impl Scheduler for KernScheduler {
 
     fn step(&mut self, ledger: &mut RequestLedger) -> Result<()> {
         self.admit(ledger)?;
-        self.decode(ledger)?;
+        if self.spec.is_some() {
+            self.spec_round(ledger)?;
+        } else {
+            self.decode(ledger)?;
+        }
         self.log_stats();
         Ok(())
     }
@@ -422,9 +726,27 @@ impl Scheduler for KernScheduler {
             kv_total_blocks: self.kv_total() as u64,
             num_running_reqs: self.running.len() as u64,
             num_waiting_reqs: self.waiting.len() as u64,
-            spec_decode: None,
+            spec_decode: self.spec.as_ref().map(|p| p.counters),
         }
     }
+}
+
+/// Run `program` at `env`: eagerly, or through its CUDA graph, captured
+/// on first use.
+fn run_program(rt: &mut Runtime, program: &str, env: &BTreeMap<String, u64>, eager: bool) -> Result<()> {
+    if eager {
+        return Ok(rt.run(program, env)?);
+    }
+    if !rt.is_captured(program, env) {
+        let t = Instant::now();
+        rt.capture(program, env)?;
+        info!("captured `{program}` at {env:?} ({:?})", t.elapsed());
+    }
+    Ok(rt.run_captured(program, env)?)
+}
+
+fn i64s(bytes: &[u8]) -> Vec<i64> {
+    bytes.chunks_exact(8).map(|c| i64::from_le_bytes(c.try_into().unwrap())).collect()
 }
 
 fn env(tokens: usize, seqs: usize) -> BTreeMap<String, u64> {
