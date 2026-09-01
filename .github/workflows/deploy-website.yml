@@ -6,6 +6,7 @@ on:
     paths:
       - "website/**"
       - "schema/**"
+      - "examples/minimal.json"
       - ".github/workflows/deploy-website.yml"
   workflow_dispatch:
 

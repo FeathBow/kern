@@ -91,3 +91,17 @@ fn qwen3_dspark_mined_verifies() {
     };
     assert_ne!(pinned("attn_prefill"), pinned("attn_draft"));
 }
+
+/// The toy manifest the schema page opens with: every top-level section,
+/// one op, one call. Kept valid by this test.
+const MINIMAL: &str = include_str!("../../../examples/minimal.json");
+
+#[test]
+fn minimal_example_verifies() {
+    let m = Manifest::from_json(MINIMAL).expect("parse");
+    if let Err(errs) = verify(&m) {
+        panic!("examples/minimal.json failed verification:\n{}", errs.join("\n"));
+    }
+    assert_eq!(m.programs["step"].len(), 1);
+    assert_eq!(m.ops["scale"].imp.launches[0].module(), Some("toy"));
+}

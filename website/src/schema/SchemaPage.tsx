@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import schemaRaw from "../../../schema/manifest-v3.schema.json?raw";
+import minimalRaw from "../../../examples/minimal.json?raw";
 
 const schema: any = JSON.parse(schemaRaw);
 const defs: Record<string, any> = schema.$defs ?? {};
@@ -389,6 +390,45 @@ function WireDiagram() {
   );
 }
 
+/* --------------------------------------------------------------- example */
+
+const STEPS: { key: string; type: string; text: string }[] = [
+  { key: "vars", type: "Var", text: "the caller passes tokens on every call, at most 1024; it is the only per-call number in the file." },
+  { key: "states", type: "State", text: "kv is 256 bytes per token slot; the runtime provisions it and never looks inside." },
+  { key: "buffers", type: "Buffer", text: "x is written by the caller, w is bound from the weights file, y is read back; shapes use tokens." },
+  { key: "modules", type: "Module", text: "the compiled code, identified by sha256; toy.cubin is a label." },
+  { key: "ops", type: "Op", text: "scale is an interface — five typed, directional params — plus an impl: one launch of scale_rows from toy, tokens blocks of 64 threads." },
+  { key: "programs", type: "Call", text: "step calls scale once, binding x, w, y, kv and tokens to its params in order." },
+];
+
+function MinimalExample() {
+  return (
+    <section className="example" aria-label="A complete minimal manifest">
+      <p className="kicker">A COMPLETE MANIFEST · TOY</p>
+      <h2>Six sections. One op. One call.</h2>
+      <div className="example-grid">
+        <pre className="example-json">
+          <code>{minimalRaw.trim()}</code>
+        </pre>
+        <ol className="example-steps">
+          {STEPS.map((s) => (
+            <li key={s.key}>
+              <a className="example-key" href={`#t-${s.type}`}>
+                {s.key}
+              </a>
+              <span>{s.text}</span>
+            </li>
+          ))}
+        </ol>
+      </div>
+      <p className="example-note">
+        The runtime verifies every reference and type at load, then runs the call
+        list as written. It does not know what <code>scale</code> computes.
+      </p>
+    </section>
+  );
+}
+
 /* ------------------------------------------------------------------ page */
 
 const RAW_URL = "/schema/manifest-v3.schema.json";
@@ -451,6 +491,11 @@ export default function SchemaPage() {
             </div>
           </div>
 
+        </section>
+
+        <MinimalExample />
+
+        <section className="schema-hero schema-diagram">
           <WireDiagram />
         </section>
 

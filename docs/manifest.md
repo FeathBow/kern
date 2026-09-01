@@ -183,7 +183,9 @@ Manifest 是**生成产物**（类比 `Cargo.lock`）：provider 手写的是生
 不是 manifest。生成器把一切写长（每个 launch 带完整 ABI 和连线、每次
 call 带 kernel 要的全部标量、工件内联），最后过 `normalize`
 （`tools/kern_manifest.py`）得到最小的 wire form——像 linker 一样，不改变
-运行的东西。样例见 `tools/gen_qwen3_decode.py` → `examples/qwen3-4b.json`
+运行的东西。最小完整样例 `examples/minimal.json`（六段、一个 op、一次 call，网站
+schema 页开头就是它，测试保证它永远过 verifier）；真实样例见
+`tools/gen_qwen3_decode.py` → `examples/qwen3-4b.json`
 （Qwen3-4B，两个 program：`prefill` 433 call / `decode` 436 call，真实
 挖矿 ABI）与 `examples/qwen3-4b-dspark.json`（同上 + DSpark 投机解码：
 六个 program，target+draft 权重同处一份 manifest，见

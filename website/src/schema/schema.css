@@ -94,6 +94,108 @@
   max-width: 22ch;
 }
 
+/* --------------------------------------------------------------- example */
+
+.example {
+  padding-top: clamp(24px, 4vh, 48px);
+}
+
+.example .kicker {
+  font-family: "DM Mono", monospace;
+  font-size: 13px;
+  letter-spacing: 0.14em;
+  color: var(--blue);
+  margin: 0 0 10px;
+}
+
+.example h2 {
+  font-size: clamp(28px, 4vw, 44px);
+  font-weight: 900;
+  letter-spacing: -0.03em;
+  line-height: 1;
+  margin: 0 0 24px;
+}
+
+.example-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: clamp(20px, 3vw, 48px);
+  align-items: start;
+}
+
+.example-json {
+  margin: 0;
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 18px 20px;
+  overflow-x: auto;
+  font-family: "DM Mono", monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+.example-steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: step;
+}
+
+.example-steps li {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 4px 16px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+.example-steps li::before {
+  counter-increment: step;
+  content: counter(step);
+  grid-column: 1 / -1;
+  font-family: "DM Mono", monospace;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: var(--blue);
+}
+
+.example-key {
+  font-family: "DM Mono", monospace;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ink);
+  text-decoration: none;
+  border-bottom: 1px solid rgba(6, 71, 255, 0.35);
+  justify-self: start;
+}
+
+.example-key:hover {
+  color: var(--blue);
+  border-bottom-color: var(--blue);
+}
+
+.example-note {
+  max-width: 62ch;
+  margin: 22px 0 0;
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+.example-note code {
+  font-family: "DM Mono", monospace;
+  color: var(--ink);
+}
+
+.schema-diagram {
+  padding-top: clamp(24px, 4vh, 48px);
+}
+
 /* --------------------------------------------------------------- diagram */
 
 .wire-figure {
@@ -433,10 +535,13 @@
 
 .curl-block {
   margin: 0 0 14px;
-  background: var(--ink);
-  color: #f5f7f2;
+  display: inline-block;
+  max-width: 100%;
+  background: var(--soft);
+  border: 1px solid var(--line);
+  color: var(--ink);
   border-radius: 9px;
-  padding: 16px 20px;
+  padding: 10px 16px;
   overflow-x: auto;
 }
 
@@ -458,6 +563,10 @@
 /* ------------------------------------------------------------ responsive */
 
 @media (max-width: 860px) {
+  .example-grid {
+    grid-template-columns: 1fr;
+  }
+
   .reference {
     grid-template-columns: 1fr;
   }
