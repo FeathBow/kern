@@ -39,7 +39,7 @@ out_dir.mkdir(exist_ok=True)
 cfg = json.loads((src / "config.json").read_text())
 LAYERS = cfg["num_hidden_layers"]
 HEAD_DIM = cfg["head_dim"]
-MAX_POS = 4096  # 与 manifest MAX_POS 一致
+MAX_POS = 40960  # 与 manifest MAX_POS 一致
 assert cfg.get("tie_word_embeddings", False), "非 tied lm_head：需另外导出"
 
 tensors = {}
