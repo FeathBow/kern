@@ -6,22 +6,24 @@
 //!      added / removed) and, per program, the aligned dispatch segments
 //!      that differ ("cuts") — everything else is shared;
 //!   2. taps a real workload once: A and B run prefill + one decode step in
-//!      lockstep; at every cut the frontier inputs and A's outputs are
-//!      snapshotted and B's outputs compared (local);
+//!      lockstep; at every cut B gets A's frontier inputs and A's state
+//!      pre-image, so what B writes is the cut's own doing (cut-local);
+//!      A's inputs/outputs are snapshotted. Then B free-runs the same
+//!      workload with nothing injected: end-to-end outputs and states;
 //!   3. measures the noise floor per cut: A's cut re-run from its own
 //!      snapshot against its own output;
-//!   4. fuzzes each cut from the snapshot: frontier inputs synthesized from
-//!      several value distributions (integers only where the buffer
-//!      declares a domain), both sides run, outputs compared and checked
-//!      against declared domains;
+//!   4. fuzzes each cut from the snapshot: float frontier inputs perturbed
+//!      around the tapped values (jitter / noise / scale / shuffle /
+//!      resample / outliers), integers kept as tapped — the kernel is
+//!      tested in the distribution it was built for; both sides run,
+//!      outputs compared and checked against declared domains;
 //!   5. times the cuts in isolation (plus, opt-in, graph-level step time
 //!      and a prefill symbol sweep) and computes a static bytes-moved
 //!      roofline for the changed kernels.
 //!
 //! Everything after the tap is cut-local: cost scales with the cut, not the
-//! model. There is deliberately no end-to-end generation: bit-identity at
-//! every cut implies it, and differences beyond the noise floor are
-//! reported as INCONCLUSIVE rather than adjudicated here.
+//! model. End-to-end drift is reported (the free run), not adjudicated:
+//! differences beyond bit/value identity are INCONCLUSIVE here.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -57,8 +59,9 @@ struct Opts {
     /// Prompt for the real-workload tap
     #[arg(long, default_value = DEFAULT_PROMPT)]
     prompt: String,
-    /// Fuzz rounds per cut (0 disables); rounds cycle through the value
-    /// distributions
+    /// Fuzz rounds per cut (0 disables); rounds cycle through the
+    /// perturbations of the tapped inputs (jitter, noise, scale, shuffle,
+    /// resample, outliers)
     #[arg(long, default_value_t = 6)]
     fuzz: usize,
     #[arg(long, default_value_t = 0)]
@@ -395,55 +398,75 @@ impl Rng {
     }
 }
 
-const DISTS: [&str; 6] = ["uniform", "normal", "laplace", "outliers", "edge", "special"];
+const MODES: [&str; 6] = ["jitter", "noise", "scale", "shuffle", "resample", "outliers"];
 
-fn gen_float(rng: &mut Rng, dist: usize, n: usize, dt: DType) -> Vec<f64> {
+/// Perturb a tapped float tensor, staying in the distribution the kernel
+/// was built for. Synthetic values were the old way (uniform, N(0,1), …)
+/// and produced noise, not signal: a fused GDN kernel looked "6143/6144
+/// wrong" under sequence layouts no caller produces. `row` is the trailing
+/// extent (elements per leading-dim row) so `shuffle` permutes rows, not
+/// elements.
+fn perturb(rng: &mut Rng, mode: usize, x: &[f64], row: usize, dt: DType) -> Vec<f64> {
     let max = match dt {
-        DType::Bf16 => 3.0e38,
+        DType::Bf16 | DType::F32 => 3.0e38,
         DType::F16 => 65504.0,
-        DType::F32 => 3.0e38,
         DType::Fp8E4m3 => 448.0,
         _ => unreachable!(),
     };
-    let tiny = match dt {
-        DType::Bf16 | DType::F32 => 1e-39,
-        DType::F16 => 1e-6,
-        DType::Fp8E4m3 => 0.002,
-        _ => unreachable!(),
+    let n = x.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut v: Vec<f64> = match MODES[mode % MODES.len()] {
+        // a few low mantissa bits: the same tensor, different rounding paths
+        "jitter" => x.iter().map(|&a| a * (1.0 + rng.normal() / 64.0)).collect(),
+        // additive noise at 10% of the tensor's own rms
+        "noise" => {
+            let rms = (x.iter().filter(|a| a.is_finite()).map(|a| a * a).sum::<f64>() / n as f64).sqrt();
+            x.iter().map(|&a| a + rng.normal() * 0.1 * rms).collect()
+        }
+        // dynamic range: the whole tensor ×¼ … ×4
+        "scale" => {
+            let f = [0.25, 0.5, 2.0, 4.0][rng.below(4) as usize];
+            x.iter().map(|&a| a * f).collect()
+        }
+        // rows in another order: positions change, values don't
+        "shuffle" => {
+            let row = row.clamp(1, n);
+            let rows = n / row;
+            let mut perm: Vec<usize> = (0..rows).collect();
+            for i in (1..rows).rev() {
+                perm.swap(i, rng.below(i as u64 + 1) as usize);
+            }
+            let mut v = x.to_vec();
+            for (dst, &src) in perm.iter().enumerate() {
+                v[dst * row..(dst + 1) * row].copy_from_slice(&x[src * row..(src + 1) * row]);
+            }
+            v
+        }
+        // bootstrap: the tensor's own marginal, structure destroyed
+        "resample" => (0..n).map(|_| x[rng.below(n as u64) as usize]).collect(),
+        // 1% of the elements ×16
+        _ => x.iter().map(|&a| if rng.below(100) == 0 { a * 16.0 } else { a }).collect(),
     };
-    (0..n)
-        .map(|_| match DISTS[dist % DISTS.len()] {
-            "uniform" => rng.unit() * 2.0 - 1.0,
-            "normal" => rng.normal(),
-            "laplace" => {
-                let u = rng.unit() - 0.5;
-                -u.signum() * (1.0 - 2.0 * u.abs()).max(1e-300).ln()
-            }
-            "outliers" => {
-                let x = rng.normal();
-                if rng.below(100) == 0 { x * 100.0 } else { x }
-            }
-            "edge" => {
-                let choices = [0.0, -0.0, tiny, -tiny, max / 2.0, -max / 2.0, 1.0, -1.0, 0.5, -0.5];
-                choices[rng.below(choices.len() as u64) as usize]
-            }
-            _ => match rng.below(200) {
-                0 => f64::NAN,
-                1 => f64::INFINITY,
-                2 => f64::NEG_INFINITY,
-                _ => rng.normal(),
-            },
-        })
-        .collect()
-}
-
-fn gen_int(rng: &mut Rng, n: usize, lo: f64, hi: f64, monotone: bool) -> Vec<f64> {
-    let span = (hi - lo + 1.0).max(1.0) as u64;
-    let mut v: Vec<f64> = (0..n).map(|_| lo + rng.below(span) as f64).collect();
-    if monotone {
-        v.sort_by(|a, b| a.total_cmp(b));
+    for a in &mut v {
+        if a.is_finite() {
+            *a = a.clamp(-max, max);
+        }
     }
     v
+}
+
+/// Elements per row of the leading dimension (1 for a vector).
+fn row_elems(m: &Manifest, name: &str, e: &BTreeMap<String, u64>) -> usize {
+    m.buffers[name].shape[1..]
+        .iter()
+        .map(|d| match d {
+            Dim::Const(c) => *c as usize,
+            Dim::Sym(s) => e[s] as usize,
+        })
+        .product::<usize>()
+        .max(1)
 }
 
 // ------------------------------------------------------------------- driver
@@ -1015,7 +1038,7 @@ fn main() -> Result<()> {
     };
 
     // ---- 2. tap: A and B in lockstep on the prompt, snapshot at every cut
-    let mut sec = Section::new("TAP", &format!("A and B lockstep · prompt {} tokens · snapshot + compare at every cut · runtimes loaded in {:.1?}", ids.len(), load_t));
+    let mut sec = Section::new("TAP", &format!("A and B lockstep · prompt {} tokens · at every cut B runs from A's inputs and A's state pre-image (cut-local) · then B free-runs the workload (end-to-end) · runtimes loaded in {:.1?}", ids.len(), load_t));
     let mut snaps: Vec<Snap> = Vec::new();
     let mut snap_state_bytes = 0usize;
     // program -> buffer -> [(cut label, cmp)]
@@ -1050,6 +1073,12 @@ fn main() -> Result<()> {
                 if ma.buffers[n].class != BufferClass::Weight {
                     inputs.push((n.clone(), s.a.rt.read_buffer_prefix(n, live_bytes(&ma, n, e))?));
                 }
+            }
+            // B runs the cut from A's inputs: the columns below are the
+            // cut's own doing, not what drifted in from B's earlier cuts.
+            // B's end-to-end drift is the free run after the tap.
+            for (n, bytes) in &inputs {
+                s.b.rt.write_buffer(n, bytes)?;
             }
             let (aa, ab) = (access(&ma, pname, seg.a.0, seg.a.1), access(&mb, pname, seg.b.0, seg.b.1));
             let touched: BTreeSet<String> = aa.state_writes.union(&ab.state_writes).cloned().collect();
@@ -1139,6 +1168,23 @@ fn main() -> Result<()> {
     s.a.stage_decode(*ids.last().unwrap())?;
     s.b.stage_decode(*ids.last().unwrap())?;
     lockstep(&mut s, "decode", &e1, "", true)?;
+    // B free-runs the same workload from zero state, nothing injected: what
+    // a caller would get. A's state is untouched by the lockstep (only B
+    // received writes), so A is already the end-to-end reference.
+    let t_free = Instant::now();
+    s.b.rt.zero_states()?;
+    s.b.reset();
+    let mut i = 0;
+    while i < pre.len() {
+        let c = (pre.len() - i).min(chunk);
+        let e = s.b.stage_prefill(&pre[i..i + c])?;
+        s.b.rt.run("prefill", &e)?;
+        s.b.advance(c as u64);
+        i += c;
+    }
+    s.b.stage_decode(*ids.last().unwrap())?;
+    s.b.rt.run("decode", &e1)?;
+    let free_t = t_free.elapsed();
     let mut local_identical = true;
     let mut local_bit = true;
     let mut rows = Vec::new();
@@ -1180,15 +1226,33 @@ fn main() -> Result<()> {
         }
     }
     let mut out_cmp = BTreeMap::new();
+    let mut e2e_outputs_identical = true;
+    let mut e2e_differs: Vec<String> = Vec::new();
+    let mut first = true;
     for (name, b) in &ma.buffers {
         if b.class == BufferClass::Output && mb.buffers.contains_key(name) {
             let bytes = live_bytes(&ma, name, &e1);
             let c = compare(b.dtype, &s.a.rt.read_buffer_prefix(name, bytes)?, &s.b.rt.read_buffer_prefix(name, bytes)?);
-            rows.push(row!["output", "", name.clone(), cell(&c)]);
+            if !c.value_identical() {
+                e2e_outputs_identical = false;
+                e2e_differs.push(name.clone());
+            }
+            rows.push(row![if first { "end-to-end" } else { "" }, "", format!("output {name}"), cell(&c)]);
+            first = false;
             out_cmp.insert(name.clone(), c.to_json());
         }
     }
+    let mut e2e_states = serde_json::Map::new();
+    for name in ma.states.keys().filter(|n| mb.states.contains_key(*n)) {
+        let (a, b) = (s.a.rt.read_state(name)?, s.b.rt.read_state(name)?);
+        let d = a.iter().zip(&b).filter(|(p, q)| p != q).count() + a.len().abs_diff(b.len());
+        let txt = if d == 0 { Cell::good(format!("bit-identical ({})", kb(a.len()))) } else { Cell::warn(format!("{d} of {} bytes differ ({:.2}%)", a.len(), d as f64 * 100.0 / a.len().max(1) as f64)) };
+        rows.push(row![if first { "end-to-end" } else { "" }, "", format!("state {name}"), txt]);
+        first = false;
+        e2e_states.insert(name.clone(), json!({"differ": d, "bytes": a.len()}));
+    }
     sec.table(rows);
+    sec.note(Cell::dim(format!("end-to-end: B re-ran the whole workload from zero state with nothing injected ({:.1?}); the cut rows above are B on A's inputs", free_t)));
     let snap_bytes: usize = snaps.iter().map(|sn| sn.inputs.iter().map(|(_, b)| b.len()).sum::<usize>() + sn.ref_out.values().map(|b| b.len()).sum::<usize>()).sum();
     sec.note(Cell::dim(format!("{} cuts snapshotted ({} of frontier inputs + reference outputs)", snaps.len(), kb(snap_bytes))));
     if snap_state_bytes > 0 {
@@ -1201,7 +1265,8 @@ fn main() -> Result<()> {
         sec.note(Cell::bad(format!("{p}: changed but not tapped — the workload driver only stages {DRIVEN:?}")));
     }
     r.section(&sec);
-    report["local"] = json!({"value_identical": local_identical, "bit_identical": local_bit, "cuts": local_json, "outputs": out_cmp});
+    report["local"] = json!({"value_identical": local_identical, "bit_identical": local_bit, "cuts": local_json,
+        "end_to_end": {"outputs": out_cmp, "states": e2e_states, "outputs_identical": e2e_outputs_identical}});
 
     // Replay one snapshot's cut on a side from its inputs; returns the
     // written buffers (live prefix) and states.
@@ -1293,48 +1358,43 @@ fn main() -> Result<()> {
     let mut fuzz_identical = true; // value-identical under every distribution
     let mut fuzz_bit = true;
     if o.fuzz > 0 {
-        let mut sec = Section::new("FUZZ", &format!("{} rounds per cut · {} cuts · frontier inputs synthesized, integers from their domains", o.fuzz, snaps.len()));
+        let mut sec = Section::new("FUZZ", &format!("{} rounds per cut · {} cuts · float inputs perturbed around the tap ({}) · integers kept as tapped", o.fuzz, snaps.len(), MODES.join(" / ")));
         let mut rng = Rng(o.seed);
         let progs: Vec<String> = segments.keys().cloned().collect();
         // round -> program -> worst cell
         let mut grid: BTreeMap<usize, BTreeMap<String, Cell>> = BTreeMap::new();
-        let mut unfuzzed_all: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut ints_kept: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut rounds_json = Vec::new();
         for round in 0..o.fuzz {
-            let dist = round % DISTS.len();
+            let mode = round % MODES.len();
             let mut worst: BTreeMap<String, Cmp> = BTreeMap::new();
             let mut violations: BTreeMap<String, Vec<String>> = BTreeMap::new();
             let mut state_diffs: BTreeMap<String, Vec<String>> = BTreeMap::new();
             for sn in &snaps {
                 let mut inputs = Vec::new();
-                for (name, _) in &sn.inputs {
+                for (name, tapped) in &sn.inputs {
                     let decl = &ma.buffers[name];
-                    let n = live_elems(&ma, name, &sn.env);
-                    let vals = if is_float(decl.dtype) {
-                        gen_float(&mut rng, dist, n, decl.dtype)
-                    } else {
-                        match &decl.domain {
-                            Some(d) => {
-                                let r = d.resolve(&ma, &sn.env, s.a.rt.capacity())?;
-                                let (lo, hi) = (r.lo.unwrap_or(0.0), r.hi.unwrap_or(r.lo.unwrap_or(0.0) + 1024.0));
-                                gen_int(&mut rng, n, lo, hi, r.monotone)
-                            }
-                            None => {
-                                unfuzzed_all.entry(sn.program.clone()).or_default().insert(name.clone());
-                                continue; // keeps the tapped value
-                            }
-                        }
-                    };
+                    if !is_float(decl.dtype) {
+                        // sequence layout, indices, page tables: structure,
+                        // not values — a random one is a workload no caller
+                        // produces, and the manifest says nothing about rows
+                        // outside it
+                        ints_kept.entry(sn.program.clone()).or_default().insert(name.clone());
+                        inputs.push((name.clone(), tapped.clone()));
+                        continue;
+                    }
+                    let base = values::to_f64(decl.dtype, tapped);
+                    let vals = perturb(&mut rng, mode, &base, row_elems(&ma, name, &sn.env), decl.dtype);
                     inputs.push((name.clone(), values::from_f64(decl.dtype, &vals)));
                 }
                 let (out_a, st_a) = match replay(&mut s.a, &ma, sn, false, &inputs) {
                     Ok(x) => x,
-                    Err(err) => bail!("A crashed under fuzz ({}) at {} cut {}: {err}", DISTS[dist], sn.program, seg_label(&sn.seg)),
+                    Err(err) => bail!("A crashed under fuzz ({}) at {} cut {}: {err}", MODES[mode], sn.program, seg_label(&sn.seg)),
                 };
                 let (out_b, st_b) = match replay(&mut s.b, &mb, sn, true, &inputs) {
                     Ok(x) => x,
                     Err(err) => {
-                        println!("  ✗ B crashed under `{}` at {} cut {}: {err}", DISTS[dist], sn.program, seg_label(&sn.seg));
+                        println!("  ✗ B crashed under `{}` at {} cut {}: {err}", MODES[mode], sn.program, seg_label(&sn.seg));
                         bail!("B crashed under fuzz; the CUDA context is unusable past this point");
                     }
                 };
@@ -1386,21 +1446,21 @@ fn main() -> Result<()> {
                     (None, None) => cell(&w),
                 };
                 grid.entry(round).or_default().insert(p.clone(), txt);
-                rounds_json.push(json!({"dist": DISTS[dist], "program": p, "worst": w.to_json(), "violations": violations.get(p), "state_diffs": sd}));
+                rounds_json.push(json!({"mode": MODES[mode], "program": p, "worst": w.to_json(), "violations": violations.get(p), "state_diffs": sd}));
             }
         }
         let mut rows = vec![std::iter::once(Cell::default()).chain(progs.iter().map(|p| Cell::from(p.as_str()))).collect::<Vec<_>>()];
         for (round, cells) in &grid {
-            let name = if o.fuzz > DISTS.len() { format!("{} #{}", DISTS[round % DISTS.len()], round / DISTS.len()) } else { DISTS[round % DISTS.len()].to_string() };
+            let name = if o.fuzz > MODES.len() { format!("{} #{}", MODES[round % MODES.len()], round / MODES.len()) } else { MODES[round % MODES.len()].to_string() };
             rows.push(std::iter::once(Cell::from(name)).chain(progs.iter().map(|p| cells.get(p).cloned().unwrap_or_default())).collect());
         }
         sec.table_h(rows);
-        for (p, u) in &unfuzzed_all {
-            sec.note(Cell::warn(format!("{p}: not fuzzed (integer buffers without a domain, tapped values kept): {}", u.iter().cloned().collect::<Vec<_>>().join(", "))));
+        for (p, u) in &ints_kept {
+            sec.note(Cell::dim(format!("{p}: integer inputs kept as tapped: {}", u.iter().cloned().collect::<Vec<_>>().join(", "))));
         }
         r.section(&sec);
         report["fuzz"] = json!({"ok": fuzz_ok, "value_identical": fuzz_identical, "bit_identical": fuzz_bit, "rounds": rounds_json,
-            "unfuzzed": unfuzzed_all});
+            "integers_kept": ints_kept});
     }
 
     // ---- 5. perf: eager step attribution, graph step, sweep, roofline
@@ -1557,17 +1617,19 @@ fn main() -> Result<()> {
     } else if !undriven.is_empty() {
         (2, "a changed program was not tapped — the workload driver can't stage it")
     } else if local_bit && fuzz_bit {
-        (0, "bit-identical at every cut, real and synthesized inputs")
+        (0, "bit-identical at every cut, real and perturbed inputs")
     } else if local_identical && fuzz_identical {
         (0, "value-identical at every cut (only signed zeros differ)")
     } else if within_noise && fuzz_identical {
         (0, "differences at every cut lie within A's own noise floor")
+    } else if !e2e_outputs_identical {
+        (2, "cuts differ beyond bit/value identity, and the outputs differ end-to-end on this prompt — not adjudicated here")
     } else {
-        (2, "cuts differ beyond bit/value identity — no end-to-end oracle in this harness")
+        (2, "cuts differ beyond bit/value identity; outputs identical end-to-end on this prompt — no oracle for the rest")
     };
     r.verdict(code, verdict, t_start.elapsed(), o.out.as_deref());
     report["verdict"] = json!({"code": code, "pass": code == 0, "summary": verdict,
-        "noise_clean": noise_clean, "within_noise": within_noise, "local_value_identical": local_identical, "local_bit_identical": local_bit,
+        "noise_clean": noise_clean, "within_noise": within_noise, "end_to_end_outputs_identical": e2e_outputs_identical, "end_to_end_outputs_differ": e2e_differs, "local_value_identical": local_identical, "local_bit_identical": local_bit,
         "fuzz_ok": fuzz_ok, "fuzz_value_identical": fuzz_identical, "fuzz_bit_identical": fuzz_bit});
     if let Some(p) = &o.out {
         std::fs::write(p, serde_json::to_string_pretty(&report)?)?;

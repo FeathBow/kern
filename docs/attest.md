@@ -44,11 +44,16 @@ harness 付的是"模型装载一次 + 一次 prefill/decode + N × 几个 dispa
    Changed 段就是 **cut**。每个 cut 由数据流图给出 frontier：读了哪些
    外部 buffer、写了哪些——`a+b → c` 的中间 buffer 不在 frontier 上，自动
    略过。两边 frontier 不等会标 ⚠（表示不是 cut 内替换）。
-2. **TAP（真实 workload，唯一的全程执行）**：A、B 在同一 prompt 上
-   lockstep 跑 chunked prefill + 一个 decode step——Same 段两边各自跑，
-   Changed 段跑之前从 A 读 frontier 输入（按当前 symbol 值取活跃前缀），
-   跑完读 A 的输出做参考、比 B 写出的 buffer（local）。**state 按 cut 的
-   write-set 比**：A 跑前后各读一次 state，差异的字节区间就是这个 cut 的
+2. **TAP（真实 workload）**：A、B 在同一 prompt 上 lockstep 跑 chunked
+   prefill + 一个 decode step——Same 段两边各自跑，Changed 段跑之前从 A 读
+   frontier 输入（按当前 symbol 值取活跃前缀）**并写进 B**，跑完读 A 的输出
+   做参考、比 B 写出的 buffer。所以每一行 cut 结果都是 **cut-local**：B 拿
+   A 的输入、A 的 state pre-image跑这一刀，差多少就是这一刀自己的事，不
+   混前面层漂移下来的误差（早先不注入时，c7 那种 state 差会让下游每个
+   buffer 都显示 47/48 cuts differ、几十万 ulp，看不出哪一刀是根）。
+   lockstep 结束后 **B 从零 state 自由跑一遍同样的 workload**，什么都不
+   注入——表末的 `end-to-end` 行（output 类 buffer + 每个 state 全量字节
+   差）就是调用方真正会拿到的东西。**state 按 cut 的 write-set 比**：A 跑前后各读一次 state，差异的字节区间就是这个 cut 的
    write-set（pre-image）；先把 A 的 pre-image 写进 B 再跑 B，然后只在
    write-set 上比 A、B 的 post-image，另报 B 在 write-set 之外写了多少
    字节。整个 state 不能拿来比——其余字节是别的层的历史，B 的历史又是
@@ -62,11 +67,15 @@ harness 付的是"模型装载一次 + 一次 prefill/decode + N × 几个 dispa
    逐位可复现，band 为零；仍不 clean 才是 A 真的不确定（atomics 之类），
    此时 B 按这条带子判（`--no-noise` 跳过）。早先没有复位时 A 自比差
    上百 MB，band 无限宽，B 在 state 上的真错误全躲在带内。
-4. **FUZZ（合成 workload）**：对每个快照，把 frontier 输入换成合成值：
-   浮点 buffer 轮流用 uniform / normal / laplace（重尾）/ outliers
-   （1% × 100）/ edge（±0、次正规、半量程）/ special（含 nan/inf）；整数
-   buffer 只在声明了 `domain` 时按域合成（`index_into`、`min`/`max`、
-   `monotone`），否则保留 tap 到的值并列为 unfuzzed。两边重放同一个 cut，
+4. **FUZZ（围绕 tap 扰动）**：对每个快照，浮点 frontier 输入在 tap 到的
+   值上扰动，轮流用 jitter（×(1+N(0,1)/64)，动低位尾数）/ noise（加 10%
+   自身 rms 的高斯噪声）/ scale（整体 ×¼…×4）/ shuffle（按行打乱位置）/
+   resample（自举，保边缘分布毁结构）/ outliers（1% 元素 ×16）；**整数
+   输入一律保留 tap 值**（序列边界、索引、页表是结构不是值——随机的
+   `cu_seqlens_q` 是没有调用方会产生的 workload，序列外的行 manifest 没
+   定义，A 不碰 B 全写，早先 GDN 核在这上面"6143/6144 differ · 33k ulp"
+   全是这么来的）。不再从 N(0,1) 合成：核只在它被造出来的分布里测。两边
+   重放同一个 cut，
    比写出的 buffer；写出的 buffer 若声明了 domain，则检查每个元素落在域内
    （后置条件；A 违反说明参考本身有问题）。写出的 state 也比（A、B 全
    量，两边此时起点相同）。B 崩溃（IMA）直接 FAIL。

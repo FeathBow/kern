@@ -417,6 +417,16 @@ impl Runtime {
         Ok(())
     }
 
+    /// Zero every state (synchronous): a fresh sequence from position 0,
+    /// the way the runtime was loaded.
+    pub fn zero_states(&mut self) -> Result<()> {
+        for s in self.states.values_mut() {
+            self.stream.memset_zeros(&mut s.slice)?;
+        }
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
     /// Whole allocation of a state.
     pub fn read_state(&self, name: &str) -> Result<Vec<u8>> {
         let Some(s) = self.states.get(name) else {
