@@ -6,7 +6,6 @@ edition.workspace = true
 [dependencies]
 kern-manifest.workspace = true
 kern-runtime = { path = "../kern-runtime" }
-kern-serve.workspace = true
 
 anyhow.workspace = true
 clap.workspace = true

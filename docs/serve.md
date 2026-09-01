@@ -1,14 +1,16 @@
-# `kern serve`：continuous batching + OpenAI 兼容 endpoint
+# `kern-serve`：continuous batching + OpenAI 兼容 endpoint
 
 ```bash
-kern serve --model-path /mnt/shared/weights/Qwen3-4B --gpu 3 --port 8000 --capacity 262144
+# 独立 workspace（serving 栈不进 runtime 的依赖图和 CI）；binary 在 crates/kern-serve/target/
+cd crates/kern-serve && cargo build --release
+target/release/kern-serve --model-path /mnt/shared/weights/Qwen3-4B --gpu 3 --port 8000 --capacity 262144
 # /v1/completions、/v1/chat/completions（流式 + chat template）、/v1/models、/metrics
 ```
 
 manifest / kernels / weights 来自 kern.toml 的 target；`--model-path` 是给
 **前端**的 HF 目录（tokenizer、chat template、`generation_config.json` 的
 eos）。前端整个来自 pegainfer（`pegainfer-frontend`，底下是 vLLM 官方的
-Rust server crates），kern 只贡献引擎：`crates/kern-serve`。
+Rust server crates，开发期以 path dep 指向 sibling checkout `../pegainfer`），kern 只贡献引擎：`crates/kern-serve`。
 
 ## 分工
 

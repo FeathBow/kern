@@ -1,4 +1,4 @@
-//! `kern serve`: an OpenAI-compatible HTTP endpoint over a kern manifest.
+//! `kern-serve`: an OpenAI-compatible HTTP endpoint over a kern manifest.
 //!
 //! The HTTP/protocol stack is pegainfer's frontend (vLLM's Rust server
 //! crates underneath: completions, chat completions, streaming, chat

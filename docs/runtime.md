@@ -5,7 +5,7 @@
 - **只做 `decode` 一个 program**：prefill 视为特殊的 decode——prompt 逐 token
   过 decode 路径（tokens=1）。慢但正确，先让端到端闭环；真 prefill program
   之后加。
-- **bs=1**，不考虑 batching。（已扩展：`kern serve` 的 continuous batching 见 [serve.md](serve.md)——decode 多序列，prefill 仍 bs=1。）
+- **bs=1**，不考虑 batching。（已扩展：`kern-serve` 的 continuous batching 见 [serve.md](serve.md)——decode 多序列，prefill 仍 bs=1。）
 - GEMM 走 runtime 特判（cublasLt extern op）；attention 与 reshape_and_cache
   收编 vLLM TRITON_ATTN backend 的 Triton 核；norm/rope/silu 收编 vLLM CUDA
   cubin。自己写的核只有两个（`tools/kernels-src/`）：embedding（trivial
