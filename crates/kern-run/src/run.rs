@@ -84,11 +84,16 @@ pub struct RunOpts {
     pub stop_tokens: Vec<i64>,
 
     /// Debug: dump per-layer activations (`y` after every `*.down_proj`,
-    /// embedding, logits) of the first prefill chunk and two decode steps (`KERN_PROBE_STEPS` overrides)
-    /// into this directory, then exit. Programs run call-range by
-    /// call-range so nothing executes twice.
+    /// embedding, logits) of the first prefill chunk and `--probe-steps`
+    /// decode steps into this directory, then exit. Programs run call-range
+    /// by call-range so nothing executes twice. With `--spec`: the run goes
+    /// on, and every round's verify rows (ids, predictions, logits) land
+    /// here instead — the path-vs-path oracle for a state layout change.
     #[arg(long)]
     pub probe_dir: Option<PathBuf>,
+    /// Decode steps `--probe-dir` dumps
+    #[arg(long, default_value_t = 2)]
+    pub probe_steps: usize,
 }
 
 /// Resolved options: flag, else kern.toml, else default.
@@ -106,6 +111,7 @@ struct Opts {
     spec: bool,
     stop_tokens: Vec<i64>,
     probe_dir: Option<PathBuf>,
+    probe_steps: usize,
 }
 
 impl RunOpts {
@@ -125,6 +131,7 @@ impl RunOpts {
             spec: self.spec,
             stop_tokens: self.stop_tokens,
             probe_dir: self.probe_dir,
+            probe_steps: self.probe_steps,
         })
     }
 }
@@ -259,8 +266,8 @@ fn execute(o: Opts) -> Result<()> {
 
     let mut caller = Caller::new(rt)?;
 
-    if let Some(dir) = &o.probe_dir {
-        return probe(&mut caller, &prompt_ids, dir, o.chunk);
+    if let (Some(dir), false) = (&o.probe_dir, o.spec) {
+        return probe(&mut caller, &prompt_ids, dir, o.chunk, o.probe_steps);
     }
 
     // Chunked prefill: repeated `prefill` calls. Two caller contracts:
@@ -394,8 +401,9 @@ fn execute(o: Opts) -> Result<()> {
 /// prefill chunk and two decode steps, each run as consecutive call
 /// ranges cut after `embed` and every `l<i>.down_proj`, dumping `residual`
 /// / `y` (live `tokens` rows) and the final logits as raw little-endian
-/// files `<tag>.<point>.bin`.
-fn probe(caller: &mut Caller, prompt_ids: &[i64], dir: &std::path::Path, chunk: u64) -> Result<()> {
+/// files `<tag>.<point>.bin`, for the first prefill chunk and `steps`
+/// decode steps.
+fn probe(caller: &mut Caller, prompt_ids: &[i64], dir: &std::path::Path, chunk: u64, steps: usize) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     match caller.rt.manifest.buffers["y"].shape.as_slice() {
         [Dim::Var(_), Dim::Const(_)] => {}
@@ -468,8 +476,6 @@ fn probe(caller: &mut Caller, prompt_ids: &[i64], dir: &std::path::Path, chunk: 
         caller.prefill(&prompt_ids[c..n_pre], chunk as u64, true)?;
     }
     let mut tok = if prefill_all { caller.next_token()? } else { prompt_ids[n_pre] };
-    // KERN_PROBE_STEPS=<n>: decode steps to dump (default 2).
-    let steps: usize = std::env::var("KERN_PROBE_STEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(2);
     for s in 0..steps {
         let e = caller.stage_decode(tok)?;
         run_probed(&caller.rt, "decode", &e, 1, &format!("decode{s}"))?;
@@ -592,10 +598,9 @@ fn spec_decode(caller: &mut Caller, o: &Opts, prompt_ids: &[i64], mut generated:
             rt.run_captured("verify", &env(verify_n as u64))?;
         }
         let vt = i64_from_le(&rt.read_output("verify_tokens")?);
-        // KERN_SPEC_DUMP=<dir>: per round, the verify rows' ids, predictions
-        // and logits (`logits_blk`, first verify_n rows) for path-vs-path diffs.
-        if let Ok(dir) = std::env::var("KERN_SPEC_DUMP") {
-            let dir = std::path::Path::new(&dir);
+        // --probe-dir: this round's verify rows — ids, predictions and
+        // logits (`logits_blk`, first verify_n rows).
+        if let Some(dir) = &o.probe_dir {
             std::fs::create_dir_all(dir)?;
             let vocab = rt.manifest.buffers["logits_blk"].shape[1..]
                 .iter()

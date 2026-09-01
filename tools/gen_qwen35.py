@@ -965,9 +965,10 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
                                              "in buffer<i32>", "in buffer<i32>", "out buffer<bf16>",
                                              "i32", "i32", "i64", "i64"] + I2,
                                             [S, CONV_DIM // 256, 1]),
-            # recurrent delta rule over T rows with the sigmoid gating fused:
-            # initial state from SSM slot num_accepted-1, every row's state
-            # checkpointed to its own slot (ssm_state_indices)
+            # recurrent delta rule over each sequence's rows with the sigmoid
+            # gating fused: initial state from entry num_accepted-1 of the
+            # sequence's line-table cell, the state after row i stored to
+            # entry i wherever that entry is non-null
             "recurrent_spec": spec_kernel("recurrent_spec",
                                           ["in buffer<f32>", "in buffer<bf16>", "in buffer<bf16>", "in buffer<bf16>",
                                            "f32", "f32", "in buffer<bf16>", "in buffer<bf16>", "in buffer<bf16>",
@@ -1164,6 +1165,8 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
         return [
             d(l + "mask_a", "mask_row0", [buf("a_c"), as_, T, i32(SPEC_BLOCK), i32(GDN_V_HEADS)]),
             d(l + "mask_b", "mask_row0", [buf("b_c"), bs_, T, i32(SPEC_BLOCK), i32(GDN_V_HEADS)]),
+            # q is not part of the state update (it only shapes the output,
+            # which advance discards), so k stands in for it
             d(l + "recurrent", "recurrent_spec",
               [buf(p + "A_log"), buf("a_c"), buf("b_c"), buf(p + "dt_bias"), f32(1.0), f32(20.0),
                ks, ks, vs_, buf("core_attn_out"),

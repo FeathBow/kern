@@ -81,6 +81,15 @@ pub struct Policy {
 const DSPARK_MASK_TOKEN: i64 = 151669;
 
 /// The manifest's speculative contract, one row-group per sequence.
+/// A line table over a per-sequence state, shaped `[lines, seqs]` or
+/// `[lines, seqs, w]`: `rows` lines per sequence, `width` entries per
+/// (line, sequence) cell.
+struct LineTable {
+    name: String,
+    rows: usize,
+    width: usize,
+}
+
 struct SpecPlan {
     /// Tokens `draft` proposes per sequence (`draft_tokens` is `[seqs, n]`).
     n_drafts: usize,
@@ -119,10 +128,8 @@ pub struct KernScheduler {
     spec: Option<SpecPlan>,
     /// `prefill` emits `next_token` itself (see the module doc).
     prefill_emits: bool,
-    /// The manifest's line tables over per-sequence states: (name, lines
-    /// per sequence, entries per cell), shaped `[lines, seqs]` or
-    /// `[lines, seqs, w]`.
-    line_tables: Vec<(String, usize, usize)>,
+    /// The manifest's line tables over per-sequence states.
+    line_tables: Vec<LineTable>,
     /// The page tables, each shaped `[seqs, n]`: `block_table` and, under
     /// speculation, the draft's.
     page_tables: Vec<String>,
@@ -178,9 +185,9 @@ impl KernScheduler {
         let line_tables = rt
             .seq_tables()
             .map(|name| match m.buffers[name].shape.as_slice() {
-                [Dim::Const(rows), Dim::Var(v)] if v == "seqs" => Ok((name.to_string(), *rows as usize, 1)),
+                [Dim::Const(rows), Dim::Var(v)] if v == "seqs" => Ok(LineTable { name: name.to_string(), rows: *rows as usize, width: 1 }),
                 [Dim::Const(rows), Dim::Var(v), Dim::Const(w)] if v == "seqs" => {
-                    Ok((name.to_string(), *rows as usize, *w as usize))
+                    Ok(LineTable { name: name.to_string(), rows: *rows as usize, width: *w as usize })
                 }
                 s => bail!("line table `{name}` shaped {s:?}, expected [lines, seqs] or [lines, seqs, w]"),
             })
@@ -853,13 +860,13 @@ fn run_program(rt: &mut Runtime, program: &str, env: &BTreeMap<String, u64>, eag
 /// null line 0 in the rest — and the pad's line past the batch.
 fn stage_lines(
     rt: &mut Runtime,
-    tables: &[(String, usize, usize)],
+    tables: &[LineTable],
     seqs_max: usize,
     pad: &Lease,
     seqs: &[&Lease],
     cols: &[usize],
 ) -> Result<()> {
-    for (name, rows, w) in tables {
+    for LineTable { name, rows, width: w } in tables {
         let mut t = vec![0i32; rows * seqs_max * w];
         for r in 0..*rows {
             let fill = pad.seq_line(name, r)?;

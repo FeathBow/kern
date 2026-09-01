@@ -74,7 +74,7 @@ pub fn first_i64(bytes: &[u8]) -> i64 {
 fn stage_lines(rt: &mut Runtime, lease: &Lease, col: usize) -> Result<()> {
     let tables: Vec<String> = rt.seq_tables().map(str::to_string).collect();
     for name in tables {
-        let cols = match rt.manifest.buffers[&name].shape.as_slice() {
+        let seqs = match rt.manifest.buffers[&name].shape.as_slice() {
             [Dim::Const(_)] => 1,
             [Dim::Const(_), Dim::Var(v)] | [Dim::Const(_), Dim::Var(v), Dim::Const(_)] => rt.manifest.vars[v].max,
             s => bail!("unexpected {name} shape {s:?}"),
@@ -84,7 +84,7 @@ fn stage_lines(rt: &mut Runtime, lease: &Lease, col: usize) -> Result<()> {
         let mut table = Vec::new();
         for r in 0..lease.seq_lines(&name)? {
             let line = lease.seq_line(&name, r)?;
-            for _ in 0..cols {
+            for _ in 0..seqs {
                 table.extend((0..w).map(|j| if j == col { line } else { 0 }));
             }
         }
