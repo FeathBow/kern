@@ -3,7 +3,6 @@
 # into them. Paths are relative to this file. See crates/kern-run/src/config.rs.
 
 gpu = 0
-capacity = 4096
 
 # The repo's fixture: the mined silu impl against the hub one.
 [targets.qwen3-4b]

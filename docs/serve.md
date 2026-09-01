@@ -3,7 +3,10 @@
 ```bash
 # 独立 workspace（serving 栈不进 runtime 的依赖图和 CI）；binary 在 crates/kern-serve/target/
 cd crates/kern-serve && cargo build --release
-target/release/kern-serve --model-path /mnt/shared/weights/Qwen3-4B --gpu 3 --port 8000 --capacity 262144
+target/release/kern-serve --model-path /mnt/shared/weights/Qwen3-4B --gpu 3 --port 8000
+# KV 池默认按显存自动定：权重/激活/scratch 分完后，剩余显存减 1 GiB 全给 state，
+# 上限 seqs.max × 单序列行上限（再多也租不出去）。`--capacity <tokens>` 或 kern.toml 的
+# `capacity` 显式给则照旧。
 # /v1/completions、/v1/chat/completions（流式 + chat template）、/v1/models、/metrics
 ```
 

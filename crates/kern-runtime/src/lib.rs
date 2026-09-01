@@ -123,12 +123,15 @@ impl Runtime {
     /// Verify the manifest, load every `*.cubin` under `kernels_dir`, resolve
     /// ops, allocate all buffers and states, and lower every program.
     /// `state_capacity_tokens` scales each declared state by its
-    /// `bytes_per_token` (a fixed-`bytes` state is allocated as declared).
+    /// `bytes_per_token` (a fixed-`bytes` state is allocated as declared);
+    /// `None` fits the states to the device: whatever memory is free once
+    /// everything else is allocated, less [`HEADROOM`], but never more
+    /// than every sequence the manifest can run at once could reference.
     pub fn load(
         manifest_json: &str,
         kernels_dir: &std::path::Path,
         gpu: usize,
-        state_capacity_tokens: u64,
+        state_capacity_tokens: Option<u64>,
     ) -> Result<Runtime> {
         let manifest = Manifest::from_json(manifest_json)?;
         kern_manifest::verify(&manifest)?;
@@ -158,21 +161,6 @@ impl Runtime {
             .filter(|d| d.index_into.as_deref().is_some_and(|s| manifest.states.contains_key(s)))
             .map(|d| d.stride.max(1))
             .fold(1u64, lcm);
-        let state_capacity_tokens = if state_capacity_tokens % page == 0 {
-            state_capacity_tokens
-        } else {
-            let aligned = state_capacity_tokens / page * page;
-            if aligned == 0 {
-                return Err(Error::Manifest(format!(
-                    "state capacity {state_capacity_tokens} tokens is smaller than one page ({page} tokens)"
-                )));
-            }
-            tracing::warn!(
-                "state capacity {state_capacity_tokens} is not a multiple of the page unit {page}; using {aligned}"
-            );
-            aligned
-        };
-
         let max_env: BTreeMap<_, _> =
             manifest.vars.iter().map(|(s, v)| (s.clone(), v.max)).collect();
 
@@ -187,15 +175,6 @@ impl Runtime {
             )?;
             buffers.insert(name.clone(), alloc(&stream, bytes)?);
         }
-        let mut states = BTreeMap::new();
-        for (name, s) in &manifest.states {
-            let bytes = s
-                .bytes_per_token
-                .checked_mul(state_capacity_tokens)
-                .and_then(|b| b.checked_add(s.bytes))
-                .ok_or_else(|| Error::Manifest(format!("state `{name}`: size overflow")))?;
-            states.insert(name.clone(), alloc(&stream, bytes)?);
-        }
         let mut staging = BTreeMap::new();
         for (name, b) in &manifest.buffers {
             if b.kind == BufferKind::Input {
@@ -206,7 +185,39 @@ impl Runtime {
             }
         }
 
+        // Op scratch is allocated here, at var max, like the buffers.
         let resolved = compile::resolve_ops(&manifest, &modules, kernels_dir, &stream, &max_env)?;
+
+        // Everything but the states is on the device now: what is left is
+        // the states' to take (weights are bound into buffers already
+        // sized, so binding later costs nothing more).
+        let state_capacity_tokens = match state_capacity_tokens {
+            Some(asked) => {
+                let aligned = asked / page * page;
+                if aligned == 0 {
+                    return Err(Error::Manifest(format!(
+                        "state capacity {asked} tokens is smaller than one page ({page} tokens)"
+                    )));
+                }
+                if aligned != asked {
+                    tracing::warn!(
+                        "state capacity {asked} is not a multiple of the page unit {page}; using {aligned}"
+                    );
+                }
+                aligned
+            }
+            None => fit_capacity(&manifest, &ctx, page)?,
+        };
+
+        let mut states = BTreeMap::new();
+        for (name, s) in &manifest.states {
+            let bytes = s
+                .bytes_per_token
+                .checked_mul(state_capacity_tokens)
+                .and_then(|b| b.checked_add(s.bytes))
+                .ok_or_else(|| Error::Manifest(format!("state `{name}`: size overflow")))?;
+            states.insert(name.clone(), alloc(&stream, bytes)?);
+        }
         let resolution = resolved.iter().map(|(n, rk)| (n.clone(), rk.launch_modules())).collect();
         let programs = compile::compile_programs(&manifest, &resolved, &buffers, &states)?;
         let scratch = resolved.into_values().flat_map(|rk| rk.scratch.into_values()).collect();
@@ -769,6 +780,67 @@ impl Runtime {
 
 fn gcd(a: u64, b: u64) -> u64 {
     if b == 0 { a } else { gcd(b, a % b) }
+}
+
+/// Device memory left untouched when the states are fitted to the device:
+/// the driver's own allocations after load (captured graphs, module
+/// lazy-loading, cuBLASLt algorithm state) and a margin for a neighbour.
+pub const HEADROOM: u64 = 1 << 30;
+
+/// State capacity that fits the device: free memory (after every buffer
+/// and scratch allocation) less [`HEADROOM`] and the states' fixed bytes,
+/// divided among the per-token states, in whole pages; capped at what the
+/// manifest's `seqs` bound of sequences could each hold at the page-table
+/// row limit, since no lease can reach past that.
+fn fit_capacity(m: &Manifest, ctx: &CudaContext, page: u64) -> Result<u64> {
+    let (free, total) = ctx.mem_get_info()?;
+    let (free, total) = (free as u64, total as u64);
+    let per_token: u64 = m.states.values().map(|s| s.bytes_per_token).sum();
+    let fixed: u64 = m.states.values().map(|s| s.bytes).sum();
+    let seqs = m.vars.get("seqs").map_or(1, |v| v.max.max(1));
+    // One page over the row cap: a batched caller pads its decode rows
+    // into a page no sequence owns.
+    let cap = pages::row_tokens(m, page).map(|row| row.saturating_mul(seqs).saturating_add(page));
+
+    let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
+    if per_token == 0 {
+        // Nothing scales with tokens; the capacity only sizes the pool.
+        let c = cap.unwrap_or(page);
+        tracing::info!("state capacity {c} tokens (no per-token state); {:.1} GiB free of {:.1}", gib(free), gib(total));
+        return Ok(c);
+    }
+    let Some(budget) = free.checked_sub(HEADROOM).and_then(|b| b.checked_sub(fixed)) else {
+        return Err(Error::Cuda(format!(
+            "{:.2} GiB free of {:.1} on the device: not enough for one page of state after {:.1} GiB headroom",
+            gib(free), gib(total), gib(HEADROOM)
+        )));
+    };
+    let by_memory = budget / per_token / page * page;
+    if by_memory == 0 {
+        return Err(Error::Cuda(format!(
+            "{:.2} GiB free of {:.1} on the device: one page of state is {:.2} GiB, headroom {:.1} GiB",
+            gib(free), gib(total), gib(per_token * page), gib(HEADROOM)
+        )));
+    }
+    let c = cap.map_or(by_memory, |cap| by_memory.min(cap));
+    let bound = match cap {
+        Some(cap) if c < by_memory => {
+            let row = cap - page;
+            format!(
+                "bound by the manifest: {seqs} sequences × {} tokens is all a lease can reach; memory would hold {} such sequences",
+                row / seqs,
+                by_memory / (row / seqs)
+            )
+        }
+        _ => format!("bound by memory, {:.1} GiB headroom", gib(HEADROOM)),
+    };
+    tracing::info!(
+        "state capacity {c} tokens ({:.1} GiB); device {:.1} GiB free of {:.1}; {bound}",
+        gib(c * per_token + fixed),
+        gib(free),
+        gib(total),
+    );
+    Ok(c)
 }
 
 fn lcm(a: u64, b: u64) -> u64 {

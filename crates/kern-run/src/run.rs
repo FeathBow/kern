@@ -155,7 +155,7 @@ fn execute(o: Opts) -> Result<()> {
     let manifest_json = std::fs::read_to_string(&o.manifest)
         .with_context(|| format!("reading manifest {}", o.manifest.display()))?;
     let t0 = Instant::now();
-    let mut rt = Runtime::load(&manifest_json, &o.kernels, o.gpu, o.capacity)?;
+    let mut rt = Runtime::load(&manifest_json, &o.kernels, o.gpu, Some(o.capacity))?;
     let load_t = t0.elapsed();
 
     let m = &rt.manifest;

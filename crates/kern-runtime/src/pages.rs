@@ -46,27 +46,33 @@ fn lock(free: &Mutex<Vec<i32>>) -> MutexGuard<'_, Vec<i32>> {
     free.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The page tables: every input whose domain `index_into`s a state.
+fn tables(m: &Manifest) -> BTreeMap<String, Table> {
+    m.buffers
+        .iter()
+        .filter_map(|(name, b)| {
+            let d = b.domain.as_ref()?;
+            if !m.states.contains_key(d.index_into.as_deref()?) {
+                return None;
+            }
+            let Some(Dim::Const(width)) = b.shape.last() else { return None };
+            Some((name.clone(), Table { stride: d.stride.max(1), width: *width as usize }))
+        })
+        .collect()
+}
+
+/// Tokens one sequence can hold, in whole pages of `unit`: what the
+/// narrowest page-table row references. `None` when nothing is paged.
+pub(crate) fn row_tokens(m: &Manifest, unit: u64) -> Option<u64> {
+    tables(m).values().map(|t| t.width as u64 * t.stride / unit * unit).min()
+}
+
 impl Pool {
     /// `capacity` is a multiple of `unit`, the lcm of every table stride.
     pub(crate) fn new(m: &Manifest, capacity: u64, unit: u64) -> Pool {
         let total = (capacity / unit) as usize;
-        let tables: BTreeMap<String, Table> = m
-            .buffers
-            .iter()
-            .filter_map(|(name, b)| {
-                let d = b.domain.as_ref()?;
-                if !m.states.contains_key(d.index_into.as_deref()?) {
-                    return None;
-                }
-                let Some(Dim::Const(width)) = b.shape.last() else { return None };
-                Some((name.clone(), Table { stride: d.stride.max(1), width: *width as usize }))
-            })
-            .collect();
-        let max_pages = tables
-            .values()
-            .map(|t| (t.width as u64 * t.stride / unit) as usize)
-            .min()
-            .unwrap_or(total);
+        let tables = tables(m);
+        let max_pages = row_tokens(m, unit).map_or(total, |t| (t / unit) as usize);
         Pool { unit, total, max_pages, tables, free: Mutex::new((0..total as i32).collect()) }
     }
 

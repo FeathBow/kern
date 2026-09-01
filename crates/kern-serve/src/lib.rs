@@ -57,7 +57,9 @@ pub struct ServeOpts {
     pub gpu: Option<usize>,
 
     /// KV pool in tokens (rounded down to the page); every request reserves
-    /// its worst case `prompt + max_tokens` at admission
+    /// its worst case `prompt + max_tokens` at admission. Default: whatever
+    /// device memory is left once weights, activations and scratch are
+    /// allocated, less 1 GiB
     #[arg(long)]
     pub capacity: Option<u64>,
 
@@ -106,7 +108,7 @@ pub fn serve(o: ServeOpts, art: Artifacts, d: Defaults) -> Result<()> {
     // The frontend logs through `log`; route it into tracing.
     let _ = tracing_log::LogTracer::init();
     let gpu = o.gpu.or(d.gpu).unwrap_or(0);
-    let capacity = o.capacity.or(d.capacity).unwrap_or(65536);
+    let capacity = o.capacity.or(d.capacity);
     let chunk = o.chunk.or(d.chunk).unwrap_or(512) as usize;
     let mut stop_tokens = hf_stop_tokens(&o.model_path);
     stop_tokens.extend(&o.stop_tokens);
