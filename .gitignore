@@ -11,3 +11,4 @@ tools/kernel-capture/libkernelcapture.so
 /attestation.json
 /kernels-qwen38-dflash2
 /crates/kern-serve/target
+/crates/kern-serve/target-lab

@@ -18,7 +18,7 @@ use clap::Args;
 use crate::config::{Config, Target};
 use kern_manifest::types::Dim;
 use crate::{
-    env, first_i64, i64_from_le, le_bytes_i32, le_bytes_i64, prefill_emits_next_token, Caller,
+    env, i64_from_le, le_bytes_i32, le_bytes_i64, prefill_emits_next_token, Caller,
     STOP_TOKENS,
 };
 use kern_runtime::Runtime;
@@ -318,8 +318,7 @@ fn execute(o: Opts) -> Result<()> {
         }
     }
     if o.spec {
-        let pos = caller.pos;
-        let generated = spec_decode(&mut caller.rt, &o, &prompt_ids, pos, generated)?;
+        let generated = spec_decode(&mut caller, &o, &prompt_ids, generated)?;
         info!("generated ids: {generated:?}");
         let gen_u32: Vec<u32> = generated.iter().map(|&t| t as u32).collect();
         let text = tokenizer.decode(&gen_u32, false).map_err(|e| anyhow::anyhow!("decode: {e}"))?;
@@ -365,7 +364,7 @@ fn execute(o: Opts) -> Result<()> {
             break;
         }
         generated.push(next);
-        if pos as u64 + 1 >= o.capacity {
+        if pos as usize + 1 >= caller.limit() {
             break;
         }
     }
@@ -478,7 +477,8 @@ fn probe(caller: &mut Caller, prompt_ids: &[i64], dir: &std::path::Path, chunk: 
 /// lossless — output must byte-match plain decode), and `draft_precompute`
 /// projects the accepted rows' target hidden states (fc taps in `fc_out`)
 /// into the draft's context KV. Rollback is free: rejected slots are simply
-/// overwritten by the next round (paged KV, position-identity slots).
+/// overwritten by the next round (paged KV: the caller's lease, addressed
+/// by position).
 ///
 /// Two manifest contracts, told apart by `meta.spec`:
 /// - DSpark (no `meta.spec`): draft rows = [anchor, mask x6] (7), verify
@@ -490,13 +490,8 @@ fn probe(caller: &mut Caller, prompt_ids: &[i64], dir: &std::path::Path, chunk: 
 ///   input (the target's recurrent state resumes from the checkpoint of the
 ///   last accepted row), it is 1 + the drafts accepted in the previous
 ///   round.
-fn spec_decode(
-    rt: &mut Runtime,
-    o: &Opts,
-    prompt_ids: &[i64],
-    mut pos: i64,
-    mut generated: Vec<i64>,
-) -> Result<Vec<i64>> {
+fn spec_decode(caller: &mut Caller, o: &Opts, prompt_ids: &[i64], mut generated: Vec<i64>) -> Result<Vec<i64>> {
+    let rt = &mut caller.rt;
     for p in ["verify", "draft", "draft_precompute"] {
         if !rt.manifest.programs.contains_key(p) {
             bail!("--spec needs program `{p}` (not in this manifest)");
@@ -519,17 +514,13 @@ fn spec_decode(
         if !rt.manifest.programs.contains_key("decode_spec") {
             bail!("--spec needs program `decode_spec` (prefill does not emit next_token)");
         }
-        rt.write_input("token_ids", &le_bytes_i64(&[prompt_ids[pos as usize]]))?;
-        rt.write_input("positions", &le_bytes_i64(&[pos]))?;
-        rt.write_input("slot_mapping", &le_bytes_i64(&[pos]))?;
-        rt.write_input("seq_lens", &le_bytes_i32(&[pos as i32 + 1]))?;
-        rt.write_input("cu_seqlens_q", &le_bytes_i32(&[0, 1]))?;
-        rt.run("decode_spec", &env(1))?;
-        rt.run("draft_precompute", &env(1))?;
-        pos += 1;
-        let first = first_i64(&rt.read_output("next_token")?);
+        caller.stage(&[prompt_ids[caller.pos as usize]])?;
+        caller.rt.run("decode_spec", &env(1))?;
+        caller.rt.run("draft_precompute", &env(1))?;
+        caller.advance(1);
+        let first = caller.next_token()?;
         if o.stop_tokens.contains(&first) {
-            info!("stop token {first} at pos {pos}");
+            info!("stop token {first} at pos {}", caller.pos);
             return Ok(Vec::new());
         }
         generated.push(first);
@@ -537,8 +528,8 @@ fn spec_decode(
 
     if !o.eager {
         let t = Instant::now();
-        rt.capture("draft", &env(draft_rows as u64))?;
-        rt.capture("verify", &env(verify_n as u64))?;
+        caller.rt.capture("draft", &env(draft_rows as u64))?;
+        caller.rt.capture("verify", &env(verify_n as u64))?;
         info!(
             "CUDA graphs: `draft` (tokens={draft_rows}) + `verify` (tokens={verify_n}) captured ({:?})",
             t.elapsed()
@@ -550,17 +541,13 @@ fn spec_decode(
     let mut accepted = 0usize;
     let mut nacc = 1i32;
     let mut per_pos = vec![0u32; n_drafts];
-    'rounds: while generated.len() < o.steps && (pos + verify_n as i64) as u64 <= o.capacity {
+    'rounds: while generated.len() < o.steps && caller.pos as usize + verify_n <= caller.limit() {
         let anchor = *generated.last().unwrap();
         // Draft: [anchor, mask x (rows-1)] at pos.., non-causal.
         let mut ids = vec![anchor];
         ids.resize(draft_rows, mask_token);
-        let positions: Vec<i64> = (pos..pos + draft_rows as i64).collect();
-        rt.write_input("token_ids", &le_bytes_i64(&ids))?;
-        rt.write_input("positions", &le_bytes_i64(&positions))?;
-        rt.write_input("slot_mapping", &le_bytes_i64(&positions))?;
-        rt.write_input("seq_lens", &le_bytes_i32(&[pos as i32 + draft_rows as i32]))?;
-        rt.write_input("cu_seqlens_q", &le_bytes_i32(&[0, draft_rows as i32]))?;
+        caller.stage(&ids)?;
+        let rt = &mut caller.rt;
         rt.write_input("anchor_token", &le_bytes_i64(&[anchor]))?;
         if o.eager {
             rt.run("draft", &env(draft_rows as u64))?;
@@ -573,12 +560,8 @@ fn spec_decode(
         // greedy predictions; row i answers "what follows position pos+i".
         let mut vids = vec![anchor];
         vids.extend_from_slice(&drafts);
-        let positions: Vec<i64> = (pos..pos + verify_n as i64).collect();
-        rt.write_input("token_ids", &le_bytes_i64(&vids))?;
-        rt.write_input("positions", &le_bytes_i64(&positions))?;
-        rt.write_input("slot_mapping", &le_bytes_i64(&positions))?;
-        rt.write_input("seq_lens", &le_bytes_i32(&[pos as i32 + verify_n as i32]))?;
-        rt.write_input("cu_seqlens_q", &le_bytes_i32(&[0, verify_n as i32]))?;
+        caller.stage(&vids)?;
+        let rt = &mut caller.rt;
         if has_nacc {
             rt.write_input("num_accepted_tokens", &le_bytes_i32(&[nacc]))?;
         }
@@ -600,12 +583,12 @@ fn spec_decode(
         // (rows 0..=a of fc_out; positions/slot_mapping still hold them).
         rt.run("draft_precompute", &env(a as u64 + 1))?;
         nacc = a as i32 + 1;
-        pos += a as i64 + 1;
+        caller.advance(a as u64 + 1);
         rounds += 1;
         accepted += a;
         for &tok in &vt[..=a] {
             if o.stop_tokens.contains(&tok) {
-                info!("stop token {tok} at pos {pos}");
+                info!("stop token {tok} at pos {}", caller.pos);
                 break 'rounds;
             }
             generated.push(tok);

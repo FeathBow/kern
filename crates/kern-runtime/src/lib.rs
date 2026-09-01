@@ -22,6 +22,7 @@ mod compile;
 mod cubin;
 mod device;
 mod error;
+mod pages;
 pub mod values;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -36,6 +37,7 @@ use compile::{CompiledProgram, Launch, LaunchKind, RVal, Slot};
 use device::{alloc, gemm_bf16_tn, DeviceBuf};
 use error::{bail, cuda_check};
 pub use error::{Error, Result};
+pub use pages::{Denied, Lease};
 
 pub struct Runtime {
     pub manifest: Manifest,
@@ -45,9 +47,8 @@ pub struct Runtime {
     /// Token capacity every state was provisioned for (`index_into` a
     /// state resolves against it).
     capacity: u64,
-    /// Page unit in tokens: lcm of the `unit` of every domain that indexes
-    /// a state; `capacity` is a multiple of it.
-    page: u64,
+    /// Owner of the states' token slots: hands them out as leases.
+    pool: Arc<pages::Pool>,
     /// Name-keyed because names are the caller API (`write_input`,
     /// `read_output`, weight binding); execution never looks these up —
     /// their device pointers are baked into `programs`.
@@ -210,13 +211,14 @@ impl Runtime {
         let programs = compile::compile_programs(&manifest, &resolved, &buffers, &states)?;
         let scratch = resolved.into_values().flat_map(|rk| rk.scratch.into_values()).collect();
 
+        let pool = Arc::new(pages::Pool::new(&manifest, state_capacity_tokens, page));
         Ok(Runtime {
             manifest,
             ctx,
             stream,
             blt,
             capacity: state_capacity_tokens,
-            page,
+            pool,
             buffers,
             states,
             staging,
@@ -359,6 +361,36 @@ impl Runtime {
         Ok(self.stream.clone_dtoh(&self.buffers[name].slice)?)
     }
 
+    // ---- token slots: the states are addressed only through leases.
+
+    /// Lease the pages `tokens` slots need, all or nothing. The lease is the
+    /// only source of `slot_mapping` values and page-table rows for the
+    /// sequence; its pages return when it drops.
+    pub fn lease(&self, tokens: usize) -> std::result::Result<Lease, Denied> {
+        self.pool.lease(tokens)
+    }
+
+    /// Pages the states hold in total.
+    pub fn pages_total(&self) -> usize {
+        self.pool.total()
+    }
+
+    /// Pages currently leased.
+    pub fn pages_used(&self) -> usize {
+        self.pool.used()
+    }
+
+    /// Longest sequence one page-table row can address (whole pages).
+    pub fn max_seq_tokens(&self) -> usize {
+        self.pool.max_seq_tokens()
+    }
+
+    /// The page-table inputs (`index_into` a state, constant row width),
+    /// e.g. `block_table` and a speculative manifest's `draft_block_table`.
+    pub fn page_tables(&self) -> impl Iterator<Item = &str> {
+        self.pool.tables()
+    }
+
     // ---- attestation surface: whole-buffer access, partial replay, timing.
     // Nothing here is on the serving path; every call synchronizes.
 
@@ -368,7 +400,7 @@ impl Runtime {
 
     /// Page unit in tokens (1 if no state is paged).
     pub fn page(&self) -> u64 {
-        self.page
+        self.pool.unit()
     }
 
     pub fn call_count(&self, program: &str) -> Result<usize> {

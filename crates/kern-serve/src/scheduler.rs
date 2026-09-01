@@ -11,12 +11,12 @@
 //! - prefill first: each step admits waiting requests (up to a token
 //!   budget) and prefills them one at a time, then runs one decode step
 //!   over every running sequence;
-//! - a request takes every KV page its worst case (`prompt + max_tokens`)
-//!   needs at admission, so decode never runs out of pages and nothing is
-//!   ever preempted;
+//! - a request leases every KV page its worst case (`prompt + max_tokens`)
+//!   needs at admission (`Runtime::lease`), so decode never runs out of
+//!   pages and nothing is ever preempted; the lease drops with the sequence;
 //! - decode batches are padded up to a bucket size and each bucket's
-//!   program is CUDA-graph-captured once; padding rows point at the pool's
-//!   pad page;
+//!   program is CUDA-graph-captured once; padding rows write into a page
+//!   the scheduler leases for them and nobody reads;
 //! - greedy only: the manifest's `argmax` is the sampler. Non-greedy
 //!   sampling params are logged once and served greedily.
 
@@ -25,14 +25,12 @@ use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use kern_manifest::types::Dim;
-use kern_runtime::Runtime;
+use kern_runtime::{Denied, Lease, Runtime};
 use pegainfer_frontend::engine::{
     FinishReason, QueuedRequest, RejectReason, RequestId, RequestLedger, Scheduler,
     SchedulerMetrics,
 };
 use tracing::{debug, info, warn};
-
-use crate::pages::PagePool;
 
 /// `Runtime` holds raw CUDA handles (graph execs, functions) and is used
 /// from the scheduler thread only; every entry point rebinds the context
@@ -68,16 +66,18 @@ struct Seq {
     generated: usize,
     max_tokens: usize,
     ignore_eos: bool,
-    pages: Vec<i32>,
+    /// Its KV pages; returned to the runtime when the sequence drops.
+    pages: Lease,
     prompt_len: usize,
     admitted: Instant,
 }
 
 pub struct KernScheduler {
     rt: Rt,
-    pool: PagePool,
+    /// One page no sequence owns: the padding rows of a decode batch write
+    /// their junk here.
+    pad: Lease,
     policy: Policy,
-    max_blocks: usize,
     waiting: VecDeque<QueuedRequest>,
     running: Vec<Seq>,
     warned_sampling: bool,
@@ -115,24 +115,25 @@ impl KernScheduler {
         }
         let seqs_max = m.vars.get("seqs").map(|v| v.max as usize).context("manifest has no `seqs` var")?;
         let tokens_max = m.vars["tokens"].max as usize;
-        let (rows, max_blocks) = match m.buffers["block_table"].shape.as_slice() {
-            [Dim::Var(v), Dim::Const(n)] if v == "seqs" => (seqs_max, *n as usize),
+        match m.buffers["block_table"].shape.as_slice() {
+            [Dim::Var(v), Dim::Const(_)] if v == "seqs" => {}
             s => bail!("block_table shape {s:?}, expected [seqs, n]"),
-        };
-        let page = m.buffers["block_table"].domain.as_ref().map_or(16, |d| d.stride);
-        let pool = PagePool::new(rt.capacity(), page)
-            .with_context(|| format!("capacity {} tokens is too small for two pages of {page}", rt.capacity()))?;
-        policy.max_seqs = policy.max_seqs.clamp(1, rows.min(seqs_max));
+        }
+        let pad = rt.lease(1).map_err(|d| anyhow::anyhow!("no page for the padding rows: {d}"))?;
+        if rt.pages_used() == rt.pages_total() {
+            bail!("capacity {} tokens holds one page; nothing left to serve from", rt.capacity());
+        }
+        policy.max_seqs = policy.max_seqs.clamp(1, seqs_max);
         policy.chunk = policy.chunk.clamp(1, tokens_max);
         let facts = Facts {
-            total_blocks: pool.total(),
-            block_size: pool.page(),
-            max_request_tokens: max_blocks * pool.page(),
+            total_blocks: rt.pages_total() - pad.pages(),
+            block_size: rt.page() as usize,
+            max_request_tokens: rt.max_seq_tokens(),
         };
         info!(
             "scheduler: {} pages × {} tokens (+1 pad page), ≤{} sequences, ≤{} tokens/sequence, chunk {}, buckets {:?}{}",
-            pool.total(),
-            pool.page(),
+            facts.total_blocks,
+            facts.block_size,
             policy.max_seqs,
             facts.max_request_tokens,
             policy.chunk,
@@ -142,9 +143,8 @@ impl KernScheduler {
         Ok((
             KernScheduler {
                 rt: Rt(rt),
-                pool,
+                pad,
                 policy,
-                max_blocks,
                 waiting: VecDeque::new(),
                 running: Vec::new(),
                 warned_sampling: false,
@@ -161,13 +161,6 @@ impl KernScheduler {
 
     fn bucket(&self, n: usize) -> usize {
         BUCKETS.iter().copied().find(|&b| b >= n).unwrap_or(n)
-    }
-
-    /// One sequence's block-table row: its pages, then the pad page.
-    fn row(&self, pages: &[i32]) -> Vec<i32> {
-        let mut r = vec![self.pool.pad(); self.max_blocks];
-        r[..pages.len()].copy_from_slice(pages);
-        r
     }
 
     /// Admit waiting requests in order and prefill each (single sequence,
@@ -187,26 +180,30 @@ impl KernScheduler {
             let prompt = q.request.prompt_tokens.len();
             let max_tokens = q.request.max_tokens;
             let worst = prompt + max_tokens;
-            let limit = self.max_blocks * self.pool.page();
-            if prompt == 0 || worst > limit {
+            if prompt == 0 {
+                let limit = self.rt.0.max_seq_tokens();
                 ledger.reject(id, RejectReason::ContextLength { prompt_tokens: prompt, max_tokens, limit });
                 self.waiting.pop_front();
                 continue;
             }
-            let need = self.pool.pages_for(worst);
-            if need > self.pool.total() {
-                ledger.reject(id, RejectReason::KvBudget { prompt_tokens: prompt, worst_case_tokens: worst });
-                self.waiting.pop_front();
-                continue;
-            }
-            if need > self.pool.available() {
-                break; // wait for pages
-            }
-            if budget_used > 0 && budget_used + prompt.saturating_sub(1) > self.policy.prefill_budget {
+            if budget_used > 0 && budget_used + prompt - 1 > self.policy.prefill_budget {
                 break; // enough prefill for this step; decode must run
             }
+            let pages = match self.rt.0.lease(worst) {
+                Ok(pages) => pages,
+                Err(Denied::Busy) => break, // wait for pages
+                Err(Denied::ExceedsRow { limit }) => {
+                    ledger.reject(id, RejectReason::ContextLength { prompt_tokens: prompt, max_tokens, limit });
+                    self.waiting.pop_front();
+                    continue;
+                }
+                Err(Denied::ExceedsPool) => {
+                    ledger.reject(id, RejectReason::KvBudget { prompt_tokens: prompt, worst_case_tokens: worst });
+                    self.waiting.pop_front();
+                    continue;
+                }
+            };
             let q = self.waiting.pop_front().unwrap();
-            let pages = self.pool.alloc(need).expect("checked above");
             if !q.request.params.is_greedy() && !self.warned_sampling {
                 warn!(
                     "request {id}: non-greedy sampling params (temperature {}, top_p {}, top_k {}) — this engine samples greedily (argmax in the manifest); further requests are not warned about",
@@ -225,7 +222,8 @@ impl KernScheduler {
             self.stat_prefill_tokens += (prompt - 1) as u64;
             budget_used += prompt - 1;
             debug!(
-                "admitted {id}: {prompt} prompt tokens, max_tokens {max_tokens}, {need} pages, prefill {:?}",
+                "admitted {id}: {prompt} prompt tokens, max_tokens {max_tokens}, {} pages, prefill {:?}",
+                pages.pages(),
                 t0.elapsed()
             );
             self.running.push(Seq {
@@ -243,17 +241,27 @@ impl KernScheduler {
         Ok(())
     }
 
+    /// Pages available to requests / held by them (the pad page excluded).
+    fn kv_total(&self) -> usize {
+        self.rt.0.pages_total() - self.pad.pages()
+    }
+
+    fn kv_used(&self) -> usize {
+        self.rt.0.pages_used() - self.pad.pages()
+    }
+
     /// Chunked single-sequence prefill of `ids` starting at position 0 of
     /// a sequence holding `pages`.
-    fn prefill(&mut self, pages: &[i32], ids: &[i64]) -> Result<()> {
+    fn prefill(&mut self, pages: &Lease, ids: &[i64]) -> Result<()> {
         let chunk = self.policy.chunk;
-        let row = self.row(pages);
+        let mut row = Vec::new();
+        pages.extend_row("block_table", &mut row)?;
         let mut pos = 0usize;
         while pos < ids.len() {
             let c = (ids.len() - pos).min(chunk);
             let env = env(c, 1);
             let positions: Vec<i64> = (pos..pos + c).map(|p| p as i64).collect();
-            let slots: Vec<i64> = (pos..pos + c).map(|p| self.pool.slot(pages, p)).collect();
+            let slots = pages.slots(pos..pos + c);
             let rt = &mut self.rt.0;
             rt.write_input_at("token_ids", &le_i64(&ids[pos..pos + c]), &env)?;
             rt.write_input_at("positions", &le_i64(&positions), &env)?;
@@ -279,15 +287,12 @@ impl KernScheduler {
     /// One decode step over every running sequence.
     fn decode(&mut self, ledger: &mut RequestLedger) -> Result<()> {
         // Drop aborted sequences first so they neither pad nor compute.
-        let pool = &mut self.pool;
         self.running.retain(|s| {
-            if ledger.is_aborted(s.id) {
+            let live = !ledger.is_aborted(s.id);
+            if !live {
                 ledger.retire(s.id);
-                pool.release(&s.pages);
-                false
-            } else {
-                true
             }
+            live
         });
         let n = self.running.len();
         if n == 0 {
@@ -295,25 +300,25 @@ impl KernScheduler {
         }
         let b = self.bucket(n);
         let env = env(b, b);
-        let pad_slot = self.pool.pad() as i64 * self.pool.page() as i64;
+        let pad_slot = self.pad.slot(0);
         let mut token_ids = Vec::with_capacity(b);
         let mut positions = Vec::with_capacity(b);
         let mut slots = Vec::with_capacity(b);
         let mut seq_lens = Vec::with_capacity(b);
-        let mut table = Vec::with_capacity(b * self.max_blocks);
+        let mut table = Vec::new();
         for s in &self.running {
             token_ids.push(s.next as i64);
             positions.push(s.pos as i64);
-            slots.push(self.pool.slot(&s.pages, s.pos));
+            slots.push(s.pages.slot(s.pos));
             seq_lens.push(s.pos as i32 + 1);
-            table.extend_from_slice(&self.row(&s.pages));
+            s.pages.extend_row("block_table", &mut table)?;
         }
         for _ in n..b {
             token_ids.push(0);
             positions.push(0);
             slots.push(pad_slot);
             seq_lens.push(1);
-            table.extend(std::iter::repeat_n(self.pool.pad(), self.max_blocks));
+            self.pad.extend_row("block_table", &mut table)?;
         }
         let cu: Vec<i32> = (0..=b as i32).collect();
         let program = if b == 1 { "decode" } else { "decode_batch" };
@@ -341,7 +346,6 @@ impl KernScheduler {
         self.stat_tokens += n as u64;
 
         let mut i = 0;
-        let pool = &mut self.pool;
         let stop = &self.policy.stop_tokens;
         self.running.retain_mut(|s| {
             let tok = i64::from_le_bytes(out[i * 8..i * 8 + 8].try_into().unwrap()) as u32;
@@ -363,7 +367,6 @@ impl KernScheduler {
                         s.id, s.prompt_len, s.generated, s.admitted.elapsed()
                     );
                     ledger.finish(s.id, r);
-                    pool.release(&s.pages);
                     false
                 }
                 None => {
@@ -384,8 +387,8 @@ impl KernScheduler {
             "{} running, {} waiting, {}/{} pages | decode {} steps, {:.2} ms/step, {:.0} tok/s | prefill {} tokens, {:.0} tok/s",
             self.running.len(),
             self.waiting.len(),
-            self.pool.used(),
-            self.pool.total(),
+            self.kv_used(),
+            self.kv_total(),
             self.stat_steps,
             self.stat_decode_ns as f64 / 1e6 / self.stat_steps.max(1) as f64,
             self.stat_tokens as f64 / dt.as_secs_f64(),
@@ -415,8 +418,8 @@ impl Scheduler for KernScheduler {
 
     fn metrics(&self) -> SchedulerMetrics {
         SchedulerMetrics {
-            kv_used_blocks: self.pool.used() as u64,
-            kv_total_blocks: self.pool.total() as u64,
+            kv_used_blocks: self.kv_used() as u64,
+            kv_total_blocks: self.kv_total() as u64,
             num_running_reqs: self.running.len() as u64,
             num_waiting_reqs: self.waiting.len() as u64,
             spec_decode: None,

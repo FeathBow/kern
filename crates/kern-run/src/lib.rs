@@ -1,9 +1,9 @@
 //! Caller-side contract for the qwen3-4b manifests: which input buffers
 //! exist and what goes in them for a chunked-prefill call and a bs=1
 //! decode step. The runtime is model-agnostic; this is the one place that
-//! knows `slot_mapping` is position-identity and `seq_lens` is a single
-//! sequence. `kern-run` (generation) and `kern-attest` (A/B evidence) both
-//! drive the runtime through it.
+//! knows there is a single sequence, holding one [`Lease`] of the runtime's
+//! token slots for its whole life. `kern-run` (generation) and
+//! `kern-attest` (A/B evidence) both drive the runtime through it.
 
 pub mod attest;
 pub mod config;
@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{bail, ensure, Result};
 use kern_manifest::types::{Arg, Dim, Manifest};
-use kern_runtime::Runtime;
+use kern_runtime::{Lease, Runtime};
 
 /// Default stop tokens (Qwen3 <|endoftext|>, <|im_end|>) for raw
 /// (template-free) completion; `kern-run --stop-tokens` overrides.
@@ -68,45 +68,59 @@ pub fn first_i64(bytes: &[u8]) -> i64 {
     i64::from_le_bytes(bytes[..8].try_into().unwrap())
 }
 
-/// A runtime plus the single sequence's position cursor.
+/// A runtime plus the single sequence: its token slots and position cursor.
 pub struct Caller {
     pub rt: Runtime,
+    /// The sequence's slots: as many as one page-table row (or the whole
+    /// state) holds, leased once for the caller's life.
+    lease: Lease,
     /// Tokens already in the KV state (next slot to fill).
     pub pos: i64,
 }
 
 impl Caller {
-    /// Writes the one-time identity page table (pages allocated linearly by
-    /// position). Entries past the state's capacity are never read, but
-    /// they must still be valid page ids — the buffer's domain says so.
+    /// Leases the sequence's slots and writes its row into every page table
+    /// once (a speculative manifest has one per paged state, e.g.
+    /// `draft_block_table`). A 2-D table (`[seqs, n]`) gets the row in every
+    /// slot: this caller uses row 0, but every row must hold valid page ids.
     pub fn new(mut rt: Runtime) -> Result<Caller> {
-        // Every `*block_table` input (a speculative manifest has one per
-        // paged state, e.g. `draft_block_table`); page size from its domain.
-        let tables: Vec<String> = rt
-            .manifest
-            .buffers
-            .keys()
-            .filter(|n| n.ends_with("block_table"))
-            .cloned()
-            .collect();
-        ensure!(tables.iter().any(|n| n == "block_table"), "manifest has no `block_table` input");
+        ensure!(rt.manifest.buffers.contains_key("block_table"), "manifest has no `block_table` input");
+        let lease = rt.lease(rt.max_seq_tokens().min(rt.capacity() as usize))?;
+        let tables: Vec<String> = rt.page_tables().map(str::to_string).collect();
         for name in tables {
-            // One row per sequence when the table is 2-D (`[seqs, n]`);
-            // this single-sequence caller uses row 0 but every row must
-            // hold valid page ids.
-            let b = &rt.manifest.buffers[&name];
-            let (rows, n_entries) = match b.shape.as_slice() {
-                [Dim::Const(n)] => (1, *n as i64),
-                [Dim::Var(v), Dim::Const(n)] => (rt.manifest.vars[v].max, *n as i64),
+            let rows = match rt.manifest.buffers[&name].shape.as_slice() {
+                [Dim::Const(_)] => 1,
+                [Dim::Var(v), Dim::Const(_)] => rt.manifest.vars[v].max,
                 s => bail!("unexpected {name} shape {s:?}"),
             };
-            let stride = b.domain.as_ref().map_or(16, |d| d.stride) as i64;
-            let n_pages = (rt.capacity() as i64 / stride).max(1);
-            let row: Vec<i32> = (0..n_entries).map(|i| i.min(n_pages - 1) as i32).collect();
-            let table: Vec<i32> = row.iter().copied().cycle().take(row.len() * rows as usize).collect();
+            let mut table = Vec::new();
+            for _ in 0..rows {
+                lease.extend_row(&name, &mut table)?;
+            }
             rt.write_input(&name, &le_bytes_i32(&table))?;
         }
-        Ok(Caller { rt, pos: 0 })
+        Ok(Caller { rt, lease, pos: 0 })
+    }
+
+    /// Token slots the sequence can hold.
+    pub fn limit(&self) -> usize {
+        self.lease.tokens()
+    }
+
+    /// Stage one call's rows: `ids` at the cursor as one causal sequence
+    /// (`token_ids` / `positions` / `slot_mapping` / `seq_lens` /
+    /// `cu_seqlens_q`); does not advance. Returns the var env for the call.
+    pub fn stage(&mut self, ids: &[i64]) -> Result<BTreeMap<String, u64>> {
+        let c = ids.len();
+        let pos = self.pos as usize;
+        let positions: Vec<i64> = (self.pos..self.pos + c as i64).collect();
+        let e = env(c as u64);
+        self.rt.write_input_at("token_ids", &le_bytes_i64(ids), &e)?;
+        self.rt.write_input_at("positions", &le_bytes_i64(&positions), &e)?;
+        self.rt.write_input_at("slot_mapping", &le_bytes_i64(&self.lease.slots(pos..pos + c)), &e)?;
+        self.rt.write_input_at("seq_lens", &le_bytes_i32(&[(pos + c) as i32]), &e)?;
+        self.rt.write_input_at("cu_seqlens_q", &le_bytes_i32(&[0, c as i32]), &e)?;
+        Ok(e)
     }
 
     /// Reset the cursor (a new prompt reuses the slots from position 0).
@@ -114,30 +128,14 @@ impl Caller {
         self.pos = 0;
     }
 
-    /// Stage the inputs for a `prefill` call over `ids` at the cursor; does
-    /// not advance. Returns the var env for the call.
+    /// Stage a `prefill` call over `ids` at the cursor.
     pub fn stage_prefill(&mut self, ids: &[i64]) -> Result<BTreeMap<String, u64>> {
-        let c = ids.len() as u64;
-        let positions: Vec<i64> = (self.pos..self.pos + c as i64).collect();
-        let e = env(c);
-        self.rt.write_input_at("token_ids", &le_bytes_i64(ids), &e)?;
-        self.rt.write_input_at("positions", &le_bytes_i64(&positions), &e)?;
-        self.rt.write_input_at("slot_mapping", &le_bytes_i64(&positions), &e)?;
-        self.rt.write_input_at("seq_lens", &le_bytes_i32(&[self.pos as i32 + c as i32]), &e)?;
-        self.rt.write_input_at("cu_seqlens_q", &le_bytes_i32(&[0, c as i32]), &e)?;
-        Ok(e)
+        self.stage(ids)
     }
 
-    /// Stage the inputs for one `decode` step of token `tok` at the cursor;
-    /// does not advance.
+    /// Stage one `decode` step of token `tok` at the cursor.
     pub fn stage_decode(&mut self, tok: i64) -> Result<BTreeMap<String, u64>> {
-        let e = env(1);
-        self.rt.write_input_at("token_ids", &le_bytes_i64(&[tok]), &e)?;
-        self.rt.write_input_at("positions", &le_bytes_i64(&[self.pos]), &e)?;
-        self.rt.write_input_at("slot_mapping", &le_bytes_i64(&[self.pos]), &e)?;
-        self.rt.write_input_at("seq_lens", &le_bytes_i32(&[self.pos as i32 + 1]), &e)?;
-        self.rt.write_input_at("cu_seqlens_q", &le_bytes_i32(&[0, 1]), &e)?;
-        Ok(e)
+        self.stage(&[tok])
     }
 
     pub fn advance(&mut self, n: u64) {

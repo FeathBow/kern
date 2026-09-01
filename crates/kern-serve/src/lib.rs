@@ -3,11 +3,11 @@
 //! The HTTP/protocol stack is pegainfer's frontend (vLLM's Rust server
 //! crates underneath: completions, chat completions, streaming, chat
 //! templates, stop strings). This crate contributes the engine behind it:
-//! [`scheduler::KernScheduler`], the pegainfer `Scheduler` contract over a
-//! `kern_runtime::Runtime`, and [`pages::PagePool`], the KV page owner.
+//! `scheduler::KernScheduler`, the pegainfer `Scheduler` contract over a
+//! `kern_runtime::Runtime` (KV pages are the runtime's leases). The crate's
+//! public surface is [`serve`] and its option structs.
 
-pub mod pages;
-pub mod scheduler;
+mod scheduler;
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
