@@ -42,6 +42,18 @@
 //!   `verify_tokens` and accepts the same prefix. Whether a round beats a
 //!   plain step at a given batch size is the operator's call, not the
 //!   scheduler's: the flag picks the mode for the process.
+//! - prefix reuse: a finished sequence's KV lives on as checkpoints
+//!   (`Runtime::checkpoint` / `retire`, indexed by token hash in a
+//!   `Prefix` table), and a new prompt starts from the longest checkpoint
+//!   holding a proper prefix of it (`Runtime::lease_from`; prefill covers
+//!   the rest). A paged-only manifest checkpoints every whole page as a
+//!   sequence fills it — free, a shared page — so any earlier prompt or
+//!   output is reusable at page granularity; a manifest with a recurrent
+//!   state checkpoints only where a request ends (the finished sequence's
+//!   state slot becomes the checkpoint's, nothing is copied), so only a
+//!   prompt that continues an earlier request's whole context hits. A
+//!   `Busy` lease evicts the least recently hit checkpoint and retries
+//!   until it fits or nothing is left to evict.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
@@ -49,7 +61,7 @@ use std::time::Instant;
 use anyhow::{bail, Context, Result};
 use kern_manifest::types::{Arg, Dim, Manifest};
 use kern_run::{first_i64, i64_from_le, le_bytes_i32, le_bytes_i64};
-use kern_runtime::{Denied, Error, Lease, Runtime};
+use kern_runtime::{Chain, Denied, Error, Lease, Prefix, Runtime};
 use pegainfer_frontend::engine::{
     FinishReason, QueuedRequest, RejectReason, RequestId, RequestLedger, Scheduler, SchedulerMetrics,
     SpecDecodeCounters, MAX_SPEC_TOKENS,
@@ -200,10 +212,23 @@ struct Seq {
     /// Its KV pages; returned to the runtime when the sequence drops.
     pages: Lease,
     prompt_len: usize,
+    /// The hash chain over the tokens in the state, `pos` of them; the
+    /// prefix table keys this sequence's checkpoints by it.
+    chain: Chain,
+    /// Tokens already checkpointed, a whole number of pages.
+    checkpointed: usize,
     admitted: Instant,
 }
 
 impl Seq {
+    /// `fed` went through a program and is in the state now.
+    fn advance(&mut self, fed: impl IntoIterator<Item = u32>) {
+        for t in fed {
+            self.pos += 1;
+            self.chain.push(t as i64);
+        }
+    }
+
     /// Account `toks` as generated, in order: each is emitted until a stop
     /// token (itself not emitted, pegainfer convention; it still counts
     /// against `max_tokens` like vLLM's) or `max_tokens`. Finishes the
@@ -270,6 +295,12 @@ pub struct KernScheduler {
     seqs_max: usize,
     waiting: VecDeque<QueuedRequest>,
     running: Vec<Seq>,
+    /// Checkpoints of finished prefixes, for the next prompt that shares
+    /// one (see the module doc).
+    prefix: Prefix,
+    /// Checkpoint at every page (a paged-only manifest) rather than only
+    /// where a request ends (one with a recurrent state).
+    every_page: bool,
     warned_sampling: bool,
     stats: Stats,
 }
@@ -284,6 +315,9 @@ struct Stats {
     tokens: u64,
     prefill_tokens: u64,
     prefill_ns: u128,
+    /// Prompt tokens found in a checkpoint, and checkpoints evicted for room.
+    prefix_hit_tokens: u64,
+    evictions: u64,
     /// The speculative counters at the window's start, so the window's
     /// acceptance is reported rather than the process's.
     spec_at: (u64, u64, u64),
@@ -295,7 +329,17 @@ impl Stats {
             let c = &p.counters;
             (c.num_drafts, c.num_draft_tokens, c.num_accepted_tokens)
         });
-        Stats { since: Instant::now(), steps: 0, step_ns: 0, tokens: 0, prefill_tokens: 0, prefill_ns: 0, spec_at }
+        Stats {
+            since: Instant::now(),
+            steps: 0,
+            step_ns: 0,
+            tokens: 0,
+            prefill_tokens: 0,
+            prefill_ns: 0,
+            prefix_hit_tokens: 0,
+            evictions: 0,
+            spec_at,
+        }
     }
 }
 
@@ -369,6 +413,8 @@ impl KernScheduler {
             bail!("capacity {} tokens holds one page; nothing left to serve from", rt.capacity());
         }
         let stats = Stats::new(&c.spec);
+        let every_page = rt.seq_slots() == 0;
+        let prefix = Prefix::new(rt.page() as usize);
         let s = KernScheduler {
             rt: Rt(rt),
             pad,
@@ -380,6 +426,8 @@ impl KernScheduler {
             seqs_max: c.seqs_max,
             waiting: VecDeque::new(),
             running: Vec::new(),
+            prefix,
+            every_page,
             warned_sampling: false,
             stats,
         };
@@ -421,6 +469,7 @@ impl KernScheduler {
             buckets = ?BUCKETS.iter().filter(|&&b| b <= policy.max_seqs).collect::<Vec<_>>(),
             eager = policy.eager,
             prefill_emits = self.prefill_emits,
+            checkpoints = if self.every_page { "every page" } else { "at request end" },
             drafts = spec.map(|s| s.n_drafts),
             draft_rows = spec.map(|s| s.draft_rows),
             verify_rows = spec.map(|s| s.verify_rows),
@@ -459,7 +508,19 @@ impl KernScheduler {
             if budget_used > 0 && budget_used + prompt - 1 > self.policy.prefill_budget {
                 break; // enough prefill for this step; decode must run
             }
-            let pages = match self.rt.0.lease(worst) {
+            let ids: Vec<i64> = q.request.prompt_tokens.iter().map(|&t| t as i64).collect();
+            let hit = self.prefix.lookup(&ids);
+            let pages = loop {
+                let attempt = match hit.and_then(|h| self.prefix.get(h.id)) {
+                    Some(cp) => self.rt.0.lease_from(cp, worst),
+                    None => self.rt.0.lease(worst),
+                };
+                match attempt {
+                    Err(Error::Denied(Denied::Busy)) if self.prefix.evict() => self.stats.evictions += 1,
+                    r => break r,
+                }
+            };
+            let pages = match pages {
                 Ok(pages) => pages,
                 Err(Error::Denied(Denied::Busy)) => break, // wait for pages / a slot
                 Err(Error::Denied(Denied::ExceedsRow { limit })) => {
@@ -486,17 +547,27 @@ impl KernScheduler {
                 self.warned_sampling = true;
             }
             ledger.admit(id);
-            let ids: Vec<i64> = q.request.prompt_tokens.iter().map(|&t| t as i64).collect();
             let t0 = Instant::now();
             // Every prompt token goes through `prefill` when it emits the
             // first generated token itself; otherwise everything but the
-            // last, which is the first decode step's input.
+            // last, which is the first decode step's input. A checkpoint
+            // hit skips its tokens (never the last one).
             let n_pre = if self.prefill_emits { prompt } else { prompt - 1 };
-            let first = self.prefill(&pages, &ids[..n_pre])?;
+            let start = pages.prefix();
+            let first = self.prefill(&pages, &ids[..n_pre], start)?;
             self.stats.prefill_ns += t0.elapsed().as_nanos();
-            self.stats.prefill_tokens += n_pre as u64;
-            budget_used += n_pre;
-            debug!(request = %id, prompt, max_tokens, pages = ?pages, prefill_ms = logline::ms(t0.elapsed()), "admitted");
+            self.stats.prefill_tokens += (n_pre - start) as u64;
+            self.stats.prefix_hit_tokens += start as u64;
+            budget_used += n_pre - start;
+            debug!(
+                request = %id,
+                prompt,
+                max_tokens,
+                pages = ?pages,
+                prefix_hit = start,
+                prefill_ms = logline::ms(t0.elapsed()),
+                "admitted"
+            );
             let mut seq = Seq {
                 id,
                 pos: n_pre,
@@ -506,8 +577,11 @@ impl KernScheduler {
                 ignore_eos: q.request.params.ignore_eos,
                 pages,
                 prompt_len: prompt,
+                chain: Chain::over(self.rt.0.page() as usize, &ids[..n_pre]),
+                checkpointed: start / self.rt.0.page() as usize * self.rt.0.page() as usize,
                 admitted: t0,
             };
+            self.checkpoint(&mut seq)?;
             let first = match first {
                 Some(tok) => Some(tok),
                 None if self.spec.is_some() => {
@@ -515,7 +589,7 @@ impl KernScheduler {
                     // (a round needs an anchor and its tap in the draft
                     // KV); its token is the first one emitted.
                     let tok = self.first_token(&seq)?;
-                    seq.pos += 1;
+                    seq.advance([seq.next]);
                     Some(tok)
                 }
                 None => None,
@@ -524,6 +598,7 @@ impl KernScheduler {
                 let (emitted, done) = seq.emit(&[tok], &self.policy.stop_tokens, ledger);
                 self.stats.tokens += emitted;
                 if done {
+                    self.finish(seq);
                     continue;
                 }
             }
@@ -532,15 +607,44 @@ impl KernScheduler {
         Ok(())
     }
 
+    /// Checkpoint every whole page of `s` not yet checkpointed, when the
+    /// manifest checkpoints every page.
+    fn checkpoint(&mut self, s: &mut Seq) -> Result<()> {
+        if !self.every_page {
+            return Ok(());
+        }
+        let unit = self.rt.0.page() as usize;
+        while s.checkpointed + unit <= s.pos {
+            let len = s.checkpointed + unit;
+            let cp = self.rt.0.checkpoint(&mut s.pages, len)?;
+            self.prefix.insert(&s.chain, cp);
+            s.checkpointed = len;
+        }
+        Ok(())
+    }
+
+    /// A sequence is done: with a recurrent state, its whole context
+    /// becomes a checkpoint (the slot moves, nothing is copied); without
+    /// one, every whole page already is.
+    fn finish(&mut self, s: Seq) {
+        if self.every_page || s.pos == 0 {
+            return;
+        }
+        let cp = self.rt.0.retire(s.pages, s.pos);
+        self.prefix.insert(&s.chain, cp);
+    }
+
     /// Drop aborted sequences before a step so they neither pad nor compute.
     fn drop_aborted(&mut self, ledger: &mut RequestLedger) {
-        self.running.retain(|s| {
-            let live = !ledger.is_aborted(s.id);
-            if !live {
+        let running = std::mem::take(&mut self.running);
+        for s in running {
+            if ledger.is_aborted(s.id) {
                 ledger.retire(s.id);
+                self.finish(s);
+            } else {
+                self.running.push(s);
             }
-            live
-        });
+        }
     }
 
     /// Pages available to requests / held by them (the pad page excluded).
@@ -552,13 +656,14 @@ impl KernScheduler {
         self.rt.0.pages_used() - self.pad.pages()
     }
 
-    /// Chunked single-sequence prefill of `ids` starting at position 0 of
-    /// a sequence holding `pages`; the first generated token when the
-    /// manifest's prefill emits it.
-    fn prefill(&mut self, pages: &Lease, ids: &[i64]) -> Result<Option<u32>> {
+    /// Chunked single-sequence prefill of `ids[start..]` at positions
+    /// `start..` of a sequence holding `pages` (`start` is the pages'
+    /// prefix); the first generated token when the manifest's prefill
+    /// emits it.
+    fn prefill(&mut self, pages: &Lease, ids: &[i64], start: usize) -> Result<Option<u32>> {
         let chunk = self.policy.chunk;
         self.stage_lines(&[pages], &[])?;
-        let mut pos = 0usize;
+        let mut pos = start;
         while pos < ids.len() {
             let c = (ids.len() - pos).min(chunk);
             let env = env(c, 1);
@@ -580,7 +685,7 @@ impl KernScheduler {
             }
             pos += c;
         }
-        if !self.prefill_emits || ids.is_empty() {
+        if !self.prefill_emits || ids.len() == start {
             return Ok(None);
         }
         Ok(Some(first_i64(&self.rt.0.read_output("next_token")?) as u32))
@@ -753,27 +858,28 @@ impl KernScheduler {
         self.stats.step_ns += t0.elapsed().as_nanos();
         self.stats.steps += 1;
 
-        let plan = self.spec.as_mut().unwrap();
-        let stop = &self.policy.stop_tokens;
-        let mut emitted = 0u64;
-        let mut i = 0;
-        self.running.retain_mut(|s| {
+        let running = std::mem::take(&mut self.running);
+        for (i, mut s) in running.into_iter().enumerate() {
             let v = &vt[i * vr..i * vr + vr];
             let a = accepted[i];
-            i += 1;
+            let plan = self.spec.as_mut().unwrap();
             for p in &mut plan.counters.num_accepted_tokens_per_pos[..a] {
                 *p += 1;
             }
             plan.counters.num_drafts += 1;
             plan.counters.num_draft_tokens += nd as u64;
             plan.counters.num_accepted_tokens += a as u64;
-            s.pos += a + 1;
             let toks: Vec<u32> = v[..=a].iter().map(|&t| t as u32).collect();
-            let (n, done) = s.emit(&toks, stop, ledger);
-            emitted += n;
-            !done
-        });
-        self.stats.tokens += emitted;
+            s.advance(std::iter::once(s.next).chain(toks[..a].iter().copied()));
+            let (n, done) = s.emit(&toks, &self.policy.stop_tokens, ledger);
+            self.stats.tokens += n;
+            if done {
+                self.finish(s);
+            } else {
+                self.checkpoint(&mut s)?;
+                self.running.push(s);
+            }
+        }
         Ok(())
     }
 
@@ -820,18 +926,19 @@ impl KernScheduler {
         self.stats.step_ns += t0.elapsed().as_nanos();
         self.stats.steps += 1;
 
-        let mut i = 0;
-        let stop = &self.policy.stop_tokens;
-        let mut emitted = 0u64;
-        self.running.retain_mut(|s| {
+        let running = std::mem::take(&mut self.running);
+        for (i, mut s) in running.into_iter().enumerate() {
             let tok = out[i] as u32;
-            i += 1;
-            s.pos += 1;
-            let (n, done) = s.emit(&[tok], stop, ledger);
-            emitted += n;
-            !done
-        });
-        self.stats.tokens += emitted;
+            s.advance([s.next]);
+            let (n, done) = s.emit(&[tok], &self.policy.stop_tokens, ledger);
+            self.stats.tokens += n;
+            if done {
+                self.finish(s);
+            } else {
+                self.checkpoint(&mut s)?;
+                self.running.push(s);
+            }
+        }
         Ok(())
     }
 
@@ -860,6 +967,9 @@ impl KernScheduler {
                 tok_s = round(st.tokens as f64 / dt.as_secs_f64(), 1.0),
                 prefill_tokens = st.prefill_tokens,
                 prefill_tok_s = round(st.prefill_tokens as f64 / (st.prefill_ns as f64 / 1e9).max(1e-9), 1.0),
+                prefix_hit_tokens = st.prefix_hit_tokens,
+                checkpoints = self.prefix.len(),
+                evictions = st.evictions,
                 accepted = self.spec.as_ref().map(|_| round((accepted + drafts) as f64 / drafts.max(1) as f64, 100.0)),
                 accept_pct =
                     self.spec.as_ref().map(|_| round(accepted as f64 * 100.0 / draft_tokens.max(1) as f64, 1.0)),

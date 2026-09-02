@@ -29,6 +29,7 @@ mod cubin;
 mod device;
 mod error;
 mod pages;
+mod prefix;
 pub mod values;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -44,7 +45,8 @@ pub use device::PeerHandle;
 use device::{alloc, alloc_vmm, gemm_bf16_tn, gemm_bf16_tn_f32, Blas, DeviceBuf, Share};
 use error::{bail, cuda_check};
 pub use error::{Error, Result};
-pub use pages::{Denied, Lease};
+pub use pages::{page_unit, Checkpoint, Copies, Denied, Lease, Pool};
+pub use prefix::{Chain, Hit, Prefix};
 
 /// This rank's place in every group the manifest's `topology` declares.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -301,7 +303,7 @@ impl Runtime {
         let programs = compile::compile_programs(&manifest, &resolved, &buffers, &states, &rank_env)?;
         let scratch = resolved.into_values().flat_map(|rk| rk.scratch.into_values()).collect();
 
-        let pool = Arc::new(pages::Pool::new(&manifest, state_capacity_tokens, page)?);
+        let pool = Arc::new(Pool::new(&manifest, state_capacity_tokens)?);
         Ok(Runtime {
             manifest,
             ctx,
@@ -566,6 +568,53 @@ impl Runtime {
             self.stream.memset_zeros(&mut view)?;
         }
         Ok(lease)
+    }
+
+    /// The first `len` tokens of `lease` as a [`Checkpoint`] its
+    /// sequence keeps running past: pages shared, the per-sequence state
+    /// copied into a fresh slot ([`Error::Denied`] when none is free).
+    pub fn checkpoint(&mut self, lease: &mut Lease, len: usize) -> Result<Checkpoint> {
+        let (cp, copies) = self.pool.checkpoint(lease, len)?;
+        self.copy(&copies)?;
+        Ok(cp)
+    }
+
+    /// The first `len` tokens of a finished sequence as a [`Checkpoint`]:
+    /// its pages past `len` return, its state slot moves over as it is.
+    pub fn retire(&mut self, lease: Lease, len: usize) -> Checkpoint {
+        self.pool.retire(lease, len)
+    }
+
+    /// A sequence continuing from `cp` with room for `tokens`: shares the
+    /// checkpoint's pages (copying the one `cp.len()` ends inside), copies
+    /// its state into a fresh slot, and hands out a lease that names
+    /// positions from `cp.len()` on. [`Error::Denied`] as for [`Runtime::lease`].
+    pub fn lease_from(&mut self, cp: &Checkpoint, tokens: usize) -> Result<Lease> {
+        let (lease, copies) = self.pool.restore(cp, tokens)?;
+        self.copy(&copies)?;
+        Ok(lease)
+    }
+
+    /// Run a pool decision's byte moves on the stream: whole pages of every
+    /// paged state, whole slots of every per-sequence state.
+    fn copy(&mut self, c: &Copies) -> Result<()> {
+        let unit = self.pool.unit();
+        for (name, st) in &self.manifest.states {
+            let s = &self.states[name];
+            let moves: Vec<(u64, u64, u64)> = if st.is_per_seq() {
+                c.slot.iter().map(|&(a, b)| (a as u64, b as u64, st.bytes_per_seq)).collect()
+            } else if st.bytes_per_token > 0 {
+                c.pages.iter().map(|&(a, b)| (a as u64, b as u64, unit * st.bytes_per_token)).collect()
+            } else {
+                Vec::new()
+            };
+            for (a, b, bytes) in moves {
+                let src = s.view((a * bytes) as usize..((a + 1) * bytes) as usize)?;
+                let mut dst = s.view((b * bytes) as usize..((b + 1) * bytes) as usize)?;
+                self.stream.memcpy_dtod(&src, &mut dst)?;
+            }
+        }
+        Ok(())
     }
 
     /// Sequence slots every per-sequence state holds (0 without one).
@@ -968,14 +1017,6 @@ fn fmt_groups(t: &kern_manifest::types::Topology) -> String {
     t.groups.iter().map(|(g, n)| format!("{g}={n}")).collect::<Vec<_>>().join(", ")
 }
 
-fn gcd(a: u64, b: u64) -> u64 {
-    if b == 0 {
-        a
-    } else {
-        gcd(b, a % b)
-    }
-}
-
 /// Device memory left untouched when the states are fitted to the device:
 /// the driver's own allocations after load (captured graphs, module
 /// lazy-loading, cuBLASLt algorithm state) and a margin for a neighbour.
@@ -992,17 +1033,6 @@ fn state_bytes(s: &State, capacity: u64, slots: u64) -> Option<u64> {
 /// divided among the per-token states, in whole pages; capped at what the
 /// manifest's `seqs` bound of sequences could each hold at the page-table
 /// row limit, since no lease can reach past that.
-/// The page unit: the lcm of every page table's stride (a per-sequence
-/// state's stride is bytes per line, not tokens: not a page).
-fn page_unit(m: &Manifest) -> u64 {
-    m.buffers
-        .values()
-        .filter_map(|b| b.domain.as_ref())
-        .filter(|d| d.index_into.as_deref().and_then(|s| m.states.get(s)).is_some_and(|s| !s.is_per_seq()))
-        .map(|d| d.stride.max(1))
-        .fold(1u64, lcm)
-}
-
 /// Tokens one sequence of `m` can reach — the narrowest page table's row,
 /// in whole pages — or `None` when nothing is paged per token. What a
 /// single-sequence caller wants as its state capacity.
@@ -1068,8 +1098,4 @@ fn fit_capacity(m: &Manifest, ctx: &CudaContext, page: u64) -> Result<u64> {
         gib(total),
     );
     Ok(c)
-}
-
-fn lcm(a: u64, b: u64) -> u64 {
-    a / gcd(a, b) * b
 }

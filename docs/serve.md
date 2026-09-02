@@ -103,8 +103,37 @@ conc=1 与 `kern run --spec` 逐字节一致；接受率 conc=1 20.8%、conc=32
 near-tie）。吞吐：conc 1 / 8 / 32 ≈ 600 / 2560 / 5850 tok/s，普通模式
 353 / 2048 / 6800——这组 prompt 上交叉点在 bs 16–32。
 
+## 前缀缓存（K1，2026-09-02）
+
+调度器持有一张 `Prefix` 表（kern-runtime，纯 host）：结束的序列留成 checkpoint，
+新 prompt 从覆盖其真前缀的最长 checkpoint 起步（`Runtime::lease_from`），prefill
+只补剩下的。两种模型一套机制，差别只在"何时留"：
+
+- 纯 KV（qwen3-4b，页 16 token）：序列每填满一页就 `Runtime::checkpoint` 一次——页进
+  共享链，不拷字节，所以任何早先的 prompt 或输出都按页粒度可复用；
+- 带循环状态（qwen3.8-27b，页 784 token，GDN state 154 MB/序列）：只在请求结束时
+  `Runtime::retire`——结束序列的 state slot 原样成为 checkpoint 的，不拷；因此只有
+  "续着上一轮整段上下文"的 prompt 命中，同一 prompt 重发不命中（checkpoint 比它长）。
+  slot 数 = manifest 的 `seqs.max + 2`，checkpoint 与活跃序列共用，租约 `Busy` 时按
+  最久未命中淘汰。
+
+门禁（本机 GB300，warm 服务与 cold 服务各一，greedy，`max_tokens 64`，prompt 为 46 KB
+工程日志）：
+
+| 模型 | prompt | cold prefill | 命中 | 命中后 prefill | 多轮 R3 warm vs cold |
+|---|---:|---:|---:|---:|---|
+| qwen3-4b | 13 983 tok | 888 ms（请求 1.23 s） | 13 968 tok | 27 ms（请求 0.36 s） | 64 token 逐字一致 |
+| qwen3.8-27b | 14 256 tok | 请求 1.90 s | 14 319 tok（上一轮全文） | 请求 0.85 s | 64 token 逐字一致 |
+
+qwen3.8 重发同一 prompt 不命中（唯一的 checkpoint 比它长），输出与首发一致。qwen3-4b
+重发同一 prompt 命中 13 968，输出在第 10 个 token 后与首发分叉；两次命中之间完全一致。
+分叉不是缓存的：同一 prompt 在 cold 服务上用 `--chunk 144`（末块同样是 15 个 token）
+全量 prefill，得到第三种续写——三种切块三种 attention 归约顺序，这个位置是 bf16
+近平局，与 `decode` / `decode_batch` 之间的分叉同类。
+host 侧回放见 roadmap K1 行（`crates/kern-run/examples/agentx_replay.rs`）。
+
 ## 没做（按需要加）
 
-混批（chunked prefill 进 decode 步）、抢占 / 动态页分配、prefix cache、
+混批（chunked prefill 进 decode 步）、抢占 / 动态页分配、
 真采样（temperature/top-p 作为 manifest 内的 `sample` op；投机下是 rejection sampling）、logprobs / echo、
 bs 2–16 的 split-KV decode、步间 host 空转（token 反馈进图）。

@@ -1,0 +1,362 @@
+//! Replay the AgentX (Claude Code) traces through the checkpoint table:
+//! page numbers only, no GPU, no model. The roadmap's K1 gate.
+//!
+//!     agentx_replay --traces <cc-traces-weka-062126>/traces.jsonl   # HF semianalysisai/cc-traces-weka-062126 \
+//!         [--unit 64] [--state] [--capacity <tokens>] [--slots 128] [--concurrency 32] [--sessions N]
+//!
+//! Every request of a session is a sequence: leased at its timestamp for
+//! `in + out` tokens, prefilled from the longest checkpoint holding a
+//! prefix of its input, dropped `api_time` later. A paged-only model
+//! (default) leaves a checkpoint at every page boundary of the prompt as it
+//! is admitted and of the output as it finishes; `--state` models a
+//! recurrent state too — a checkpoint costs a sequence slot, so only the
+//! finished request is retired into one. Tokens are synthesized from the
+//! trace's 64-token block hashes (a request's output tokens are what the
+//! next request of the session carries at those positions, when one
+//! extends it); positions no block hash covers get tokens nothing else
+//! shares. Sessions start `--concurrency` at a time, in file order, each
+//! when the one that many before it ends. A `Busy` lease evicts
+//! checkpoints until it fits, or waits for the next sequence to finish.
+//!
+//! Reported: hit rate (prefix tokens found / input tokens), extend
+//! percentiles, checkpoints kept, evictions, requests that had to wait.
+
+use std::collections::{BTreeMap, VecDeque};
+use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use kern_manifest::types::Manifest;
+use kern_runtime::{Chain, Denied, Lease, Pool, Prefix};
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct Session {
+    requests: Vec<Record>,
+}
+
+#[derive(Deserialize)]
+struct Record {
+    t: f64,
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(rename = "in", default)]
+    input: u64,
+    #[serde(default)]
+    out: u64,
+    #[serde(default)]
+    hash_ids: Vec<u32>,
+    api_time: Option<f64>,
+    #[serde(default)]
+    requests: Vec<Record>,
+}
+
+/// One model request: `t` seconds into its session, `input` prompt tokens
+/// whose 64-token blocks hash to `blocks`, `out` generated, live `api`
+/// seconds.
+struct Req {
+    session: usize,
+    t: f64,
+    input: usize,
+    out: usize,
+    blocks: Vec<u32>,
+    api: f64,
+    subagent: bool,
+}
+
+const BLOCK: usize = 64;
+
+fn flatten(session: usize, s: Session) -> Vec<Req> {
+    let mut out = Vec::new();
+    for r in s.requests {
+        if r.kind == "subagent" {
+            for q in r.requests {
+                out.push(Req {
+                    session,
+                    t: q.t,
+                    input: q.input as usize,
+                    out: q.out as usize,
+                    blocks: q.hash_ids,
+                    api: q.api_time.unwrap_or(1.0),
+                    subagent: true,
+                });
+            }
+        } else {
+            out.push(Req {
+                session,
+                t: r.t,
+                input: r.input as usize,
+                out: r.out as usize,
+                blocks: r.hash_ids,
+                api: r.api_time.unwrap_or(1.0),
+                subagent: false,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap());
+    out
+}
+
+/// The token at position `p` of a request whose blocks are `blocks`:
+/// from the block hash when one covers it, else unique to (`session`,
+/// `req`, `p`).
+fn token(session: usize, req: usize, blocks: &[u32], p: usize) -> i64 {
+    match blocks.get(p / BLOCK) {
+        Some(&h) => ((session as i64) << 40) | ((h as i64) << 7) | (p % BLOCK) as i64,
+        None => (1 << 62) | ((session as i64) << 40) | ((req as i64) << 20) | p as i64,
+    }
+}
+
+/// The tokens of request `i` of `reqs` (sorted by time within a session):
+/// its prompt, then its output as the next request extending it carries
+/// it, else unique tokens.
+fn tokens(reqs: &[Req], i: usize) -> Vec<i64> {
+    let r = &reqs[i];
+    let mut out: Vec<i64> = (0..r.input).map(|p| token(r.session, i, &r.blocks, p)).collect();
+    let successor = reqs[i + 1..].iter().take(16).find(|q| {
+        q.session == r.session && q.blocks.len() > r.blocks.len() && q.blocks[..r.blocks.len()] == r.blocks[..]
+    });
+    for p in r.input..r.input + r.out {
+        out.push(match successor {
+            Some(q) if p / BLOCK < q.blocks.len() => token(q.session, i, &q.blocks, p),
+            _ => token(r.session, i, &[], p),
+        });
+    }
+    out
+}
+
+fn manifest(unit: usize, state: bool, slots: usize, row: usize) -> Manifest {
+    let state_json = if state { r#", "rec": {"bytes_per_seq": 1}"# } else { "" };
+    let line_json = if state {
+        r#", "line_index": {"kind": "input", "dtype": "i32", "shape": [1, "seqs"], "domain": {"index_into": "rec", "stride": 1}}"#
+    } else {
+        ""
+    };
+    Manifest::from_json(&format!(
+        r#"{{
+        "schema_version": 3, "model": "replay", "vars": {{"tokens": {{"max": 1}}, "seqs": {{"max": {seqs}}}}},
+        "states": {{"kv": {{"bytes_per_token": 1}}{state_json}}},
+        "buffers": {{
+            "block_table": {{"kind": "input", "dtype": "i32", "shape": ["seqs", {row}], "domain": {{"index_into": "kv", "stride": {unit}}}}}{line_json}
+        }},
+        "modules": {{}}, "ops": {{}}, "programs": {{}}
+    }}"#,
+        seqs = slots.saturating_sub(2).max(1)
+    ))
+    .expect("synthetic manifest")
+}
+
+fn pct(xs: &mut [usize], p: f64) -> usize {
+    if xs.is_empty() {
+        return 0;
+    }
+    xs.sort_unstable();
+    xs[((xs.len() as f64 * p) as usize).min(xs.len() - 1)]
+}
+
+struct Live {
+    lease: Lease,
+    req: usize,
+    hit: usize,
+    /// Over the prompt and the output both: the output's tokens are known
+    /// up front here, and a chain's key is read only at checkpoint lengths.
+    chain: Chain,
+}
+
+#[derive(Default)]
+struct Tally {
+    input: u64,
+    hit: u64,
+    extend: Vec<usize>,
+    checkpoints: u64,
+    evictions: u64,
+    waited: u64,
+    rejected: u64,
+    max_live: usize,
+}
+
+fn main() {
+    let mut traces = PathBuf::new();
+    let mut unit = 64usize;
+    let mut state = false;
+    let mut capacity: u64 = 1 << 30;
+    let mut slots = 128usize;
+    let mut concurrency = 32usize;
+    let mut sessions_cap = usize::MAX;
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        let mut v = || args.next().expect("value");
+        match a.as_str() {
+            "--traces" => traces = PathBuf::from(v()),
+            "--unit" => unit = v().parse().unwrap(),
+            "--state" => state = true,
+            "--capacity" => capacity = v().parse().unwrap(),
+            "--slots" => slots = v().parse().unwrap(),
+            "--concurrency" => concurrency = v().parse().unwrap(),
+            "--sessions" => sessions_cap = v().parse().unwrap(),
+            _ => panic!("unknown arg {a}"),
+        }
+    }
+    let file = std::fs::File::open(&traces).unwrap_or_else(|e| panic!("{}: {e}", traces.display()));
+    let mut reqs: Vec<Req> = Vec::new();
+    let mut spans: Vec<(f64, f64)> = Vec::new();
+    for (i, line) in BufReader::new(file).lines().enumerate() {
+        if i >= sessions_cap {
+            break;
+        }
+        let s: Session = serde_json::from_str(&line.unwrap()).expect("trace line");
+        let flat = flatten(i, s);
+        let end = flat.iter().map(|r| r.t + r.api).fold(0.0, f64::max);
+        spans.push((flat.first().map_or(0.0, |r| r.t), end));
+        reqs.extend(flat);
+    }
+    let sessions = spans.len();
+    // Session k starts when session k - concurrency ends.
+    let mut offset = vec![0.0f64; sessions];
+    for k in 0..sessions {
+        if k >= concurrency {
+            let prev = k - concurrency;
+            offset[k] = offset[prev] + spans[prev].1;
+        }
+    }
+    let row = (1usize << 20) / unit + 64;
+    let m = manifest(unit, state, slots, row);
+    let pool = Arc::new(Pool::new(&m, capacity).unwrap());
+    let mut prefix = Prefix::new(unit);
+    let mut tally = Tally::default();
+    let mut order: Vec<usize> = (0..reqs.len()).collect();
+    order.sort_by(|&a, &b| {
+        let ta = offset[reqs[a].session] + reqs[a].t;
+        let tb = offset[reqs[b].session] + reqs[b].t;
+        ta.partial_cmp(&tb).unwrap().then(a.cmp(&b))
+    });
+    // Finish events keyed by (time bits, live index) so the order is total.
+    let mut finishing: BTreeMap<(u64, usize), Live> = BTreeMap::new();
+    let mut waiting: VecDeque<usize> = VecDeque::new();
+    let mut live_ids = 0usize;
+
+    let finish = |live: Live, prefix: &mut Prefix, tally: &mut Tally| {
+        let r = &reqs[live.req];
+        let total = r.input + r.out;
+        if state {
+            if total >= 1 {
+                let cp = pool.retire(live.lease, total);
+                prefix.insert(&live.chain, cp);
+                tally.checkpoints += 1;
+            }
+        } else {
+            let mut lease = live.lease;
+            let first = r.input.div_ceil(unit).max(live.hit / unit + 1);
+            for k in first..=total / unit {
+                if let Ok((cp, _)) = pool.checkpoint(&mut lease, k * unit) {
+                    prefix.insert(&live.chain, cp);
+                    tally.checkpoints += 1;
+                }
+            }
+        }
+    };
+
+    let mut i = 0usize;
+    let mut now = 0.0f64;
+    while i < order.len() || !finishing.is_empty() || !waiting.is_empty() {
+        let next_admit = order.get(i).map(|&r| offset[reqs[r].session] + reqs[r].t);
+        let next_finish = finishing.keys().next().map(|&(bits, _)| f64::from_bits(bits));
+        let admit_now = match (next_admit, next_finish) {
+            (Some(a), Some(f)) => a <= f && waiting.is_empty(),
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        if admit_now || (!waiting.is_empty() && next_finish.is_none()) {
+            let ri = if let Some(w) = waiting.pop_front() {
+                w
+            } else {
+                i += 1;
+                order[i - 1]
+            };
+            let r = &reqs[ri];
+            now = now.max(offset[r.session] + r.t);
+            let toks = tokens(&reqs, ri);
+            let worst = r.input + r.out;
+            let hit = prefix.lookup(&toks[..r.input]);
+            let lease = loop {
+                let attempt = match hit.and_then(|h| prefix.get(h.id).map(|cp| (h, cp))) {
+                    Some((_, cp)) => pool.restore(cp, worst).map(|(l, _)| l),
+                    None => pool.lease(worst),
+                };
+                match attempt {
+                    Ok(l) => break Some(l),
+                    Err(Denied::Busy) => {
+                        if prefix.evict() {
+                            tally.evictions += 1;
+                        } else {
+                            break None;
+                        }
+                    }
+                    Err(_) => {
+                        tally.rejected += 1;
+                        break None;
+                    }
+                }
+            };
+            let Some(mut lease) = lease else {
+                if finishing.is_empty() {
+                    tally.rejected += 1; // nothing to wait for
+                } else {
+                    tally.waited += 1;
+                    waiting.push_front(ri);
+                    // Fall through to the next finish.
+                    let ((bits, _), live) = finishing.pop_first().unwrap();
+                    now = f64::from_bits(bits);
+                    finish(live, &mut prefix, &mut tally);
+                }
+                continue;
+            };
+            let hit_len = lease.prefix();
+            tally.input += r.input as u64;
+            tally.hit += hit_len as u64;
+            tally.extend.push(r.input - hit_len);
+            let chain = Chain::over(unit, &toks);
+            if !state {
+                for k in (hit_len / unit + 1)..=r.input / unit {
+                    if let Ok((cp, _)) = pool.checkpoint(&mut lease, k * unit) {
+                        prefix.insert(&chain, cp);
+                        tally.checkpoints += 1;
+                    }
+                }
+            }
+            let end = now + r.api;
+            let id = live_ids;
+            live_ids += 1;
+            finishing.insert((end.to_bits(), id), Live { lease, req: ri, hit: hit_len, chain });
+            tally.max_live = tally.max_live.max(finishing.len());
+        } else {
+            let ((bits, _), live) = finishing.pop_first().unwrap();
+            now = f64::from_bits(bits);
+            finish(live, &mut prefix, &mut tally);
+        }
+    }
+    let main_reqs = reqs.iter().filter(|r| !r.subagent).count();
+    println!(
+        "{} sessions, {} requests ({main_reqs} main), unit {unit}, {}, capacity {} tokens ({} pages), {} slots, concurrency {concurrency}",
+        sessions,
+        reqs.len(),
+        if state { "recurrent state (checkpoint at request end)" } else { "paged only (checkpoint every page)" },
+        pool.total() as u64 * unit as u64,
+        pool.total(),
+        slots,
+    );
+    println!(
+        "hit {:.1}% of {} input tokens; extend p50 {} p90 {} p99 {}; {} checkpoints made, {} kept, {} evicted; {} requests waited, {} rejected; max live {}",
+        100.0 * tally.hit as f64 / tally.input.max(1) as f64,
+        tally.input,
+        pct(&mut tally.extend, 0.5),
+        pct(&mut tally.extend, 0.9),
+        pct(&mut tally.extend, 0.99),
+        tally.checkpoints,
+        prefix.len(),
+        tally.evictions,
+        tally.waited,
+        tally.rejected,
+        tally.max_live,
+    );
+}

@@ -35,6 +35,24 @@ call 表：接口实参解析一次，逐 launch 按 `args` 连线转发/接 scr
 per-seq state 的一个 slot（租时在 stream 上清零），`Lease::seq_line(table,
 r)` 给出 line 表的项（宽表 `[lines, seqs, w]` 的格宽由 `seq_width` 给出，
 caller 决定 line 落在哪一项）；租约 drop 时一起归还。
+
+**checkpoint（K1）**：`Runtime::checkpoint(&mut lease, len)` 把序列前 `len` 个
+token 留成 `Checkpoint`——页进共享链（一页一个引用计数节点，一条序列每页一个
+checkpoint 共用一条链，所以 checkpoint 深度再大也只是一个节点），有 per-seq
+state 时把 state 拷进一个新 slot（没有空 slot 报 `Denied::Busy`）；
+`Runtime::retire(lease, len)` 是请求结束时的零拷贝形式：`len` 之外的页归还，
+slot 原样移交。`Runtime::lease_from(&checkpoint, tokens)` 从 checkpoint 起一条
+新序列：整页共享，`len` 落在页中间时把那一页拷一份（新序列往里追加，
+checkpoint 自己那页不动），state 拷进新 slot；租约的 `prefix()` = `len`，
+`slot(pos)` 拒绝 `pos < prefix`。谁拿着句柄谁持有：页在最后一个 lease /
+checkpoint drop 时回池，checkpoint 本身不会被 runtime 淘汰。
+纯 host 的 `Prefix` 表（`prefix.rs`）按 token 哈希链索引 checkpoint：`lookup(tokens)`
+给出覆盖 prompt 真前缀（不含最后一个 token）的最长 checkpoint；序列自己带一条
+`Chain`（每 token 折一次，每页记一个头），`insert(&chain, cp)` 读链上对应长度的键，
+每页留一个 checkpoint 也只把每个 token 哈希一次；`insert` 去重，
+`evict` drop 最久未命中的一个（同一条链最深的先走，drop 叶子才真正还页）；
+逻辑时钟计数，不读钟，同样的 token 序列给同样的判定。决策（共享哪些页、拷哪一页、
+拷哪个 slot）由 `Pool` 在 host 上算成 `Copies`，runtime 只在 stream 上执行拷贝。
 kern run / kern test 仍默认 4096（test 的 workload 抽样以 capacity 为界）。
 `extern:cublaslt_bf16_tn` 特判：行主序 `C[m,n]=A[m,k]@W[n,k]^T` 映射成列
 主序 `C'=W_cm^T×A_cm`（transa=T、lda=ldb=k、m'=n、ldc=n）；

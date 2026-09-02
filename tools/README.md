@@ -29,6 +29,7 @@ examples/k3_golden.rs`）。
 | `export_k3.py` | HF checkpoint → `dense/bookends + dense/l<i>`（所有 rank 共用）+ `experts/ep<R>-r<r>-l<i>`（按 rank 分片，MegaMoE 布局，复用 `export_k3_moe.py` 的变换）；slot 布局照 pegainfer `model/plan.rs`。权重放数据盘（tray04 `/data/<user>/kern-k3/`），跑在 vllm 镜像的 CPU 容器里 |
 | `gen_k3_decode.py` | `--layers N --ranks R --max-ctx C --seqs S` → `examples/k3-<N>l-ep<R>.json` / `k3-ep<R>.json`：整条 decode program（93 层 1855 launch，742 个 cuBLAS GEMM），`tokens`/`seqs` 是变量，几何在 `GEOM` 表里；MoE 三步来自 `gen_k3_moe.mega_pieces`。核改了要先 `KERN_REBUILD=1 tools/build_kernels.sh` 再生成（manifest 钉 cubin 哈希） |
 | `k3_oracle_dump.py` | 任一 OpenAI 兼容服务 → fixture（teacher-forced greedy）。vLLM 带 top-5 logprob，给 `k3_golden --margin-abs` 做 noise-floor 判定；pegainfer 的 K3 不出 logprob，用 `--no-logprobs`（`return_token_ids`，只记 argmax，逐步必须精确一致）。长 prompt 用 `--check-last N`：只对最后 N 个 prompt 位置和续写步请求参考，前面的位置记 `argmax=-1`（runner 只喂不比） |
+| `crates/kern-run/examples/agentx_replay.rs` | K1 的 host 门禁：把 AgentX（Claude Code）trace（HF `semianalysisai/cc-traces-weka-062126`）按时间回放进 `Pool` + `Prefix`（只有页号，不碰 GPU），报命中率 / extend 分位 / 淘汰数；`--unit` 页大小、`--state` 带循环状态（只在请求结束留 checkpoint）、`--capacity`、`--slots`、`--concurrency` |
 | `crates/kern-run/examples/k3_golden.rs` | 门禁 runner：`--manifest --weights --fixture --gpus --graph`；`--seqs B --mixed [--distinct]` 让每 rank 跑 B 行（行 0 是 fixture，其余随机 prompt），每行与"同 B 的自身拷贝批"逐 token 比（cuBLAS 按 m 选核，B=1 与 B=8 在近平局处可以不同）；跨 tray `--world 8 --rank-base 0|4 --rendezvous host:port` |
 
 

@@ -21,7 +21,7 @@ manifest，与 qwen3 同一条流水）。两条线并行，每级带门禁。
 | 级 | 内容 | 门禁 |
 |---|---|---|
 | K0 ✅ | state 一律走 VMM（可导出）；per-seq 定长 state（KDA 状态）已有 `bytes_per_seq` | 现有 qwen3 / dspark 门禁不变（2026-09-02 过）；K3 的 KDA state 能装载 |
-| K1 | 前缀缓存 = checkpoint 表：checkpoint = (精确长度, 前缀链哈希, 页表引用, 可选状态快照)，lease 池加页引用计数。纯 KV 模型的 checkpoint 不带状态、零成本，每个 64-token 块边界都留一个（退化成块哈希缓存）；KDA 模型每个 checkpoint 付 ~605 MB 快照，只在请求结束处留——MLA 页部分命中对 K3 没有价值，KDA 状态得从头重算 | AgentX trace 回放命中率 ≈ 98%（纯 host 侧页号模拟，不需要 GPU） |
+| K1 ✅ | 前缀缓存 = checkpoint 表：`Checkpoint` = (精确长度, 页链上的一个节点, 可选 state slot)，页链按引用计数还页（`Arc<Node>`，一页一节点，一条序列的所有 checkpoint 共一条链）；`Prefix` 表按页哈希链索引，序列自带滚动 `Chain`。纯 KV 模型每整页留一个、零拷贝；带循环状态的模型只在请求结束 `retire`（slot 易主，不拷），中途分叉不命中 | AgentX trace 回放（`crates/kern-run/examples/agentx_replay.rs`，393 session / 98 827 请求，2026-09-02）：纯 KV 页 64 命中 98.6%（缓存 7M token 时 98.1%），extend p50 640 / p90 5056 / p99 40704；带状态页 64 + 1024 slot 96.6%，页 784 + 130 slot（qwen3.8-27b 实机形状）91.0%。GPU 门禁在 `serve.md`：qwen3-4b / qwen3.8-27b 命中后 warm 与 cold 的 64 个 greedy token 一致 |
 | K2 | fork = 引用计数 +1 + 状态快照拷贝；子序列从父 checkpoint 起步，最后半页 CoW | 子 agent 从父 checkpoint 分叉，输出与重算一致（每 rank B>1 已由 E2b 提供，4 卡） |
 | K3 | session 睡/醒到本 tray DRAM（C2C，与 HBM 不干扰） | 6 GB 唤醒 < 60 ms，并发 decode 步时抖动 ≤ 6% |
 | K4 | DCP：ship q / 回 (O, LSE) 的 partial+merge op，w 按 span 定，flag-in-payload | 真 FlashMLA 复现 B2/B3：decode 税 ≤ 8%，extend W=4 ≥ 2× |
