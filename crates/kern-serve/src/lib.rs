@@ -146,7 +146,7 @@ pub fn serve(o: ServeOpts, art: Artifacts, d: Defaults) -> Result<()> {
     let join = std::thread::Builder::new()
         .name("kern-scheduler".into())
         .spawn(move || {
-            let load = || -> Result<(KernScheduler, scheduler::Facts)> {
+            let load = || -> Result<KernScheduler> {
                 let t0 = Instant::now();
                 let mut rt = Runtime::load(&manifest_json, &art.kernels, gpu, capacity, None)?;
                 info!(model = %rt.manifest.model, modules = rt.module_count(), load_s = logline::secs(t0.elapsed()), "manifest verified");
@@ -162,8 +162,8 @@ pub fn serve(o: ServeOpts, art: Artifacts, d: Defaults) -> Result<()> {
                 KernScheduler::new(rt, policy)
             };
             match load() {
-                Ok((sched, facts)) => {
-                    let _ = ready_tx.send(Ok(facts));
+                Ok(sched) => {
+                    let _ = ready_tx.send(Ok(sched.facts()));
                     drive(sched, backend);
                 }
                 Err(e) => {
