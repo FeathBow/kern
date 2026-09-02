@@ -9,7 +9,7 @@ manifest，与 qwen3 同一条流水）。两条线并行，每级带门禁。
 
 | 级 | 内容 | 门禁 |
 |---|---|---|
-| E0 | runtime 原语：`export`（VMM + fabric handle）、`peer`（u64 数组）、`topology`、`{"rank"}`；`export_handles` / `import_peers` API；verifier 三条规则（peer 必须 of export、`.MULTICAST` SASS 扫描、extern 不接 peer） | 一进程 4 个 runtime，跨卡 barrier 作为 manifest op 跑通，≈3.8 µs |
+| E0 ✅ | runtime 原语：`export`（VMM + fabric handle）、`peer`（u64 数组）、`topology`、`{"rank"}`；`export_handles` / `import_peers` API；verifier 三条规则（peer 必须 of export、`.MULTICAST` SASS 扫描、extern 不接 peer） | 一进程 4 个 runtime，跨卡 barrier 作为 manifest op 跑通，≈3.8 µs —— **2026-09-02 tray03 实测 3.75 µs**（`ep0-k0-export-state`） |
 | E1 | K3 pruned 的一个 MoE 层作为 program：quant → MegaMoE cubin → 输出，EP4 单 tray；`SymBuffer` 由 host 从 peer 数组算出 | EP4 rank0 与 EP1 逐位一致 |
 | E2 | K3 pruned 完整 decode superstep @EP4：MLA + KDA + MoE 全层，图捕获，leader host 驱动 | 与 vLLM 同 checkpoint 逐 token 一致；步时对齐 |
 | E3 | 跨 tray EP8/16：只换 handle 交换；spin 超时进 MegaMoE fork；W=36 barrier 实测 | 跨 tray 与单 tray 逐位一致；每步 dispatch+combine 税在 5–7 ms 预估内 |
@@ -19,7 +19,7 @@ manifest，与 qwen3 同一条流水）。两条线并行，每级带门禁。
 
 | 级 | 内容 | 门禁 |
 |---|---|---|
-| K0 | state 一律走 VMM（可导出）；加 per-seq 定长 state（KDA 状态） | 现有 qwen3 / dspark 门禁不变；K3 的 KDA state 能装载 |
+| K0 ✅ | state 一律走 VMM（可导出）；per-seq 定长 state（KDA 状态）已有 `bytes_per_seq` | 现有 qwen3 / dspark 门禁不变（2026-09-02 过）；K3 的 KDA state 能装载 |
 | K1 | 前缀缓存 + 分支 CoW：lease 池加页引用计数，块哈希查找 | AgentX trace 回放命中率 ≈ 98% |
 | K2 | checkpoint 一等对象：KDA 状态快照 + latent 页列表 + 位置 + epoch；fork = 引用计数 + 快照 | 子 agent 从父 checkpoint 分叉，输出与重算一致 |
 | K3 | session 睡/醒到本 tray DRAM（C2C，与 HBM 不干扰） | 6 GB 唤醒 < 60 ms，并发 decode 步时抖动 ≤ 6% |

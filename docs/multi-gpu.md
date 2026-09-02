@@ -159,12 +159,13 @@ barrier ≈ 3.8 µs**，这是 TP 的固有成本，与提交方式无关。
   // 可导出：VMM 分配（cuMemCreate + fabric handle），别的 rank 可映射
   "ar_in":  { "dtype": "bf16", "shape": ["tokens", 5120], "kind": "workspace", "export": true },
   "ar_flag": { "dtype": "i32", "shape": [64], "kind": "carry", "export": true },
-  // peer：一个 u64 数组，第 i 项是组内 rank i 的同名 buffer 的设备地址（本 rank 也在里面）
-  "ar_in_peers":  { "kind": "peer", "of": "ar_in",  "group": "tp" },
-  "ar_flag_peers": { "kind": "peer", "of": "ar_flag", "group": "tp" }
+  // peer：u64[组大小]，第 i 项是组内 rank i 的 `of` 的设备基址（本 rank 也在里面）
+  "ar_in_peers":  { "dtype": "u64", "shape": [8], "kind": "peer", "of": "ar_in",  "group": "tp" },
+  "ar_flag_peers": { "dtype": "u64", "shape": [8], "kind": "peer", "of": "ar_flag", "group": "tp" },
+  "kv_peers":      { "dtype": "u64", "shape": [32], "kind": "peer", "of": "kv", "group": "ep" }
 },
 "states": {
-  "kv": { "bytes_per_token": 147456, "export": true }        // P/D push 的目标
+  "kv": { "bytes_per_token": 147456 }        // state 一律 VMM + fabric handle，没有 export 字段；P/D push 的目标
 },
 "ops": {
   "allreduce": { "params": ["inout buffer<bf16>", "in buffer<u64>", "in buffer<u64>", "i32", "i32"],
@@ -178,8 +179,9 @@ barrier ≈ 3.8 µs**，这是 TP 的固有成本，与提交方式无关。
   `cuMemAddressReserve` + `cuMemMap`），handle 类型 FABRIC；不导出的照旧
   `cuMemAlloc`。**P/D push、EGM、host 分层三件事都要求 state 走 VMM**，所
   以 state 一律 VMM，buffer 按需。
-- `peer`：`kind: peer` 的 buffer 是 runtime 填的 `u64[group_size]`，
-  verifier 要求 `of` 已 `export`、`group` 已声明；ABI 上就是
+- `peer`：`kind: peer` 的 buffer 是 runtime 填的 `u64[group_size]`（写明
+  `dtype: u64`、`shape: [组大小]`），verifier 要求 `of` 是已 `export` 的
+  buffer 或任一 state、`group` 已声明、对 op 只读；ABI 上就是
   `in buffer<u64>`。kernel 拿到指针数组自己寻址（vLLM custom_allreduce /
   TRT-LLM / DeepEP intranode 都是这个形状）。
 - `{"rank": "<group>"}` 是 launch/call 的标量实参来源，load 时烧死。
@@ -189,13 +191,15 @@ barrier ≈ 3.8 µs**，这是 TP 的固有成本，与提交方式无关。
 ### Runtime API 增量
 
 ```rust
-Runtime::load(manifest, kernels, capacity, topo: Option<Topology>)  // Topology { groups: {name: (my_index, size)} }
-fn export_handles(&self) -> Vec<(String, [u8; 64])>       // 每个 export 的 buffer/state 一个
-fn import_peers(&mut self, group: &str, rank: usize, handles: &[(String, [u8; 64])])  // 映射并填 peer 数组
+Runtime::load(manifest, kernels, gpu, capacity, topo: Option<&Topology>)  // Topology { groups: {name: GroupRank { index, size }} }
+fn export_handles(&self) -> Result<BTreeMap<String, PeerHandle>>  // 每个 export buffer / 每个带 handle 的 state 一个；PeerHandle = 64 B fabric handle + 映射字节数
+fn import_peers(&mut self, group: &str, members: &[BTreeMap<String, PeerHandle>])  // 按 rank 序给全组的表；映射并填该组的 peer 数组
+fn pending_peers(&self) -> Vec<&str>   // 还没填的 peer buffer；非空时 run/capture 拒绝
 ```
 
-handle 交换的传输是 caller 的事（共享盘文件、TCP、什么都行——64 B ×
-buffer 数 × rank 数，一次性）。同进程内的 rank 也走同一条路（fabric
+（已实现，分支 `ep0-k0-export-state`。）handle 交换的传输是 caller 的事
+（共享盘文件、TCP，什么都行——`PeerHandle::to_bytes()` 72 B × buffer 数
+× rank 数，一次性）。同进程内的 rank 也走同一条路（fabric
 handle 同进程导入合法），不特判 P2P。
 
 ### 执行模型
