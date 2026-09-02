@@ -84,9 +84,19 @@ topology.groups.<name>       group    多卡 SPMD 的 rank 组：只有名字和
     `extern:<name>` 表示 runtime 内置，没有 module 也没有几何。其余字段：
     `params`（该 launch 自己的 ABI；**不写 = 同接口**）、
     `block`/`grid`（grid 用下述表达式集合；可选 `shared_mem`，上限 227KB
-    opt-in）、`args` 连线：`{"param": i}` 转发接口第 i 参 /
+    opt-in；可选 `cluster: [x, y, z]` 线程块簇，grid 每轴必须是它的倍数，
+    runtime 走 `cuLaunchKernelEx`）、`args` 连线：`{"param": i}` 转发接口第 i 参 /
     `{"scratch": name}` 接私有工作区 / 字面量标量（impl 私有常量）/
-    `{"rank": group}`；**不写 = 按序转发接口参数**。所以一个"ABI 即接口"的单 launch op 只
+    `{"rank": group}` / `{"tensormap": {...}}`；**不写 = 按序转发接口参数**。
+    **tensormap** 是 launch 私有的参数类型（`"tensormap"`，128 字节
+    `CUtensorMap` 按值传，接口上不许出现）：`{"param": i, "dtype":
+    "u8"|"u4"|"i32"|"bf16"|..., "dims": [内层在前, 元素数], "strides":
+    [第 2 维起的字节步长], "box": [smem tile 元素数], "swizzle": 0|32|64|128,
+    "l2_promotion": 0|64|128|256, "oob_nan": bool}`——对接口第 i 个 buffer
+    参（call 的 offset 照算）在装载时 `cuTensorMapEncodeTiled`；dtype 是
+    TMA 眼里的元素类型，与 buffer 的 dtype 无关（一个 `u8` slab 上可以同
+    时挂 fp8 activation 和 i32 scale 的描述符）。DeepGEMM 这类 TMA kernel
+    的 18 个描述符就这样从 manifest 里长出来，host 侧不再有 launch 代码。所以一个"ABI 即接口"的单 launch op 只
     需要 `module`、`entry`、`block`、`grid` 四个字段；两段式 argmax、
     vLLM attention（unified + reduce_segments）这类"一个逻辑算子 = 多次
     launch + 私有中间缓冲"整体折叠成一个 impl，不向调用方泄漏。
@@ -259,7 +269,14 @@ header 重复——没有权重文件也要能 verify。冗余在 manifest 不�
     `export`；`of`/`group` 只许出现在 peer 上；peer 对 op 只读且视为初始
     已写；`{"rank": g}` 只接 `i32`/`i64` 参且 g 已声明；**带 extern launch
     的 op 不得收到 peer buffer**——runtime 内置（cublasLt）永远不碰 peer
-    内存。
+    内存；
+12. tensormap / cluster：`tensormap` 只许作 launch 参、只接
+    `{"tensormap"}` 实参、只能描述接口上的 buffer 参（不进 extern）；
+    维数 1–5、`strides` 比 `dims` 少一且为 16 的正倍数、`box` 每维
+    1..=256、内层 box 字节数是 16 的倍数且不超过 swizzle 跨度、
+    `dims[0]` 字节数是 16 的倍数；描述符寻址的字节数（末元素之后）在每
+    个 call 上不得超过 `buffer 字节数 − offset`（var 上界）。`cluster`
+    无零维、不超 16 块，grid 在 var 上下界都被它整除。
 
 反序列化层已拒绝：未知字段（包括实参对象里的未知键）、重复名字、非法
 参数类型串。
@@ -269,9 +286,11 @@ header 重复——没有权重文件也要能 verify。冗余在 manifest 不�
 底）。加载 cubin 后用 `cuFuncGetParamInfo` 比对参数个数/字节布局属于
 runtime crate 的 phase-2 校验。唯一一条 runtime 替 verifier 查的 kernel
 行为：**收到 peer buffer 的 launch 在装载时被 `cuobjdump -sass` 反汇编，
-任何带 `.MULTICAST` 的指令（`UTMALDG.*.MULTICAST`、`UBLKCP.*.MULTICAST`）
-都拒绝**——multicast TMA 打到 peer/fabric 地址会把发起的 GPU 卡死到整机
-重启（GB300 实测），而 verifier 看不见 SASS。没有 cuobjdump 就拒绝装载。
+任何搬内存的 multicast 指令（`UTMALDG/UTMASTG/UTMAREDG.*.MULTICAST`、
+`UBLKCP/UBLKRED.*.MULTICAST`）都拒绝**——multicast TMA 打到 peer/fabric
+地址会把发起的 GPU 卡死到整机重启（GB300 实测），而 verifier 看不见
+SASS。簇内 barrier 的 `UTCBAR.2CTA.MULTICAST` 不碰全局内存，放行
+（MegaMoE 用它）。没有 cuobjdump 就拒绝装载。
 
 ## 从 v2 到 v3
 

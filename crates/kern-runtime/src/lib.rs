@@ -36,10 +36,10 @@ use std::os::raw::c_void;
 use std::sync::Arc;
 
 use cudarc::cublaslt::CudaBlasLT;
-use cudarc::driver::{result as cu, sys, CudaContext, CudaStream, PinnedHostSlice};
+use cudarc::driver::{sys, CudaContext, CudaStream, PinnedHostSlice};
 use kern_manifest::types::{BufferKind, Manifest, State};
 
-use compile::{CompiledProgram, Launch, LaunchKind, RVal, Slot};
+use compile::{CompiledProgram, Launch, LaunchKind, RVal, Slot, TmaBlob};
 use device::{alloc, alloc_vmm, gemm_bf16_tn, DeviceBuf, Share};
 use error::{bail, cuda_check};
 pub use device::PeerHandle;
@@ -953,39 +953,73 @@ impl Runtime {
 
     fn launch(&self, l: &Launch, env: &[u64]) -> Result<()> {
         // Materialize the slots; only var-dependent scalars are left to
-        // compute, everything else was finished at load.
+        // compute, everything else was finished at load. Tensor maps ride
+        // along as pointers to their 128-byte images.
         let mut vals = Vec::with_capacity(l.slots.len());
+        let mut maps: Vec<Option<&TmaBlob>> = Vec::with_capacity(l.slots.len());
         for s in &l.slots {
-            vals.push(match s {
-                Slot::Const(rv) => *rv,
-                Slot::Expr(e) => RVal { val: e.eval(env)?, bytes: 0 },
-            });
+            let (v, m) = match s {
+                Slot::Const(rv) => (*rv, None),
+                Slot::Expr(e) => (RVal { val: e.eval(env)?, bytes: 0 }, None),
+                Slot::TensorMap(b) => (RVal { val: 0, bytes: 0 }, Some(&**b)),
+            };
+            vals.push(v);
+            maps.push(m);
         }
         match &l.kind {
             LaunchKind::Gemm { beta } => gemm_bf16_tn(&self.blt, &self.stream, &vals, *beta),
-            LaunchKind::Cubin { func, block, grid, shared_mem } => {
-                let grid =
-                    (grid[0].eval(env)? as u32, grid[1].eval(env)? as u32, grid[2].eval(env)? as u32);
+            LaunchKind::Cubin { func, block, grid, shared_mem, cluster } => {
+                let grid = [grid[0].eval(env)? as u32, grid[1].eval(env)? as u32, grid[2].eval(env)? as u32];
                 let smem = match shared_mem {
                     Some(e) => e.eval(env)? as u32,
                     None => 0,
                 };
-                // Every param slot staged as a little-endian u64; the launch
-                // ABI reads the low `size_bytes()` of each slot.
+                // Every scalar/pointer slot staged as a little-endian u64;
+                // the launch ABI reads the low `size_bytes()` of each slot.
+                // A tensormap slot points at its image instead.
                 let raw: Vec<u64> = vals.iter().map(|r| r.val).collect();
-                let mut params: Vec<*mut c_void> =
-                    raw.iter().map(|s| s as *const u64 as *mut c_void).collect();
-                unsafe {
-                    cu::launch_kernel(
-                        *func,
-                        grid,
-                        (block[0], block[1], block[2]),
-                        smem,
-                        self.stream.cu_stream(),
-                        &mut params,
-                    )
-                    .map_err(|e| Error::Cuda(format!("cuLaunchKernel: {e:?}")))
-                }
+                let mut params: Vec<*mut c_void> = raw
+                    .iter()
+                    .zip(&maps)
+                    .map(|(s, m)| match m {
+                        Some(b) => b.0.as_ptr() as *mut c_void,
+                        None => s as *const u64 as *mut c_void,
+                    })
+                    .collect();
+                let mut attrs = [sys::CUlaunchAttribute {
+                    id: sys::CUlaunchAttributeID::CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION,
+                    pad: [0; 4],
+                    value: sys::CUlaunchAttributeValue { pad: [0; 64] },
+                }];
+                let num_attrs = match cluster {
+                    Some(c) => {
+                        attrs[0].value.clusterDim = sys::CUlaunchAttributeValue_union__bindgen_ty_1 {
+                            x: c[0],
+                            y: c[1],
+                            z: c[2],
+                        };
+                        1
+                    }
+                    None => 0,
+                };
+                let cfg = sys::CUlaunchConfig {
+                    gridDimX: grid[0],
+                    gridDimY: grid[1],
+                    gridDimZ: grid[2],
+                    blockDimX: block[0],
+                    blockDimY: block[1],
+                    blockDimZ: block[2],
+                    sharedMemBytes: smem,
+                    hStream: self.stream.cu_stream(),
+                    attrs: attrs.as_mut_ptr(),
+                    numAttrs: num_attrs,
+                };
+                cuda_check(
+                    unsafe {
+                        sys::cuLaunchKernelEx(&cfg, *func, params.as_mut_ptr(), std::ptr::null_mut())
+                    },
+                    "cuLaunchKernelEx",
+                )
             }
         }
     }

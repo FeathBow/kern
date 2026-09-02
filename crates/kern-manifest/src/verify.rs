@@ -51,6 +51,8 @@ const MAX_BLOCK_Z: u32 = 64;
 /// runtime performs for any launch declaring `shared_mem`: 227 KiB on
 /// sm90/sm100/sm103 datacenter parts.
 const MAX_DYN_SHARED_MEM: u64 = 232_448;
+/// Blocks per thread-block cluster (non-portable maximum on sm_90+).
+const MAX_CLUSTER_BLOCKS: u64 = 16;
 
 /// Sized like buffers: dtype bytes x dims at var upper bounds.
 fn shaped_size(
@@ -267,8 +269,20 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
     }
 
     // 6. ops: interface + implementation
+    // Per op: (interface param, footprint bytes, context) of every tensormap
+    // launch arg, checked against the bound buffer at each call (rule 7).
+    let mut op_tensormaps: BTreeMap<&str, Vec<(usize, u64, String)>> = BTreeMap::new();
     for (oname, op) in &m.ops {
         let imp = &op.imp;
+
+        for (i, p) in op.params.iter().enumerate() {
+            if *p == ParamType::TensorMap {
+                errs.push(format!(
+                    "op `{oname}`: interface param #{i} is a tensormap; tensormaps are launch-private, \
+                     the interface takes the buffer they describe"
+                ));
+            }
+        }
 
         for (sname, s) in &imp.scratch {
             shaped_size(
@@ -353,7 +367,30 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
                             }
                         }
                     }
+                    if let Some(cl) = &k.cluster {
+                        let blocks: u64 = cl.iter().map(|&x| x as u64).product();
+                        if cl.contains(&0) || blocks > MAX_CLUSTER_BLOCKS {
+                            errs.push(format!(
+                                "{ctx}: cluster {cl:?} has a zero dim or more than {MAX_CLUSTER_BLOCKS} blocks"
+                            ));
+                        } else {
+                            for (axis, (e, &c)) in ["x", "y", "z"].iter().zip(k.grid.iter().zip(cl)) {
+                                for (env, at) in [(&env_max, "upper"), (&env_min, "lower")] {
+                                    if let Ok(v) = e.eval(env) {
+                                        if v % c as u64 != 0 {
+                                            errs.push(format!(
+                                                "{ctx}: grid.{axis} = {v} at var {at} bounds is not a multiple of cluster.{axis} = {c}"
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
+            }
+            if launch.is_extern() && launch.params_of(op).contains(&ParamType::TensorMap) {
+                errs.push(format!("{ctx}: an extern launch takes pointers and scalars, not a tensormap"));
             }
 
             let params = launch.params_of(op);
@@ -447,6 +484,37 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
                             errs.push(format!("{actx}: a rank binds only to an i32 or i64 param, not `{param}`"));
                         }
                         group_ctx(rank, &mut errs, &mut used_groups, &actx);
+                    }
+                    LaunchArg::TensorMap { tensormap: t } => {
+                        if *param != ParamType::TensorMap {
+                            errs.push(format!("{actx}: a tensormap binds only to a `tensormap` param, not `{param}`"));
+                        }
+                        let i = t.param;
+                        let Some(iface) = op.params.get(i) else {
+                            errs.push(format!(
+                                "{actx}: interface param #{i} out of range ({} interface params)",
+                                op.params.len()
+                            ));
+                            continue;
+                        };
+                        let ParamType::Buf { dir, .. } = iface else {
+                            errs.push(format!(
+                                "{actx}: tensormap over interface param #{i} (`{iface}`), which is not a buffer"
+                            ));
+                            continue;
+                        };
+                        for e in t.check() {
+                            errs.push(format!("{actx}: {e}"));
+                        }
+                        // The descriptor reads or writes per the interface
+                        // direction; the kernel is trusted not to store
+                        // through an `in` buffer's descriptor.
+                        if matches!(dir, Dir::Out | Dir::InOut) {
+                            iface_written[i] = true;
+                        }
+                        if let Some(fp) = t.footprint() {
+                            op_tensormaps.entry(oname.as_str()).or_default().push((i, fp, actx.clone()));
+                        }
                     }
                     arg => {
                         errs.push(format!("{actx}: {arg} does not match launch param `{param}`"));
@@ -544,6 +612,18 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
                         }
                         if matches!(dir, Dir::In | Dir::InOut) && !written.contains(buf) {
                             errs.push(format!("{actx}: buffer `{buf}` is read before ever being written"));
+                        }
+                        if let (Some(tms), Some(&sz)) =
+                            (op_tensormaps.get(c.op.as_str()), buf_sizes.get(buf.as_str()))
+                        {
+                            for (_, fp, tctx) in tms.iter().filter(|(p, _, _)| *p == j) {
+                                let avail = sz.saturating_sub(*offset);
+                                if *fp > avail {
+                                    errs.push(format!(
+                                        "{actx}: {tctx} addresses {fp} bytes but buffer `{buf}` has {avail} bytes past offset {offset} at var upper bounds"
+                                    ));
+                                }
+                            }
                         }
                         if b.kind == BufferKind::Peer && has_extern {
                             errs.push(format!(
@@ -1378,6 +1458,89 @@ mod tests {
         let mut v = peer_base();
         v["ops"]["barrier"]["impl"]["launches"][0]["args"][3] = serde_json::json!({ "rank": "nope" });
         assert_err(v, "unknown topology group `nope`");
+    }
+
+    /// A launch taking a tensor map over interface buffer #1 (u8 raw bytes),
+    /// launched as clusters of 2.
+    fn tensormap_base() -> serde_json::Value {
+        let mut v = base();
+        v["buffers"]["tm_out"] = serde_json::json!({ "dtype": "bf16", "shape": [64], "kind": "output" });
+        v["buffers"]["raw"] = serde_json::json!({ "dtype": "u8", "shape": [512], "kind": "input" });
+        v["ops"]["tm"] = serde_json::json!({
+            "params": ["out buffer<bf16>", "in buffer<u8>"],
+            "impl": { "launches": [
+                { "module": "toy", "entry": "tm_k", "block": [128, 1, 1], "grid": [2, 1, 1], "cluster": [2, 1, 1],
+                  "params": ["out buffer<bf16>", "tensormap"],
+                  "args": [{ "param": 0 }, { "tensormap": { "param": 1, "dtype": "u8", "dims": [128, 4],
+                                                            "strides": [128], "box": [128, 4], "swizzle": 128 } }] }
+            ] }
+        });
+        v["programs"]["decode"].as_array_mut().unwrap().push(serde_json::json!({
+            "op": "tm",
+            "args": [{ "buf": "tm_out" }, { "buf": "raw" }]
+        }));
+        v
+    }
+
+    #[test]
+    fn tensormap_manifest_verifies() {
+        check(tensormap_base()).unwrap();
+        // the call's offset shrinks what the descriptor may address: 512 - 0 ok, exactly fits
+        let mut v = tensormap_base();
+        v["programs"]["decode"][2]["args"][1]["offset"] = 0.into();
+        check(v).unwrap();
+    }
+
+    #[test]
+    fn tensormap_shape_rules() {
+        let mut v = tensormap_base();
+        v["ops"]["tm"]["impl"]["launches"][0]["args"][1]["tensormap"]["box"] = serde_json::json!([512, 4]);
+        assert_err(v, "box[0] = 512, must be 1..=256");
+        let mut v = tensormap_base();
+        v["ops"]["tm"]["impl"]["launches"][0]["args"][1]["tensormap"]["strides"] = serde_json::json!([120]);
+        assert_err(v, "strides[0] = 120 is not a positive multiple of 16");
+        let mut v = tensormap_base();
+        v["ops"]["tm"]["impl"]["launches"][0]["args"][1]["tensormap"]["swizzle"] = 64.into();
+        assert_err(v, "box[0] spans 128 bytes, more than the 64 byte swizzle span");
+        let mut v = tensormap_base();
+        v["ops"]["tm"]["impl"]["launches"][0]["args"][1]["tensormap"]["dims"] = serde_json::json!([128, 5]);
+        assert_err(v, "addresses 640 bytes but buffer `raw` has 512 bytes past offset 0");
+        let mut v = tensormap_base();
+        v["programs"]["decode"][2]["args"][1]["offset"] = 16.into();
+        assert_err(v, "has 496 bytes past offset 16");
+    }
+
+    #[test]
+    fn tensormap_binding_rules() {
+        // only over a buffer param
+        let mut v = tensormap_base();
+        v["ops"]["tm"]["impl"]["launches"][0]["args"][1]["tensormap"]["param"] = 0.into();
+        v["ops"]["tm"]["impl"]["launches"][0]["args"][0] = serde_json::json!({ "tensormap": { "param": 1, "dtype": "u8", "dims": [128], "box": [128] } });
+        assert_err(v, "arg #0: a tensormap binds only to a `tensormap` param, not `out buffer<bf16>`");
+        // never on the interface
+        let mut v = tensormap_base();
+        v["ops"]["tm"]["params"][1] = "tensormap".into();
+        assert_err(v, "interface param #1 is a tensormap; tensormaps are launch-private");
+        // never into an extern
+        let mut v = tensormap_base();
+        v["ops"]["tm"]["impl"]["launches"][0] = serde_json::json!({
+            "entry": "extern:cublaslt_bf16_tn", "params": ["out buffer<bf16>", "tensormap"],
+            "args": [{ "param": 0 }, { "tensormap": { "param": 1, "dtype": "u8", "dims": [128], "box": [128] } }]
+        });
+        assert_err(v, "an extern launch takes pointers and scalars, not a tensormap");
+    }
+
+    #[test]
+    fn cluster_divides_grid() {
+        let mut v = tensormap_base();
+        v["ops"]["tm"]["impl"]["launches"][0]["grid"] = serde_json::json!([3, 1, 1]);
+        assert_err(v, "grid.x = 3 at var upper bounds is not a multiple of cluster.x = 2");
+        let mut v = tensormap_base();
+        v["ops"]["tm"]["impl"]["launches"][0]["cluster"] = serde_json::json!([4, 4, 2]);
+        assert_err(v, "has a zero dim or more than 16 blocks");
+        let mut v = tensormap_base();
+        v["ops"]["tm"]["impl"]["launches"][0]["cluster"] = serde_json::json!([2, 0, 1]);
+        assert_err(v, "has a zero dim or more than 16 blocks");
     }
 
     #[test]

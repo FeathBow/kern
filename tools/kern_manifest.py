@@ -32,9 +32,9 @@ import subprocess
 SCHEMA_VERSION = 3
 SCALARS = ("i32", "i64", "f32", "u8")
 
-_TOP = ["schema_version", "model", "spec", "vars", "states", "buffers", "modules", "ops", "programs"]
+_TOP = ["schema_version", "model", "spec", "vars", "topology", "states", "buffers", "modules", "ops", "programs"]
 _BUFFER = ["dtype", "shape", "kind", "domain"]
-_LAUNCH = ["module", "entry", "params", "block", "grid", "shared_mem", "args"]
+_LAUNCH = ["module", "entry", "params", "block", "grid", "shared_mem", "cluster", "args"]
 _CALL = ["label", "op", "args"]
 
 

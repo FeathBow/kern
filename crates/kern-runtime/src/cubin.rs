@@ -381,7 +381,12 @@ pub(crate) fn multicast_by_function(text: &str) -> BTreeMap<String, Vec<String>>
             .find(|tok| !tok.starts_with('@'))
             .unwrap_or("")
             .trim_end_matches(';');
-        if opcode.contains(".MULTICAST") {
+        // Only memory-moving multicast wedges the GPU at a peer address:
+        // TMA (UTMALDG/UTMASTG/UTMAREDG/UTMACCTL) and bulk copies
+        // (UBLKCP/UBLKRED). A cluster barrier's multicast arrive
+        // (UTCBAR.2CTA.MULTICAST) never touches global memory.
+        let is_copy = opcode.starts_with("UTMA") || opcode.starts_with("UBLK");
+        if is_copy && opcode.contains(".MULTICAST") {
             out.get_mut(f).unwrap().push(body.split("/*").next().unwrap_or(body).trim().to_string());
         }
     }
@@ -399,7 +404,8 @@ mod tests {
         /*0000*/                   LDC R1, c[0x0][0x28] ;                       /* 0x00000a00ff017b82 */
         /*0010*/              @!P0 UTMALDG.2D.MULTICAST [UR4], [UR8] ;          /* 0x0000000004007fab */
         /*0020*/                   UBLKCP.S.G [UR4], [UR8] ;                    /* 0x0000000004007fab */
-        /*0030*/                   EXIT ;                                       /* 0x000000000000794d */
+        /*0030*/                   UTCBAR.2CTA.MULTICAST.ARRIVE UR4 ;           /* 0x0000000004007fab */
+        /*0040*/                   EXIT ;                                       /* 0x000000000000794d */
 		Function : k_bulk
         /*0000*/                   UBLKCP.S.G [UR4], [UR8] ;
         /*0010*/                   UTMALDG.2D [UR4], [UR8] ;

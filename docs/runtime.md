@@ -64,6 +64,25 @@ tray03 4×GB300 实测 captured burst **3.75 µs/barrier**、eager run+sync
 15.8 µs；`--drop r` 让 r 缺席，其余 rank 2 s 内报"等 r 超时"而不是挂住；
 换成 multicast bulk copy 的同名 kernel 装载即被拒。
 
+**TMA 描述符与簇 launch**：launch 实参 `{"tensormap": {...}}` 在装载时对
+finished 指针（buffer 基址 + call offset）`cuTensorMapEncodeTiled` 成
+128 字节镜像（64 字节对齐），launch 时按值塞进参数槽（ABI 校验里它就
+是一个 128 字节参数）；`cluster` 走 `cuLaunchKernelEx` +
+`CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION`（无 cluster 的 launch 也走同一
+条路，attrs 为空）。E1 门禁 `crates/kern-runtime/examples/k3_moe_ep.rs`：
+K3 pruned 第 1 层 MoE（224 expert，top-16，mxfp4 权重）作为三个 op 的
+program（`tools/kernels-src/k3_mega_stage.cu` 的 quant_x / write_routing
+往 slab 里写，然后 DeepGEMM MegaMoE 一个 launch：dispatch → L1 → situ →
+L2 → combine），slab 是一个 `export` 的 carry buffer，peer 数组由 kernel
+在设备上读（`tools/k3-mega/`：fork 只改签名，`SymBuffer` 的偏移表从
+`__grid_constant__` 换成 `const int64_t*`）。权重与测试向量由
+`tools/export_k3_moe.py` 导出（含 host 参考），manifest 由
+`tools/gen_k3_moe.py` 生成（几何与 slab 偏移来自 `k3_mega_layout_dump`）。
+tray04 4×GB300 实测（2026-09-02）：EP4 每 rank 64 token **227 µs/层**
+（captured），四个 rank 的输出与 EP1（256 token 单卡，733 µs/层）对应行
+**逐字节一致**；EP1 对 host 参考 max |err| 0.015、相对 RMS 1.7e-3，
+917504 个元素无一超 5%+0.05。
+
 **错误分类**（`kern_runtime::Error`，按"谁需要行动"分变体）：
 `ManifestParse`/`ManifestVerify`/`Manifest`（provider 修生成器）、
 `KernelArtifact`（cubin 缺失/哈希不符/ABI 不匹配/peer launch 含 multicast

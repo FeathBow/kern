@@ -494,6 +494,9 @@ pub enum ParamType {
     State { dir: Dir },
     /// A by-value scalar, e.g. `"i32"`.
     Scalar(ScalarType),
+    /// A 128-byte TMA descriptor (`CUtensorMap`) passed by value, launch-private:
+    /// wired with a `{"tensormap": {...}}` launch arg over an interface buffer.
+    TensorMap,
 }
 
 impl ParamType {
@@ -502,6 +505,7 @@ impl ParamType {
     pub fn size_bytes(self) -> u64 {
         match self {
             ParamType::Buf { .. } | ParamType::State { .. } => 8,
+            ParamType::TensorMap => 128,
             ParamType::Scalar(ScalarType::I64) => 8,
             ParamType::Scalar(ScalarType::U8) => 1,
             ParamType::Scalar(_) => 4,
@@ -512,7 +516,7 @@ impl ParamType {
     pub fn dir(self) -> Option<Dir> {
         match self {
             ParamType::Buf { dir, .. } | ParamType::State { dir } => Some(dir),
-            ParamType::Scalar(_) => None,
+            ParamType::Scalar(_) | ParamType::TensorMap => None,
         }
     }
 }
@@ -527,6 +531,7 @@ impl FromStr for ParamType {
             "i64" => return Ok(ParamType::Scalar(ScalarType::I64)),
             "f32" => return Ok(ParamType::Scalar(ScalarType::F32)),
             "u8" => return Ok(ParamType::Scalar(ScalarType::U8)),
+            "tensormap" => return Ok(ParamType::TensorMap),
             _ => {}
         }
         let (dir_s, rest) = s
@@ -556,6 +561,7 @@ impl fmt::Display for ParamType {
             ParamType::Buf { dtype, dir } => write!(f, "{dir} buffer<{dtype}>"),
             ParamType::State { dir } => write!(f, "{dir} state"),
             ParamType::Scalar(st) => write!(f, "{st}"),
+            ParamType::TensorMap => write!(f, "tensormap"),
         }
     }
 }
@@ -567,11 +573,11 @@ impl schemars::JsonSchema for ParamType {
 
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
-            "description": "One parameter: a scalar (`\"i32\"`, `\"i64\"`, `\"f32\"`, `\"u8\"`) \
-                or a directional pointer (`\"in buffer<bf16>\"`, `\"out buffer<f32>\"`, \
-                `\"inout state\"`).",
+            "description": "One parameter: a scalar (`\"i32\"`, `\"i64\"`, `\"f32\"`, `\"u8\"`), \
+                a directional pointer (`\"in buffer<bf16>\"`, `\"out buffer<f32>\"`, \
+                `\"inout state\"`), or a launch-private `\"tensormap\"` (128-byte TMA descriptor).",
             "type": "string",
-            "pattern": "^(i32|i64|f32|u8|(in|out|inout) (state|buffer<(bf16|f16|f32|fp8e4m3|i32|u32|i64|u64|u8)>))$",
+            "pattern": "^(i32|i64|f32|u8|tensormap|(in|out|inout) (state|buffer<(bf16|f16|f32|fp8e4m3|i32|u32|i64|u64|u8)>))$",
         })
     }
 }
@@ -660,6 +666,9 @@ pub struct KernelLaunch {
     /// Dynamic shared memory in bytes, e.g. `{"mul": ["tokens", 512]}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_mem: Option<Expr>,
+    /// Thread-block cluster shape, e.g. `[2, 1, 1]`; the grid must be a multiple of it on every axis. Launched with `cuLaunchKernelEx`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster: Option<[u32; 3]>,
     /// Where each launch param comes from (default: the op's params in order), e.g. `[{"param": 0}, {"scratch": "pmax"}, {"i32": 64}]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<LaunchArg>>,
@@ -746,6 +755,133 @@ pub enum LaunchArg {
     U8 { u8: u8 },
     /// This rank's index in the named topology group, a load-time constant.
     Rank { rank: String },
+    /// A TMA descriptor over an interface buffer, encoded at load time.
+    TensorMap { tensormap: TensorMap },
+}
+
+/// A tiled TMA descriptor (`cuTensorMapEncodeTiled`) over the buffer bound to interface param `param`, e.g. `{"param": 5, "dtype": "u8", "dims": [3584, 1024], "strides": [3584], "box": [128, 96], "swizzle": 128}`.
+///
+/// `dims` are in elements, innermost first; `strides` are the byte strides of
+/// `dims[1..]`; `box` is the smem tile in elements. Element strides are 1.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TensorMap {
+    /// The interface buffer param the descriptor addresses (the call's offset is honoured).
+    pub param: usize,
+    /// Element type as TMA sees it; `u4` is 16 packed nibbles per 8 bytes (`CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B`).
+    pub dtype: TmaDType,
+    /// Global extent per dimension in elements, innermost first (1 to 5 dims).
+    pub dims: Vec<u64>,
+    /// Byte stride of each dimension after the first (`dims.len() - 1` entries, multiples of 16).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub strides: Vec<u64>,
+    /// Box (smem tile) extent per dimension in elements, each 1..=256.
+    #[serde(rename = "box")]
+    pub box_: Vec<u32>,
+    /// Shared-memory swizzle span in bytes: 0 (none), 32, 64 or 128.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub swizzle: u32,
+    /// L2 promotion in bytes: 0 (none), 64, 128 or 256.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub l2_promotion: u32,
+    /// Fill out-of-bounds elements with NaN instead of zero.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub oob_nan: bool,
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
+}
+
+/// TMA element types the runtime encodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TmaDType {
+    U8,
+    U16,
+    U32,
+    I32,
+    U64,
+    I64,
+    F16,
+    Bf16,
+    F32,
+    /// 4-bit elements, 16 per 8-byte unit (`16U4_ALIGN16B`); dims and box count nibbles.
+    U4,
+}
+
+impl TmaDType {
+    /// Element size in bits.
+    pub fn bits(self) -> u64 {
+        match self {
+            TmaDType::U4 => 4,
+            TmaDType::U8 => 8,
+            TmaDType::U16 | TmaDType::F16 | TmaDType::Bf16 => 16,
+            TmaDType::U32 | TmaDType::I32 | TmaDType::F32 => 32,
+            TmaDType::U64 | TmaDType::I64 => 64,
+        }
+    }
+}
+
+impl TensorMap {
+    /// Structural checks that need no buffer: rank, box limits, stride and
+    /// swizzle alignment. Returns every violation.
+    pub fn check(&self) -> Vec<String> {
+        let mut errs = Vec::new();
+        let n = self.dims.len();
+        if !(1..=5).contains(&n) {
+            errs.push(format!("dims has {n} entries, expected 1 to 5"));
+            return errs;
+        }
+        if self.strides.len() != n - 1 {
+            errs.push(format!("strides has {} entries, expected dims - 1 = {}", self.strides.len(), n - 1));
+        }
+        if self.box_.len() != n {
+            errs.push(format!("box has {} entries, expected {n}", self.box_.len()));
+        }
+        if let Some((i, _)) = self.dims.iter().enumerate().find(|(_, &d)| d == 0) {
+            errs.push(format!("dims[{i}] is 0"));
+        }
+        if let Some((i, &b)) = self.box_.iter().enumerate().find(|(_, &b)| !(1..=256).contains(&b)) {
+            errs.push(format!("box[{i}] = {b}, must be 1..=256"));
+        }
+        if let Some((i, &s)) = self.strides.iter().enumerate().find(|(_, &s)| s % 16 != 0 || s == 0) {
+            errs.push(format!("strides[{i}] = {s} is not a positive multiple of 16"));
+        }
+        let bits = self.dtype.bits();
+        if !(self.dims[0] * bits).is_multiple_of(128) {
+            errs.push(format!("dims[0] = {} elements is not a multiple of 16 bytes", self.dims[0]));
+        }
+        if let Some(&b0) = self.box_.first() {
+            let inner = b0 as u64 * bits / 8;
+            if !inner.is_multiple_of(16) {
+                errs.push(format!("box[0] = {b0} elements spans {inner} bytes, not a multiple of 16"));
+            }
+            if self.swizzle != 0 && inner > self.swizzle as u64 {
+                errs.push(format!("box[0] spans {inner} bytes, more than the {} byte swizzle span", self.swizzle));
+            }
+        }
+        if ![0, 32, 64, 128].contains(&self.swizzle) {
+            errs.push(format!("swizzle {} is not one of 0, 32, 64, 128", self.swizzle));
+        }
+        if ![0, 64, 128, 256].contains(&self.l2_promotion) {
+            errs.push(format!("l2_promotion {} is not one of 0, 64, 128, 256", self.l2_promotion));
+        }
+        errs
+    }
+
+    /// Bytes the descriptor can address from its base: the last element's
+    /// end. `None` if the shape is malformed (see [`Self::check`]).
+    pub fn footprint(&self) -> Option<u64> {
+        if self.dims.is_empty() || self.strides.len() + 1 != self.dims.len() {
+            return None;
+        }
+        let mut bytes = self.dims[0].checked_mul(self.dtype.bits())?.div_ceil(8);
+        for (d, s) in self.dims[1..].iter().zip(&self.strides) {
+            bytes = bytes.checked_add(d.checked_sub(1)?.checked_mul(*s)?)?;
+        }
+        Some(bytes)
+    }
 }
 
 impl fmt::Display for LaunchArg {
@@ -758,6 +894,9 @@ impl fmt::Display for LaunchArg {
             LaunchArg::F32 { f32: v } => write!(f, "f32 literal {v}"),
             LaunchArg::U8 { u8: v } => write!(f, "u8 literal {v}"),
             LaunchArg::Rank { rank } => write!(f, "rank in group `{rank}`"),
+            LaunchArg::TensorMap { tensormap } => {
+                write!(f, "tensormap over interface param #{}", tensormap.param)
+            }
         }
     }
 }

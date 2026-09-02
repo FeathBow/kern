@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use cudarc::driver::{result as cu, sys, CudaStream};
-use kern_manifest::types::{Arg, Call, Dim, Expr, LaunchArg, Manifest, Op, ParamType};
+use kern_manifest::types::{Arg, Call, Dim, Expr, LaunchArg, Manifest, Op, ParamType, TensorMap, TmaDType};
+use std::os::raw::c_void;
 
 use crate::cubin::{param_sizes, LoadedModule, MulticastScan};
 use crate::device::{alloc, DeviceBuf};
@@ -59,7 +60,13 @@ pub(crate) enum Slot {
     Const(RVal),
     /// Var-dependent scalar, evaluated against the dense env per run.
     Expr(CExpr),
+    /// A TMA descriptor encoded at load, passed by value (128 bytes).
+    TensorMap(Arc<TmaBlob>),
 }
+
+/// A `CUtensorMap` image; the launch ABI copies it into param space.
+#[repr(C, align(64))]
+pub(crate) struct TmaBlob(pub(crate) [u8; 128]);
 
 pub(crate) enum LaunchKind {
     Cubin {
@@ -67,6 +74,7 @@ pub(crate) enum LaunchKind {
         block: [u32; 3],
         grid: [CExpr; 3],
         shared_mem: Option<CExpr>,
+        cluster: Option<[u32; 3]>,
     },
     /// `extern:cublaslt_bf16_tn` / `..._acc` (beta 0.0 / 1.0); 6 args, or
     /// 7 with C's row stride.
@@ -323,6 +331,7 @@ fn compile_call(
                 Slot::Const(pointer_arg(arg, buffers, states)?)
             }
             ParamType::Scalar(_) => scalar_arg(arg, vars, rank_env.ranks)?,
+            ParamType::TensorMap => bail!(Manifest, "interface params cannot be tensormaps"),
         });
         peer.push(matches!(arg, Arg::Buf { buf, .. } if rank_env.peer_buffers.contains(buf)));
     }
@@ -331,8 +340,11 @@ fn compile_call(
         let mut slots = Vec::with_capacity(wiring.len());
         let mut touches_peer = false;
         for la in wiring.iter() {
-            if let LaunchArg::Param { param } = la {
-                touches_peer |= peer.get(*param).copied().unwrap_or(false);
+            match la {
+                LaunchArg::Param { param } | LaunchArg::TensorMap { tensormap: TensorMap { param, .. } } => {
+                    touches_peer |= peer.get(*param).copied().unwrap_or(false);
+                }
+                _ => {}
             }
             slots.push(match la {
                 LaunchArg::Param { param } => vals.get(*param).cloned().ok_or_else(|| {
@@ -349,6 +361,25 @@ fn compile_call(
                 LaunchArg::U8 { u8: v } => lit(*v as u64),
                 LaunchArg::F32 { f32: v } => lit(v.to_bits() as u64),
                 LaunchArg::Rank { rank } => lit(rank_index(rank_env.ranks, rank)?),
+                LaunchArg::TensorMap { tensormap: t } => {
+                    let Some(Slot::Const(rv)) = vals.get(t.param) else {
+                        bail!(Manifest, "launch #{li}: tensormap over interface param #{} which is not a pointer", t.param);
+                    };
+                    let (Some(buf), Some(fp)) = (c.args.get(t.param), t.footprint()) else {
+                        bail!(Manifest, "launch #{li}: malformed tensormap over interface param #{}", t.param);
+                    };
+                    if fp > rv.bytes {
+                        bail!(
+                            Manifest,
+                            "launch #{li}: tensormap over interface param #{} addresses {fp} bytes but {buf} has {} bytes left",
+                            t.param,
+                            rv.bytes
+                        );
+                    }
+                    Slot::TensorMap(Arc::new(encode_tensor_map(t, rv.val).map_err(|e| {
+                        Error::Cuda(format!("launch #{li}: tensormap over interface param #{}: {e}", t.param))
+                    })?))
+                }
             });
         }
         let kind = match imp {
@@ -386,6 +417,7 @@ fn compile_call(
                         compile_expr(&k.grid[2], vars)?,
                     ],
                     shared_mem: k.shared_mem.as_ref().map(|e| compile_expr(e, vars)).transpose()?,
+                    cluster: k.cluster,
                 }
             }
         };
@@ -463,4 +495,73 @@ fn var_index(vars: &BTreeMap<&str, usize>, var: &str) -> Result<usize> {
         Some(&i) => Ok(i),
         None => bail!(Manifest, "unknown var `{var}`"),
     }
+}
+
+/// `cuTensorMapEncodeTiled` for a manifest tensormap at a finished device
+/// address. Interleave none, element strides 1.
+fn encode_tensor_map(t: &TensorMap, ptr: u64) -> Result<TmaBlob> {
+    use sys::CUtensorMapDataType as Dt;
+    use sys::CUtensorMapL2promotion as L2;
+    use sys::CUtensorMapSwizzle as Sw;
+    if !ptr.is_multiple_of(16) {
+        bail!(Manifest, "device address {ptr:#x} is not 16-byte aligned");
+    }
+    let dtype = match t.dtype {
+        TmaDType::U8 => Dt::CU_TENSOR_MAP_DATA_TYPE_UINT8,
+        TmaDType::U16 => Dt::CU_TENSOR_MAP_DATA_TYPE_UINT16,
+        TmaDType::U32 => Dt::CU_TENSOR_MAP_DATA_TYPE_UINT32,
+        TmaDType::I32 => Dt::CU_TENSOR_MAP_DATA_TYPE_INT32,
+        TmaDType::U64 => Dt::CU_TENSOR_MAP_DATA_TYPE_UINT64,
+        TmaDType::I64 => Dt::CU_TENSOR_MAP_DATA_TYPE_INT64,
+        TmaDType::F16 => Dt::CU_TENSOR_MAP_DATA_TYPE_FLOAT16,
+        TmaDType::Bf16 => Dt::CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
+        TmaDType::F32 => Dt::CU_TENSOR_MAP_DATA_TYPE_FLOAT32,
+        TmaDType::U4 => Dt::CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B,
+    };
+    let swizzle = match t.swizzle {
+        0 => Sw::CU_TENSOR_MAP_SWIZZLE_NONE,
+        32 => Sw::CU_TENSOR_MAP_SWIZZLE_32B,
+        64 => Sw::CU_TENSOR_MAP_SWIZZLE_64B,
+        128 => Sw::CU_TENSOR_MAP_SWIZZLE_128B,
+        v => bail!(Manifest, "swizzle {v} is not one of 0, 32, 64, 128"),
+    };
+    let l2 = match t.l2_promotion {
+        0 => L2::CU_TENSOR_MAP_L2_PROMOTION_NONE,
+        64 => L2::CU_TENSOR_MAP_L2_PROMOTION_L2_64B,
+        128 => L2::CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
+        256 => L2::CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+        v => bail!(Manifest, "l2_promotion {v} is not one of 0, 64, 128, 256"),
+    };
+    let oob = if t.oob_nan {
+        sys::CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NAN_REQUEST_ZERO_FMA
+    } else {
+        sys::CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
+    };
+    let rank = t.dims.len() as u32;
+    let dims: Vec<u64> = t.dims.clone();
+    let strides: Vec<u64> = t.strides.clone();
+    let boxes: Vec<u32> = t.box_.clone();
+    let elem_strides: Vec<u32> = vec![1; t.dims.len()];
+    let mut map = sys::CUtensorMap { opaque: [0; 16] };
+    cuda_check(
+        unsafe {
+            sys::cuTensorMapEncodeTiled(
+                &mut map,
+                dtype,
+                rank,
+                ptr as *mut c_void,
+                dims.as_ptr(),
+                strides.as_ptr(),
+                boxes.as_ptr(),
+                elem_strides.as_ptr(),
+                sys::CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
+                swizzle,
+                l2,
+                oob,
+            )
+        },
+        "cuTensorMapEncodeTiled",
+    )?;
+    let bytes: [u8; 128] = unsafe { std::mem::transmute(map.opaque) };
+    Ok(TmaBlob(bytes))
 }

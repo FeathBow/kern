@@ -498,6 +498,20 @@
           "minItems": 3,
           "type": "array"
         },
+        "cluster": {
+          "description": "Thread-block cluster shape, e.g. `[2, 1, 1]`; the grid must be a multiple of it on every axis. Launched with `cuLaunchKernelEx`.",
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "entry": {
           "description": "Kernel symbol in the module, e.g. `\"kern_argmax_partial_bf16\"`.",
           "type": "string"
@@ -656,6 +670,19 @@
             "rank"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A TMA descriptor over an interface buffer, encoded at load time.",
+          "properties": {
+            "tensormap": {
+              "$ref": "#/$defs/TensorMap"
+            }
+          },
+          "required": [
+            "tensormap"
+          ],
+          "type": "object"
         }
       ],
       "description": "A launch argument: a forwarded op param, a scratch buffer, a literal, or this rank's index in a group, e.g. `{\"param\": 0}`, `{\"scratch\": \"pmax\"}`, `{\"i32\": 64}`, `{\"rank\": \"ep\"}`."
@@ -702,8 +729,8 @@
       "type": "object"
     },
     "ParamType": {
-      "description": "One parameter: a scalar (`\"i32\"`, `\"i64\"`, `\"f32\"`, `\"u8\"`) or a directional pointer (`\"in buffer<bf16>\"`, `\"out buffer<f32>\"`, `\"inout state\"`).",
-      "pattern": "^(i32|i64|f32|u8|(in|out|inout) (state|buffer<(bf16|f16|f32|fp8e4m3|i32|u32|i64|u64|u8)>))$",
+      "description": "One parameter: a scalar (`\"i32\"`, `\"i64\"`, `\"f32\"`, `\"u8\"`), a directional pointer (`\"in buffer<bf16>\"`, `\"out buffer<f32>\"`, `\"inout state\"`), or a launch-private `\"tensormap\"` (128-byte TMA descriptor).",
+      "pattern": "^(i32|i64|f32|u8|tensormap|(in|out|inout) (state|buffer<(bf16|f16|f32|fp8e4m3|i32|u32|i64|u64|u8)>))$",
       "type": "string"
     },
     "Scratch": {
@@ -774,6 +801,96 @@
         }
       },
       "type": "object"
+    },
+    "TensorMap": {
+      "additionalProperties": false,
+      "description": "A tiled TMA descriptor (`cuTensorMapEncodeTiled`) over the buffer bound to interface param `param`, e.g. `{\"param\": 5, \"dtype\": \"u8\", \"dims\": [3584, 1024], \"strides\": [3584], \"box\": [128, 96], \"swizzle\": 128}`.\n\n`dims` are in elements, innermost first; `strides` are the byte strides of\n`dims[1..]`; `box` is the smem tile in elements. Element strides are 1.",
+      "properties": {
+        "box": {
+          "description": "Box (smem tile) extent per dimension in elements, each 1..=256.",
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "dims": {
+          "description": "Global extent per dimension in elements, innermost first (1 to 5 dims).",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "dtype": {
+          "$ref": "#/$defs/TmaDType",
+          "description": "Element type as TMA sees it; `u4` is 16 packed nibbles per 8 bytes (`CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B`)."
+        },
+        "l2_promotion": {
+          "description": "L2 promotion in bytes: 0 (none), 64, 128 or 256.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "oob_nan": {
+          "description": "Fill out-of-bounds elements with NaN instead of zero.",
+          "type": "boolean"
+        },
+        "param": {
+          "description": "The interface buffer param the descriptor addresses (the call's offset is honoured).",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "strides": {
+          "description": "Byte stride of each dimension after the first (`dims.len() - 1` entries, multiples of 16).",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "swizzle": {
+          "description": "Shared-memory swizzle span in bytes: 0 (none), 32, 64 or 128.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "param",
+        "dtype",
+        "dims",
+        "box"
+      ],
+      "type": "object"
+    },
+    "TmaDType": {
+      "description": "TMA element types the runtime encodes.",
+      "oneOf": [
+        {
+          "enum": [
+            "u8",
+            "u16",
+            "u32",
+            "i32",
+            "u64",
+            "i64",
+            "f16",
+            "bf16",
+            "f32"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "u4",
+          "description": "4-bit elements, 16 per 8-byte unit (`16U4_ALIGN16B`); dims and box count nibbles.",
+          "type": "string"
+        }
+      ]
     },
     "Topology": {
       "additionalProperties": false,

@@ -10,7 +10,7 @@ manifest，与 qwen3 同一条流水）。两条线并行，每级带门禁。
 | 级 | 内容 | 门禁 |
 |---|---|---|
 | E0 ✅ | runtime 原语：`export`（VMM + fabric handle）、`peer`（u64 数组）、`topology`、`{"rank"}`；`export_handles` / `import_peers` API；verifier 三条规则（peer 必须 of export、`.MULTICAST` SASS 扫描、extern 不接 peer） | 一进程 4 个 runtime，跨卡 barrier 作为 manifest op 跑通，≈3.8 µs —— **2026-09-02 tray03 实测 3.75 µs**（`ep0-k0-export-state`） |
-| E1 | K3 pruned 的一个 MoE 层作为 program：quant → MegaMoE cubin → 输出，EP4 单 tray；`SymBuffer` 由 host 从 peer 数组算出 | EP4 rank0 与 EP1 逐位一致 |
+| E1 ✅ | K3 pruned 的一个 MoE 层作为 program：quant → MegaMoE cubin → 输出，EP4 单 tray；`SymBuffer` 的偏移表由 kernel 在设备上从 peer 数组读；manifest 新增 `tensormap` launch 参与 `cluster` | EP4 每个 rank 与 EP1 逐位一致 —— **2026-09-02 tray04 实测通过**：EP4 227 µs/层（64 token/rank），EP1 733 µs/层（256 token），EP1 对 host 参考相对 RMS 1.7e-3（`k3_moe_ep`） |
 | E2 | K3 pruned 完整 decode superstep @EP4：MLA + KDA + MoE 全层，图捕获，leader host 驱动 | 与 vLLM 同 checkpoint 逐 token 一致；步时对齐 |
 | E3 | 跨 tray EP8/16：只换 handle 交换；spin 超时进 MegaMoE fork；W=36 barrier 实测 | 跨 tray 与单 tray 逐位一致；每步 dispatch+combine 税在 5–7 ms 预估内 |
 | E4 | GPU 自转：图尾 tail-launch、图头等 step flag、advance 小核；follower 无 host | 成员不变的步 host 零参与 |

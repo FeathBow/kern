@@ -1,0 +1,739 @@
+{
+ "schema_version": 3,
+ "model": "kimi-k3-pruned-75pct/moe-l1/ep4",
+ "vars": {
+  "tokens": {
+   "max": 16896
+  }
+ },
+ "topology": {
+  "groups": {
+   "ep": 4
+  }
+ },
+ "buffers": {
+  "x": {
+   "dtype": "bf16",
+   "shape": [
+    "tokens",
+    3584
+   ],
+   "kind": "input"
+  },
+  "topk_idx": {
+   "dtype": "i32",
+   "shape": [
+    "tokens",
+    16
+   ],
+   "kind": "input",
+   "domain": {
+    "min": 0,
+    "max": 223
+   }
+  },
+  "topk_weight": {
+   "dtype": "f32",
+   "shape": [
+    "tokens",
+    16
+   ],
+   "kind": "input"
+  },
+  "slab": {
+   "dtype": "u8",
+   "shape": [
+    6645999680
+   ],
+   "kind": "carry",
+   "export": true
+  },
+  "slab_peers": {
+   "dtype": "u64",
+   "shape": [
+    4
+   ],
+   "kind": "peer",
+   "of": "slab",
+   "group": "ep"
+  },
+  "l1_weights": {
+   "dtype": "u8",
+   "shape": [
+    616562688
+   ],
+   "kind": "weight"
+  },
+  "l1_weights_sf": {
+   "dtype": "i32",
+   "shape": [
+    9633792
+   ],
+   "kind": "weight"
+  },
+  "l2_weights": {
+   "dtype": "u8",
+   "shape": [
+    308281344
+   ],
+   "kind": "weight"
+  },
+  "l2_weights_sf": {
+   "dtype": "i32",
+   "shape": [
+    4816896
+   ],
+   "kind": "weight"
+  },
+  "stats": {
+   "dtype": "i32",
+   "shape": [
+    56
+   ],
+   "kind": "workspace"
+  },
+  "y": {
+   "dtype": "bf16",
+   "shape": [
+    "tokens",
+    3584
+   ],
+   "kind": "output"
+  }
+ },
+ "modules": {
+  "k3_mega_moe": {
+   "source": "k3_mega_moe.cubin",
+   "sha256": "d77e8e132cf311601f61644da0da41f3e9592a901a14391d46497357c2970ae3"
+  },
+  "k3_mega_stage": {
+   "source": "k3_mega_stage.cubin",
+   "sha256": "0661b04545447a127fe99376380d44383599e0bd400ad0099a31ff5ef05b5ea8"
+  }
+ },
+ "ops": {
+  "quant_x": {
+   "params": [
+    "in buffer<bf16>",
+    "out buffer<u8>",
+    "out buffer<u8>",
+    "i32"
+   ],
+   "impl": {
+    "launches": [
+     {
+      "module": "k3_mega_stage",
+      "entry": "kern_k3_mega_quant_x",
+      "params": [
+       "in buffer<bf16>",
+       "out buffer<u8>",
+       "out buffer<u8>",
+       "i32",
+       "i32",
+       "i32",
+       "i32"
+      ],
+      "block": [
+       256,
+       1,
+       1
+      ],
+      "grid": [
+       {
+        "ceil_div": [
+         {
+          "mul": [
+           "tokens",
+           28
+          ]
+         },
+         8
+        ]
+       },
+       1,
+       1
+      ],
+      "args": [
+       {
+        "param": 0
+       },
+       {
+        "param": 1
+       },
+       {
+        "param": 2
+       },
+       {
+        "param": 3
+       },
+       {
+        "i32": 3584
+       },
+       {
+        "i32": 3584
+       },
+       {
+        "i32": 28
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "write_routing": {
+   "params": [
+    "in buffer<i32>",
+    "in buffer<f32>",
+    "out buffer<u8>",
+    "out buffer<u8>",
+    "i32"
+   ],
+   "impl": {
+    "launches": [
+     {
+      "module": "k3_mega_stage",
+      "entry": "kern_k3_mega_write_routing",
+      "block": [
+       256,
+       1,
+       1
+      ],
+      "grid": [
+       {
+        "ceil_div": [
+         {
+          "mul": [
+           "tokens",
+           16
+          ]
+         },
+         256
+        ]
+       },
+       1,
+       1
+      ]
+     }
+    ]
+   }
+  },
+  "mega_moe": {
+   "params": [
+    "out buffer<bf16>",
+    "out buffer<i32>",
+    "i32",
+    "in buffer<u64>",
+    "i32",
+    "inout buffer<u8>",
+    "inout buffer<u8>",
+    "in buffer<u8>",
+    "in buffer<i32>",
+    "inout buffer<u8>",
+    "inout buffer<u8>",
+    "in buffer<u8>",
+    "in buffer<i32>"
+   ],
+   "impl": {
+    "launches": [
+     {
+      "module": "k3_mega_moe",
+      "entry": "kern_k3_mega_moe_e224_r4_situ",
+      "params": [
+       "out buffer<bf16>",
+       "out buffer<i32>",
+       "i32",
+       "in buffer<u64>",
+       "i32",
+       "tensormap",
+       "tensormap",
+       "tensormap",
+       "tensormap",
+       "tensormap",
+       "tensormap",
+       "tensormap",
+       "tensormap",
+       "tensormap",
+       "tensormap",
+       "tensormap",
+       "tensormap",
+       "tensormap",
+       "tensormap",
+       "tensormap",
+       "tensormap",
+       "tensormap",
+       "tensormap"
+      ],
+      "block": [
+       512,
+       1,
+       1
+      ],
+      "grid": [
+       152,
+       1,
+       1
+      ],
+      "shared_mem": 214404,
+      "cluster": [
+       2,
+       1,
+       1
+      ],
+      "args": [
+       {
+        "param": 0
+       },
+       {
+        "param": 1
+       },
+       {
+        "param": 2
+       },
+       {
+        "param": 3
+       },
+       {
+        "param": 4
+       },
+       {
+        "tensormap": {
+         "param": 5,
+         "dtype": "u8",
+         "dims": [
+          3584,
+          457344
+         ],
+         "strides": [
+          3584
+         ],
+         "box": [
+          128,
+          96
+         ],
+         "l2_promotion": 256,
+         "swizzle": 128
+        }
+       },
+       {
+        "tensormap": {
+         "param": 6,
+         "dtype": "i32",
+         "dims": [
+          7317504,
+          28
+         ],
+         "strides": [
+          29270016
+         ],
+         "box": [
+          256,
+          1
+         ],
+         "l2_promotion": 256
+        }
+       },
+       {
+        "tensormap": {
+         "param": 7,
+         "dtype": "u4",
+         "dims": [
+          3584,
+          344064
+         ],
+         "strides": [
+          1792
+         ],
+         "box": [
+          128,
+          128
+         ],
+         "l2_promotion": 256,
+         "swizzle": 128
+        }
+       },
+       {
+        "tensormap": {
+         "param": 8,
+         "dtype": "i32",
+         "dims": [
+          6144,
+          1568
+         ],
+         "strides": [
+          24576
+         ],
+         "box": [
+          128,
+          1
+         ],
+         "l2_promotion": 256
+        }
+       },
+       {
+        "tensormap": {
+         "param": 9,
+         "dtype": "u8",
+         "dims": [
+          3072,
+          457344
+         ],
+         "strides": [
+          3072
+         ],
+         "box": [
+          64,
+          32
+         ],
+         "l2_promotion": 256,
+         "swizzle": 64
+        }
+       },
+       {
+        "tensormap": {
+         "param": 9,
+         "dtype": "u8",
+         "dims": [
+          3072,
+          457344
+         ],
+         "strides": [
+          3072
+         ],
+         "box": [
+          128,
+          96
+         ],
+         "l2_promotion": 256,
+         "swizzle": 128
+        }
+       },
+       {
+        "tensormap": {
+         "param": 10,
+         "dtype": "i32",
+         "dims": [
+          7317504,
+          24
+         ],
+         "strides": [
+          29270016
+         ],
+         "box": [
+          256,
+          1
+         ],
+         "l2_promotion": 256
+        }
+       },
+       {
+        "tensormap": {
+         "param": 11,
+         "dtype": "u4",
+         "dims": [
+          3072,
+          200704
+         ],
+         "strides": [
+          1536
+         ],
+         "box": [
+          128,
+          128
+         ],
+         "l2_promotion": 256,
+         "swizzle": 128
+        }
+       },
+       {
+        "tensormap": {
+         "param": 12,
+         "dtype": "i32",
+         "dims": [
+          3584,
+          1344
+         ],
+         "strides": [
+          14336
+         ],
+         "box": [
+          128,
+          1
+         ],
+         "l2_promotion": 256
+        }
+       },
+       {
+        "tensormap": {
+         "param": 5,
+         "dtype": "u8",
+         "dims": [
+          3584,
+          457344
+         ],
+         "strides": [
+          3584
+         ],
+         "box": [
+          128,
+          96
+         ],
+         "l2_promotion": 256,
+         "swizzle": 128
+        }
+       },
+       {
+        "tensormap": {
+         "param": 6,
+         "dtype": "i32",
+         "dims": [
+          7317504,
+          28
+         ],
+         "strides": [
+          29270016
+         ],
+         "box": [
+          256,
+          1
+         ],
+         "l2_promotion": 256
+        }
+       },
+       {
+        "tensormap": {
+         "param": 7,
+         "dtype": "u4",
+         "dims": [
+          3584,
+          344064
+         ],
+         "strides": [
+          1792
+         ],
+         "box": [
+          128,
+          128
+         ],
+         "l2_promotion": 256,
+         "swizzle": 128
+        }
+       },
+       {
+        "tensormap": {
+         "param": 8,
+         "dtype": "i32",
+         "dims": [
+          6144,
+          1568
+         ],
+         "strides": [
+          24576
+         ],
+         "box": [
+          128,
+          1
+         ],
+         "l2_promotion": 256
+        }
+       },
+       {
+        "tensormap": {
+         "param": 9,
+         "dtype": "u8",
+         "dims": [
+          3072,
+          457344
+         ],
+         "strides": [
+          3072
+         ],
+         "box": [
+          64,
+          32
+         ],
+         "l2_promotion": 256,
+         "swizzle": 64
+        }
+       },
+       {
+        "tensormap": {
+         "param": 9,
+         "dtype": "u8",
+         "dims": [
+          3072,
+          457344
+         ],
+         "strides": [
+          3072
+         ],
+         "box": [
+          128,
+          96
+         ],
+         "l2_promotion": 256,
+         "swizzle": 128
+        }
+       },
+       {
+        "tensormap": {
+         "param": 10,
+         "dtype": "i32",
+         "dims": [
+          7317504,
+          24
+         ],
+         "strides": [
+          29270016
+         ],
+         "box": [
+          256,
+          1
+         ],
+         "l2_promotion": 256
+        }
+       },
+       {
+        "tensormap": {
+         "param": 11,
+         "dtype": "u4",
+         "dims": [
+          3072,
+          200704
+         ],
+         "strides": [
+          1536
+         ],
+         "box": [
+          128,
+          128
+         ],
+         "l2_promotion": 256,
+         "swizzle": 128
+        }
+       },
+       {
+        "tensormap": {
+         "param": 12,
+         "dtype": "i32",
+         "dims": [
+          3584,
+          1344
+         ],
+         "strides": [
+          14336
+         ],
+         "box": [
+          128,
+          1
+         ],
+         "l2_promotion": 256
+        }
+       }
+      ]
+     }
+    ]
+   }
+  }
+ },
+ "programs": {
+  "moe": [
+   {
+    "label": "quant_x",
+    "op": "quant_x",
+    "args": [
+     {
+      "buf": "x"
+     },
+     {
+      "buf": "slab",
+      "offset": 74587712
+     },
+     {
+      "buf": "slab",
+      "offset": 135142976
+     },
+     {
+      "var": "tokens"
+     }
+    ]
+   },
+   {
+    "label": "routing",
+    "op": "write_routing",
+    "args": [
+     {
+      "buf": "topk_idx"
+     },
+     {
+      "buf": "topk_weight"
+     },
+     {
+      "buf": "slab",
+      "offset": 137035328
+     },
+     {
+      "buf": "slab",
+      "offset": 139198016
+     },
+     {
+      "expr": {
+       "mul": [
+        "tokens",
+        16
+       ]
+      }
+     }
+    ]
+   },
+   {
+    "label": "mega_moe",
+    "op": "mega_moe",
+    "args": [
+     {
+      "buf": "y"
+     },
+     {
+      "buf": "stats"
+     },
+     {
+      "var": "tokens"
+     },
+     {
+      "buf": "slab_peers"
+     },
+     {
+      "rank": "ep"
+     },
+     {
+      "buf": "slab",
+      "offset": 140279360
+     },
+     {
+      "buf": "slab",
+      "offset": 1779400256
+     },
+     {
+      "buf": "l1_weights"
+     },
+     {
+      "buf": "l1_weights_sf"
+     },
+     {
+      "buf": "slab",
+      "offset": 2600790080
+     },
+     {
+      "buf": "slab",
+      "offset": 4005750848
+     },
+     {
+      "buf": "l2_weights"
+     },
+     {
+      "buf": "l2_weights_sf"
+     }
+    ]
+   }
+  ]
+ }
+}
