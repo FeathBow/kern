@@ -20,8 +20,8 @@ manifest，与 qwen3 同一条流水）。两条线并行，每级带门禁。
 | 级 | 内容 | 门禁 |
 |---|---|---|
 | K0 ✅ | state 一律走 VMM（可导出）；per-seq 定长 state（KDA 状态）已有 `bytes_per_seq` | 现有 qwen3 / dspark 门禁不变（2026-09-02 过）；K3 的 KDA state 能装载 |
-| K1 | 前缀缓存 + 分支 CoW：lease 池加页引用计数，块哈希查找 | AgentX trace 回放命中率 ≈ 98% |
-| K2 | checkpoint 一等对象：KDA 状态快照 + latent 页列表 + 位置 + epoch；fork = 引用计数 + 快照 | 子 agent 从父 checkpoint 分叉，输出与重算一致 |
+| K1 | 前缀缓存 = checkpoint 表：checkpoint = (精确长度, 前缀链哈希, 页表引用, 可选状态快照)，lease 池加页引用计数。纯 KV 模型的 checkpoint 不带状态、零成本，每个 64-token 块边界都留一个（退化成块哈希缓存）；KDA 模型每个 checkpoint 付 ~605 MB 快照，只在请求结束处留——MLA 页部分命中对 K3 没有价值，KDA 状态得从头重算 | AgentX trace 回放命中率 ≈ 98%（纯 host 侧页号模拟，不需要 GPU） |
+| K2 | fork = 引用计数 +1 + 状态快照拷贝；子序列从父 checkpoint 起步，最后半页 CoW | 子 agent 从父 checkpoint 分叉，输出与重算一致（需要每 rank B>1，4 卡） |
 | K3 | session 睡/醒到本 tray DRAM（C2C，与 HBM 不干扰） | 6 GB 唤醒 < 60 ms，并发 decode 步时抖动 ≤ 6% |
 | K4 | DCP：ship q / 回 (O, LSE) 的 partial+merge op，w 按 span 定，flag-in-payload | 真 FlashMLA 复现 B2/B3：decode 税 ≤ 8%，extend W=4 ≥ 2× |
 | K5 | extend 作为 decode superstep 的 filler，chunk 按每步预算与通信项派生 | 130k whale TTFT ≈ 2 s 量级，decode TPOT 不破 |
