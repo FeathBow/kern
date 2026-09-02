@@ -99,8 +99,15 @@ pub(crate) struct CompiledProgram {
 
 /// One launch of an op implementation, resolved against the loaded modules.
 enum LaunchImpl {
-    Cubin { func: sys::CUfunction, module: String, path: PathBuf, entry: String },
-    GemmBf16Tn { beta: f32 },
+    Cubin {
+        func: sys::CUfunction,
+        module: String,
+        path: PathBuf,
+        entry: String,
+    },
+    GemmBf16Tn {
+        beta: f32,
+    },
     /// cublasGemmEx with an f32 result (`extern:cublas_bf16_tn_f32`).
     GemmBf16TnF32,
 }
@@ -138,17 +145,13 @@ pub(crate) fn shaped_bytes(
     for d in shape {
         let n = match d {
             Dim::Const(c) => *c,
-            Dim::Var(s) => *max_env
-                .get(s)
-                .ok_or_else(|| Error::Manifest(format!("{what}: unknown var `{s}` in shape")))?,
+            Dim::Var(s) => {
+                *max_env.get(s).ok_or_else(|| Error::Manifest(format!("{what}: unknown var `{s}` in shape")))?
+            }
         };
-        elems = elems
-            .checked_mul(n)
-            .ok_or_else(|| Error::Manifest(format!("{what}: size overflow")))?;
+        elems = elems.checked_mul(n).ok_or_else(|| Error::Manifest(format!("{what}: size overflow")))?;
     }
-    elems
-        .checked_mul(dtype_bytes)
-        .ok_or_else(|| Error::Manifest(format!("{what}: size overflow")))
+    elems.checked_mul(dtype_bytes).ok_or_else(|| Error::Manifest(format!("{what}: size overflow")))
 }
 
 /// Resolve every op: match each launch's entry + declared param layout
@@ -198,8 +201,8 @@ pub(crate) fn resolve_ops(
                 );
             }
             let want: Vec<usize> = l.params_of(op).iter().map(|p| p.size_bytes() as usize).collect();
-            let entry = CString::new(k.entry.as_str())
-                .map_err(|e| Error::Manifest(format!("op `{name}` entry: {e}")))?;
+            let entry =
+                CString::new(k.entry.as_str()).map_err(|e| Error::Manifest(format!("op `{name}` entry: {e}")))?;
             let mut resolved = None;
             let mut seen = Vec::new();
             for m in modules.iter().filter(|m| m.sha == sha) {
@@ -230,9 +233,7 @@ pub(crate) fn resolve_ops(
             };
             // Opt in to >48KB dynamic shared memory where the launch needs it.
             if let (LaunchImpl::Cubin { func, .. }, Some(sm)) = (&r, &k.shared_mem) {
-                let bytes = sm
-                    .eval(max_env)
-                    .map_err(|e| Error::Manifest(format!("op `{name}`: {e}")))?;
+                let bytes = sm.eval(max_env).map_err(|e| Error::Manifest(format!("op `{name}`: {e}")))?;
                 if bytes > 48 * 1024 {
                     cuda_check(
                         unsafe {
@@ -250,12 +251,7 @@ pub(crate) fn resolve_ops(
         }
         let mut scratch = BTreeMap::new();
         for (sname, sd) in &op.imp.scratch {
-            let bytes = shaped_bytes(
-                &format!("op `{name}` scratch `{sname}`"),
-                &sd.shape,
-                sd.dtype.bytes(),
-                max_env,
-            )?;
+            let bytes = shaped_bytes(&format!("op `{name}` scratch `{sname}`"), &sd.shape, sd.dtype.bytes(), max_env)?;
             scratch.insert(sname.clone(), alloc(stream, bytes)?);
         }
         ops.insert(name.clone(), ResolvedOp { launches, scratch });
@@ -279,8 +275,7 @@ pub(crate) fn compile_programs(
     states: &BTreeMap<String, DeviceBuf>,
     rank_env: &RankEnv,
 ) -> Result<BTreeMap<String, CompiledProgram>> {
-    let vars: BTreeMap<&str, usize> =
-        manifest.vars.keys().enumerate().map(|(i, s)| (s.as_str(), i)).collect();
+    let vars: BTreeMap<&str, usize> = manifest.vars.keys().enumerate().map(|(i, s)| (s.as_str(), i)).collect();
     let mut scan = MulticastScan::new();
     let mut programs = BTreeMap::new();
     for (pname, calls) in &manifest.programs {
@@ -292,9 +287,8 @@ pub(crate) fn compile_programs(
                 bail!(Manifest, "program `{pname}` {cctx}: unknown op");
             };
             let lo = launches.len();
-            compile_call(c, op, rop, &cctx, buffers, states, &vars, rank_env, &mut scan, &mut launches).map_err(|e| {
-                Error::Call { context: format!("program `{pname}` {cctx}"), source: Box::new(e) }
-            })?;
+            compile_call(c, op, rop, &cctx, buffers, states, &vars, rank_env, &mut scan, &mut launches)
+                .map_err(|e| Error::Call { context: format!("program `{pname}` {cctx}"), source: Box::new(e) })?;
             call_ranges.push((lo, launches.len()));
         }
         programs.insert(pname.clone(), CompiledProgram { launches, call_ranges });
@@ -333,9 +327,7 @@ fn compile_call(
     let mut peer = Vec::with_capacity(c.args.len());
     for (arg, pty) in c.args.iter().zip(&op.params) {
         vals.push(match pty {
-            ParamType::Buf { .. } | ParamType::State { .. } => {
-                Slot::Const(pointer_arg(arg, buffers, states)?)
-            }
+            ParamType::Buf { .. } | ParamType::State { .. } => Slot::Const(pointer_arg(arg, buffers, states)?),
             ParamType::Scalar(_) => scalar_arg(arg, vars, rank_env.ranks)?,
             ParamType::TensorMap => bail!(Manifest, "interface params cannot be tensormaps"),
         });
@@ -394,7 +386,11 @@ fn compile_call(
                     bail!(Manifest, "launch #{li}: a peer buffer reaches the extern gemm; runtime built-ins never receive peer memory");
                 }
                 if slots.len() != 6 && slots.len() != 7 {
-                    bail!(Manifest, "launch #{li}: extern gemm takes 6 args (a, w, c, m, n, k) or 7 (+ ldc), got {}", slots.len());
+                    bail!(
+                        Manifest,
+                        "launch #{li}: extern gemm takes 6 args (a, w, c, m, n, k) or 7 (+ ldc), got {}",
+                        slots.len()
+                    );
                 }
                 match imp {
                     LaunchImpl::GemmBf16Tn { beta } => LaunchKind::Gemm { beta: *beta },
@@ -436,11 +432,7 @@ fn compile_call(
 }
 
 /// Lower a buffer/state arg to its finished pointer value.
-fn pointer_arg(
-    arg: &Arg,
-    buffers: &BTreeMap<String, DeviceBuf>,
-    states: &BTreeMap<String, DeviceBuf>,
-) -> Result<RVal> {
+fn pointer_arg(arg: &Arg, buffers: &BTreeMap<String, DeviceBuf>, states: &BTreeMap<String, DeviceBuf>) -> Result<RVal> {
     let (map, name, offset, what) = match arg {
         Arg::Buf { buf, offset } => (buffers, buf, *offset, "buffer"),
         Arg::State { state, offset } => (states, state, *offset, "state"),

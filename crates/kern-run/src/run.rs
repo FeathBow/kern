@@ -16,11 +16,8 @@ use anyhow::{bail, ensure, Context, Result};
 use clap::Args;
 
 use crate::config::{Config, Target};
+use crate::{env, i64_from_le, le_bytes_i32, le_bytes_i64, prefill_emits_next_token, Caller, STOP_TOKENS};
 use kern_manifest::types::{Dim, Manifest};
-use crate::{
-    env, i64_from_le, le_bytes_i32, le_bytes_i64, prefill_emits_next_token, Caller,
-    STOP_TOKENS,
-};
 use kern_runtime::Runtime;
 use tracing::info;
 
@@ -117,13 +114,28 @@ struct Opts {
 
 impl RunOpts {
     fn resolve(self, cfg: Option<&Config>, t: Option<&Target>) -> Result<Opts> {
-        let need = |what: &str| anyhow::anyhow!("no --{what} and no target in {} to take it from", cfg.map_or(crate::config::FILE.to_string(), |c| c.path.display().to_string()));
+        let need = |what: &str| {
+            anyhow::anyhow!(
+                "no --{what} and no target in {} to take it from",
+                cfg.map_or(crate::config::FILE.to_string(), |c| c.path.display().to_string())
+            )
+        };
         Ok(Opts {
             manifest: self.manifest.or_else(|| t.map(|t| t.manifest.clone())).ok_or_else(|| need("manifest"))?,
             kernels: self.kernels.or_else(|| t.map(|t| t.kernels.clone())).ok_or_else(|| need("kernels"))?,
-            weights: if self.weights.is_empty() { t.map(|t| t.weights.clone()).filter(|w| !w.is_empty()).ok_or_else(|| need("weights"))? } else { self.weights },
-            tokenizer: self.tokenizer.or_else(|| t.and_then(|t| t.tokenizer.clone())).ok_or_else(|| need("tokenizer"))?,
-            prompt: self.prompt.or_else(|| cfg.and_then(|c| c.run.prompt.clone())).unwrap_or_else(|| "The capital of France is".into()),
+            weights: if self.weights.is_empty() {
+                t.map(|t| t.weights.clone()).filter(|w| !w.is_empty()).ok_or_else(|| need("weights"))?
+            } else {
+                self.weights
+            },
+            tokenizer: self
+                .tokenizer
+                .or_else(|| t.and_then(|t| t.tokenizer.clone()))
+                .ok_or_else(|| need("tokenizer"))?,
+            prompt: self
+                .prompt
+                .or_else(|| cfg.and_then(|c| c.run.prompt.clone()))
+                .unwrap_or_else(|| "The capital of France is".into()),
             steps: self.steps.or_else(|| cfg.and_then(|c| c.run.steps)).unwrap_or(32),
             gpu: self.gpu.or_else(|| cfg.and_then(|c| c.gpu)).unwrap_or(0),
             capacity: self.capacity.or_else(|| cfg.and_then(|c| c.capacity)),
@@ -160,8 +172,8 @@ fn ellipsize(s: &str, n: usize) -> String {
 }
 
 fn execute(o: Opts) -> Result<()> {
-    let manifest_json = std::fs::read_to_string(&o.manifest)
-        .with_context(|| format!("reading manifest {}", o.manifest.display()))?;
+    let manifest_json =
+        std::fs::read_to_string(&o.manifest).with_context(|| format!("reading manifest {}", o.manifest.display()))?;
     let t0 = Instant::now();
     // One sequence: its reach, unless told otherwise (a manifest without
     // paged state takes the runtime's fit).
@@ -170,12 +182,7 @@ fn execute(o: Opts) -> Result<()> {
     let load_t = t0.elapsed();
 
     let m = &rt.manifest;
-    info!(
-        "manifest `{}` (schema v{}, {}): verified",
-        m.model,
-        m.schema_version,
-        o.manifest.display()
-    );
+    info!("manifest `{}` (schema v{}, {}): verified", m.model, m.schema_version, o.manifest.display());
     for (name, v) in &m.vars {
         info!("  var      {name} ∈ [{}, {}] (caller-provided per call)", kern_manifest::types::Var::MIN, v.max);
     }
@@ -256,8 +263,7 @@ fn execute(o: Opts) -> Result<()> {
         t0.elapsed()
     );
 
-    let tokenizer = tokenizers::Tokenizer::from_file(&o.tokenizer)
-        .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
+    let tokenizer = tokenizers::Tokenizer::from_file(&o.tokenizer).map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
     let prompt_ids: Vec<i64> = tokenizer
         .encode(o.prompt.as_str(), false)
         .map_err(|e| anyhow::anyhow!("encode: {e}"))?
@@ -433,48 +439,53 @@ fn probe(caller: &mut Caller, prompt_ids: &[i64], dir: &std::path::Path, chunk: 
             .product::<usize>()
             * b.dtype.bytes() as usize
     };
-    let run_probed = |rt: &Runtime, program: &str, env: &BTreeMap<String, u64>, tokens: usize, tag: &str| -> Result<()> {
-        let calls = &rt.manifest.programs[program];
-        let labels: Vec<String> = calls.iter().map(|c| c.label.clone().unwrap_or_default()).collect();
-        let mut lo = 0;
-        for (i, l) in labels.iter().enumerate() {
-            let mut dumps: Vec<(String, String)> = Vec::new();
-            if l == "embed" {
-                dumps.push(("embed".into(), "residual".into()));
-            } else if let Some(layer) = l.strip_suffix(".down_proj") {
-                dumps.push((layer.to_string(), "y".into()));
-            }
-            if fine.as_deref().is_some_and(|p| l.starts_with(p)) {
-                let c = &calls[i];
-                let op = &rt.manifest.ops[&c.op];
-                for (arg, p) in c.args.iter().zip(&op.params) {
-                    if let (kern_manifest::types::Arg::Buf { buf, .. }, kern_manifest::types::ParamType::Buf { dir, .. }) = (arg, p) {
-                        if matches!(dir, kern_manifest::types::Dir::Out | kern_manifest::types::Dir::InOut) {
-                            dumps.push((format!("{l}.{buf}"), buf.clone()));
-                            break;
+    let run_probed =
+        |rt: &Runtime, program: &str, env: &BTreeMap<String, u64>, tokens: usize, tag: &str| -> Result<()> {
+            let calls = &rt.manifest.programs[program];
+            let labels: Vec<String> = calls.iter().map(|c| c.label.clone().unwrap_or_default()).collect();
+            let mut lo = 0;
+            for (i, l) in labels.iter().enumerate() {
+                let mut dumps: Vec<(String, String)> = Vec::new();
+                if l == "embed" {
+                    dumps.push(("embed".into(), "residual".into()));
+                } else if let Some(layer) = l.strip_suffix(".down_proj") {
+                    dumps.push((layer.to_string(), "y".into()));
+                }
+                if fine.as_deref().is_some_and(|p| l.starts_with(p)) {
+                    let c = &calls[i];
+                    let op = &rt.manifest.ops[&c.op];
+                    for (arg, p) in c.args.iter().zip(&op.params) {
+                        if let (
+                            kern_manifest::types::Arg::Buf { buf, .. },
+                            kern_manifest::types::ParamType::Buf { dir, .. },
+                        ) = (arg, p)
+                        {
+                            if matches!(dir, kern_manifest::types::Dir::Out | kern_manifest::types::Dir::InOut) {
+                                dumps.push((format!("{l}.{buf}"), buf.clone()));
+                                break;
+                            }
                         }
                     }
                 }
+                if dumps.is_empty() {
+                    continue;
+                }
+                rt.run_range(program, env, lo, i + 1)?;
+                lo = i + 1;
+                for (point, bufname) in dumps {
+                    let rows = match rt.manifest.buffers[&bufname].shape[0] {
+                        Dim::Const(c) => c as usize,
+                        _ => tokens,
+                    };
+                    let data = rt.read_buffer_prefix(&bufname, rows * row_bytes(rt, &bufname))?;
+                    std::fs::write(dir.join(format!("{tag}.{point}.bin")), data)?;
+                }
             }
-            if dumps.is_empty() {
-                continue;
-            }
-            rt.run_range(program, env, lo, i + 1)?;
-            lo = i + 1;
-            for (point, bufname) in dumps {
-                let rows = match rt.manifest.buffers[&bufname].shape[0] {
-                    Dim::Const(c) => c as usize,
-                    _ => tokens,
-                };
-                let data = rt.read_buffer_prefix(&bufname, rows * row_bytes(rt, &bufname))?;
-                std::fs::write(dir.join(format!("{tag}.{point}.bin")), data)?;
-            }
-        }
-        rt.run_range(program, env, lo, labels.len())?;
-        std::fs::write(dir.join(format!("{tag}.logits.bin")), rt.read_buffer("logits")?)?;
-        std::fs::write(dir.join(format!("{tag}.next_token.bin")), rt.read_output("next_token")?)?;
-        Ok(())
-    };
+            rt.run_range(program, env, lo, labels.len())?;
+            std::fs::write(dir.join(format!("{tag}.logits.bin")), rt.read_buffer("logits")?)?;
+            std::fs::write(dir.join(format!("{tag}.next_token.bin")), rt.read_output("next_token")?)?;
+            Ok(())
+        };
     let chunk = chunk.min(caller.rt.manifest.vars["tokens"].max).max(1) as usize;
     let prefill_all = prefill_emits_next_token(&caller.rt.manifest);
     let n_pre = if prefill_all { prompt_ids.len() } else { prompt_ids.len() - 1 };
@@ -617,7 +628,10 @@ fn spec_decode(caller: &mut Caller, o: &Opts, prompt_ids: &[i64], mut generated:
                 .map(|d| if let Dim::Const(c) = d { *c as usize } else { 1 })
                 .product::<usize>()
                 * rt.manifest.buffers["logits_blk"].dtype.bytes() as usize;
-            std::fs::write(dir.join(format!("round{rounds}.logits.bin")), rt.read_buffer_prefix("logits_blk", verify_n * vocab)?)?;
+            std::fs::write(
+                dir.join(format!("round{rounds}.logits.bin")),
+                rt.read_buffer_prefix("logits_blk", verify_n * vocab)?,
+            )?;
             std::fs::write(dir.join(format!("round{rounds}.vids.bin")), le_bytes_i64(&vids))?;
             std::fs::write(dir.join(format!("round{rounds}.vt.bin")), le_bytes_i64(&vt[..verify_n]))?;
         }

@@ -26,9 +26,7 @@ pub const STOP_TOKENS: [i64; 2] = [151643, 151645];
 /// takes the first generated token from the prefill call.
 pub fn prefill_emits_next_token(m: &Manifest) -> bool {
     m.programs.get("prefill").is_some_and(|calls| {
-        calls.iter().any(|c| {
-            c.args.iter().any(|a| matches!(a, Arg::Buf { buf, .. } if buf == "next_token"))
-        })
+        calls.iter().any(|c| c.args.iter().any(|a| matches!(a, Arg::Buf { buf, .. } if buf == "next_token")))
     })
 }
 
@@ -130,10 +128,14 @@ impl Caller {
         // A recurrent state resumed from the last accepted row: 1 (the
         // anchor) everywhere until the spec driver says otherwise.
         if rt.manifest.buffers.get("num_accepted_tokens").is_some_and(|b| b.kind == BufferKind::Input) {
-            let n = rt.manifest.buffers["num_accepted_tokens"].shape.iter().map(|d| match d {
-                Dim::Const(c) => *c,
-                Dim::Var(v) => rt.manifest.vars[v].max,
-            }).product::<u64>() as usize;
+            let n = rt.manifest.buffers["num_accepted_tokens"]
+                .shape
+                .iter()
+                .map(|d| match d {
+                    Dim::Const(c) => *c,
+                    Dim::Var(v) => rt.manifest.vars[v].max,
+                })
+                .product::<u64>() as usize;
             rt.write_input("num_accepted_tokens", &le_bytes_i32(&vec![1; n]))?;
         }
         Ok(Caller { rt, lease, pos: 0 })
@@ -221,7 +223,9 @@ impl Caller {
     /// Vocabulary size as declared by `token_ids`' domain (1000 if none).
     pub fn vocab(&self) -> u64 {
         let m = &self.rt.manifest;
-        m.buffers["token_ids"].domain.as_ref()
+        m.buffers["token_ids"]
+            .domain
+            .as_ref()
             .and_then(|d| d.resolve(m, &env(1), self.rt.capacity()).ok())
             .and_then(|r| r.hi)
             .map_or(1000, |hi| hi as u64 + 1)

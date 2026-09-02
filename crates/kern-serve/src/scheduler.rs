@@ -51,8 +51,8 @@ use kern_manifest::types::{Arg, Dim, Manifest};
 use kern_run::{first_i64, i64_from_le, le_bytes_i32, le_bytes_i64};
 use kern_runtime::{Denied, Error, Lease, Runtime};
 use pegainfer_frontend::engine::{
-    FinishReason, QueuedRequest, RejectReason, RequestId, RequestLedger, Scheduler,
-    SchedulerMetrics, SpecDecodeCounters, MAX_SPEC_TOKENS,
+    FinishReason, QueuedRequest, RejectReason, RequestId, RequestLedger, Scheduler, SchedulerMetrics,
+    SpecDecodeCounters, MAX_SPEC_TOKENS,
 };
 use tracing::{debug, info, warn};
 
@@ -133,7 +133,14 @@ impl SpecPlan {
     /// must fit the `page`-token pad page.
     fn check(m: &Manifest, page: usize) -> Result<SpecPlan> {
         let fused = m.programs.contains_key("round");
-        need_programs(m, if fused { &["decode_spec", "draft_precompute"] } else { &["decode_spec", "draft_precompute", "draft", "verify"] })?;
+        need_programs(
+            m,
+            if fused {
+                &["decode_spec", "draft_precompute"]
+            } else {
+                &["decode_spec", "draft_precompute", "draft", "verify"]
+            },
+        )?;
         let n_drafts = seqs_rows(m, "draft_tokens")?;
         let verify_rows = seqs_rows(m, "verify_tokens")?;
         if verify_rows != n_drafts + 1 {
@@ -148,7 +155,9 @@ impl SpecPlan {
         let advance = m.programs.contains_key("advance");
         match (m.buffers.contains_key("num_accepted_tokens"), advance) {
             (true, true) => per_seq(m, "num_accepted_tokens")?,
-            (true, false) => bail!("`num_accepted_tokens` resumes a recurrent state but no `advance` program commits the accepted rows"),
+            (true, false) => bail!(
+                "`num_accepted_tokens` resumes a recurrent state but no `advance` program commits the accepted rows"
+            ),
             (false, true) => bail!("program `advance` without a `num_accepted_tokens` input"),
             (false, false) => {}
         }
@@ -324,12 +333,16 @@ impl Contract {
         }
         let seqs_max = var_max(m, "seqs")?;
         let tokens_max = var_max(m, "tokens")?;
-        let prefill_emits =
-            m.programs["prefill"].iter().flat_map(|c| &c.args).any(|a| matches!(a, Arg::Buf { buf, .. } if buf == "next_token"));
+        let prefill_emits = m.programs["prefill"]
+            .iter()
+            .flat_map(|c| &c.args)
+            .any(|a| matches!(a, Arg::Buf { buf, .. } if buf == "next_token"));
         let line_tables = seq_tables.iter().map(|name| LineTable::check(m, name)).collect::<Result<Vec<_>>>()?;
         let page_tables =
             page_tables.iter().map(|name| seqs_rows(m, name).map(|_| name.to_string())).collect::<Result<Vec<_>>>()?;
-        let spec = spec.then(|| SpecPlan::check(m, page).context("--spec: the manifest's speculative contract")).transpose()?;
+        let spec = spec
+            .then(|| SpecPlan::check(m, page).context("--spec: the manifest's speculative contract"))
+            .transpose()?;
         Ok(Contract { seqs_max, tokens_max, prefill_emits, line_tables, page_tables, spec })
     }
 
@@ -350,7 +363,8 @@ impl KernScheduler {
         let seq_tables: Vec<&str> = rt.seq_tables().collect();
         let page_tables: Vec<&str> = rt.page_tables().collect();
         let c = Contract::check(&rt.manifest, &seq_tables, &page_tables, rt.page() as usize, policy.spec)?;
-        let policy = Policy { max_seqs: c.max_seqs(policy.max_seqs), chunk: policy.chunk.clamp(1, c.tokens_max), ..policy };
+        let policy =
+            Policy { max_seqs: c.max_seqs(policy.max_seqs), chunk: policy.chunk.clamp(1, c.tokens_max), ..policy };
         let pad = rt.lease(1).map_err(|e| anyhow::anyhow!("no page for the padding rows: {e}"))?;
         if rt.pages_used() == rt.pages_total() {
             bail!("capacity {} tokens holds one page; nothing left to serve from", rt.capacity());
@@ -848,7 +862,8 @@ impl KernScheduler {
                 prefill_tokens = st.prefill_tokens,
                 prefill_tok_s = round(st.prefill_tokens as f64 / (st.prefill_ns as f64 / 1e9).max(1e-9), 1.0),
                 accepted = self.spec.as_ref().map(|_| round((accepted + drafts) as f64 / drafts.max(1) as f64, 100.0)),
-                accept_pct = self.spec.as_ref().map(|_| round(accepted as f64 * 100.0 / draft_tokens.max(1) as f64, 1.0)),
+                accept_pct =
+                    self.spec.as_ref().map(|_| round(accepted as f64 * 100.0 / draft_tokens.max(1) as f64, 1.0)),
                 "stats"
             );
         }
@@ -892,7 +907,13 @@ fn run_program(rt: &mut Runtime, program: &str, env: &BTreeMap<String, u64>, eag
     if !rt.is_captured(program, env) {
         let t = Instant::now();
         rt.capture(program, env)?;
-        info!(program, seqs = env.get("seqs"), tokens = env.get("tokens"), capture_ms = logline::ms(t.elapsed()), "captured");
+        info!(
+            program,
+            seqs = env.get("seqs"),
+            tokens = env.get("tokens"),
+            capture_ms = logline::ms(t.elapsed()),
+            "captured"
+        );
     }
     Ok(rt.run_captured(program, env)?)
 }
@@ -1085,7 +1106,10 @@ mod tests {
     fn speculative_contract() {
         let c = check(&speculative(), true).unwrap();
         let s = c.spec.as_ref().unwrap();
-        assert_eq!((s.n_drafts, s.draft_rows, s.verify_rows, s.mask_token, s.advance, s.fused), (3, 4, 4, 7, false, false));
+        assert_eq!(
+            (s.n_drafts, s.draft_rows, s.verify_rows, s.mask_token, s.advance, s.fused),
+            (3, 4, 4, 7, false, false)
+        );
         assert_eq!(s.counters.num_spec_tokens, 3);
         // Four rows per sequence per round fit twice in 8 tokens.
         assert_eq!((c.max_seqs(1), c.max_seqs(4)), (1, 2));
@@ -1129,7 +1153,9 @@ mod tests {
         m.spec = Some(Spec { block: 3, mask_token: 7 });
         rejects(&m, true, "coincide, got 3 and 4");
         // A round's rows must fit the pad page.
-        let Err(e) = Contract::check(&speculative(), &["line_index"], &["block_table"], 2, true) else { panic!("4 rows in a 2-token page") };
+        let Err(e) = Contract::check(&speculative(), &["line_index"], &["block_table"], 2, true) else {
+            panic!("4 rows in a 2-token page")
+        };
         assert!(format!("{e:#}").contains("exceed the 2-token pad page"), "{e:#}");
     }
 }

@@ -119,7 +119,11 @@ pub fn serve(o: ServeOpts, art: Artifacts, d: Defaults) -> Result<()> {
     stop_tokens.extend(&o.stop_tokens);
     stop_tokens.sort_unstable();
     stop_tokens.dedup();
-    anyhow::ensure!(!stop_tokens.is_empty(), "no stop tokens: none in {}/generation_config.json or config.json and no --stop-tokens", o.model_path.display());
+    anyhow::ensure!(
+        !stop_tokens.is_empty(),
+        "no stop tokens: none in {}/generation_config.json or config.json and no --stop-tokens",
+        o.model_path.display()
+    );
     info!(ids = ?stop_tokens, "stop tokens");
 
     let manifest_json = std::fs::read_to_string(&art.manifest)

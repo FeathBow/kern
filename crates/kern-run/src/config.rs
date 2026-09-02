@@ -137,7 +137,9 @@ impl Config {
     /// Exactly one target: the named one, or the only one.
     pub fn one(&self, name: Option<&str>) -> Result<(&String, &Target)> {
         match name {
-            Some(n) => self.targets.get_key_value(n).ok_or_else(|| anyhow::anyhow!("no target `{n}` in {} (targets: {})", self.path.display(), self.names())),
+            Some(n) => self.targets.get_key_value(n).ok_or_else(|| {
+                anyhow::anyhow!("no target `{n}` in {} (targets: {})", self.path.display(), self.names())
+            }),
             None if self.targets.len() == 1 => Ok(self.targets.iter().next().unwrap()),
             None if self.targets.is_empty() => bail!("{} declares no targets", self.path.display()),
             None => bail!("{} has several targets ({}); name one", self.path.display(), self.names()),
@@ -168,5 +170,9 @@ fn abs(dir: &Path, p: &Path) -> PathBuf {
         },
         Err(_) => p.to_path_buf(),
     };
-    if p.is_absolute() { p } else { dir.join(p) }
+    if p.is_absolute() {
+        p
+    } else {
+        dir.join(p)
+    }
 }

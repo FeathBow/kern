@@ -15,6 +15,13 @@ jobs:
       - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Format check
+        run: |
+          cargo fmt --check
+          rustfmt --check --edition 2021 crates/kern-serve/src/lib.rs crates/kern-serve/src/main.rs
 
       - uses: mozilla-actions/sccache-action@v0.0.9
 

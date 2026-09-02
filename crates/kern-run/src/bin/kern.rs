@@ -13,7 +13,11 @@ use kern_run::config::{Config, Target};
 use kern_run::run::RunOpts;
 
 #[derive(Parser)]
-#[command(name = "kern", version, about = "model-agnostic GPU runtime: run a manifest, test a kernel swap, gather cubins")]
+#[command(
+    name = "kern",
+    version,
+    about = "model-agnostic GPU runtime: run a manifest, test a kernel swap, gather cubins"
+)]
 struct Cli {
     /// kern.toml to use (default: the nearest one at or above the cwd)
     #[arg(long, global = true)]
@@ -62,7 +66,11 @@ fn main() -> Result<()> {
             let t = match &cfg {
                 Some(c) if !c.targets.is_empty() => Some(c.one(target.as_deref())?.1),
                 _ => {
-                    ensure!(target.is_none(), "no kern.toml with targets found; `{}` cannot be looked up", target.unwrap_or_default());
+                    ensure!(
+                        target.is_none(),
+                        "no kern.toml with targets found; `{}` cannot be looked up",
+                        target.unwrap_or_default()
+                    );
                     None
                 }
             };
@@ -70,7 +78,9 @@ fn main() -> Result<()> {
         }
         Cmd::Test { targets, opts } => {
             let sel: Vec<(Option<&String>, Option<&Target>)> = match &cfg {
-                Some(c) if !c.targets.is_empty() => c.select(&targets)?.into_iter().map(|(n, t)| (Some(n), Some(t))).collect(),
+                Some(c) if !c.targets.is_empty() => {
+                    c.select(&targets)?.into_iter().map(|(n, t)| (Some(n), Some(t))).collect()
+                }
                 _ => {
                     ensure!(targets.is_empty(), "no kern.toml with targets found; {targets:?} cannot be looked up");
                     vec![(None, None)]
@@ -128,10 +138,9 @@ fn tools_dir(cfg: &Config) -> Result<PathBuf> {
             cands.push(root.join("tools"));
         }
     }
-    cands
-        .into_iter()
-        .find(|d| d.join("extract_kernels.sh").is_file())
-        .ok_or_else(|| anyhow::anyhow!("no tools/extract_kernels.sh above {} or next to the binary", cfg.path.display()))
+    cands.into_iter().find(|d| d.join("extract_kernels.sh").is_file()).ok_or_else(|| {
+        anyhow::anyhow!("no tools/extract_kernels.sh above {} or next to the binary", cfg.path.display())
+    })
 }
 
 fn sh(cmd: &mut Command) -> Result<()> {

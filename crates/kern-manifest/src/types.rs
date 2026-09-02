@@ -277,9 +277,7 @@ impl Domain {
         if let Some(b) = m.buffers.get(t) {
             return Ok(Some(match b.shape.first() {
                 Some(Dim::Const(c)) => *c,
-                Some(Dim::Var(s)) => {
-                    *env.get(s).ok_or_else(|| EvalError::UnknownVar(s.clone()))?
-                }
+                Some(Dim::Var(s)) => *env.get(s).ok_or_else(|| EvalError::UnknownVar(s.clone()))?,
                 None => 0,
             }));
         }
@@ -287,11 +285,7 @@ impl Domain {
             // A per-sequence state is addressed in lines of `stride` bytes,
             // `seq_slots` slots of them; `resolve` divides by the stride
             // again, so hand back the byte count.
-            return Ok(Some(if st.is_per_seq() {
-                m.seq_slots() * st.bytes_per_seq
-            } else {
-                state_capacity_tokens
-            }));
+            return Ok(Some(if st.is_per_seq() { m.seq_slots() * st.bytes_per_seq } else { state_capacity_tokens }));
         }
         Ok(None)
     }
@@ -534,9 +528,7 @@ impl FromStr for ParamType {
             "tensormap" => return Ok(ParamType::TensorMap),
             _ => {}
         }
-        let (dir_s, rest) = s
-            .split_once(' ')
-            .ok_or_else(|| format!("invalid param type `{s}`"))?;
+        let (dir_s, rest) = s.split_once(' ').ok_or_else(|| format!("invalid param type `{s}`"))?;
         let dir = match dir_s {
             "in" => Dir::In,
             "out" => Dir::Out,
@@ -619,11 +611,7 @@ pub struct Op {
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Impl {
-    #[serde(
-        default,
-        deserialize_with = "unique_map",
-        skip_serializing_if = "BTreeMap::is_empty"
-    )]
+    #[serde(default, deserialize_with = "unique_map", skip_serializing_if = "BTreeMap::is_empty")]
     /// Implementation-private buffers, e.g. `{"pmax": {"dtype": "f32", "shape": [1, 64]}}`.
     pub scratch: BTreeMap<String, Scratch>,
     /// Launches in execution order.
@@ -915,8 +903,7 @@ impl RegistryRef {
     /// otherwise the parsed ref or why it is malformed.
     pub fn parse(s: &str) -> Option<Result<RegistryRef, String>> {
         let rest = s.strip_prefix("hf:")?;
-        let malformed =
-            || format!("invalid registry ref `{s}`: expected hf:<org>/<repo>/<path>[@revision]");
+        let malformed = || format!("invalid registry ref `{s}`: expected hf:<org>/<repo>/<path>[@revision]");
         let (rest, revision) = match rest.rsplit_once('@') {
             Some((r, rev)) if !rev.is_empty() && !rev.contains('/') => (r, rev),
             Some(_) => return Some(Err(malformed())),
@@ -972,10 +959,7 @@ impl Expr {
     pub fn eval(&self, env: &BTreeMap<String, u64>) -> Result<u64, EvalError> {
         match self {
             Expr::Const(c) => Ok(*c),
-            Expr::Var(var) => env
-                .get(var)
-                .copied()
-                .ok_or_else(|| EvalError::UnknownVar(var.clone())),
+            Expr::Var(var) => env.get(var).copied().ok_or_else(|| EvalError::UnknownVar(var.clone())),
             Expr::CeilDiv { ceil_div: (inner, c) } => {
                 if *c == 0 {
                     return Err(EvalError::DivByZero);
@@ -983,9 +967,7 @@ impl Expr {
                 let x = inner.eval(env)?;
                 Ok(x.checked_add(c - 1).ok_or(EvalError::Overflow)? / c)
             }
-            Expr::Mul { mul: (inner, c) } => {
-                inner.eval(env)?.checked_mul(*c).ok_or(EvalError::Overflow)
-            }
+            Expr::Mul { mul: (inner, c) } => inner.eval(env)?.checked_mul(*c).ok_or(EvalError::Overflow),
         }
     }
 }

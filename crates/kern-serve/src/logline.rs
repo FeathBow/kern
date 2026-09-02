@@ -130,7 +130,8 @@ impl Kv<'_> {
     }
     fn put_str(&mut self, field: &Field, s: &str) {
         let delimited = s.starts_with('[') && s.ends_with(']') || s.starts_with('{') && s.ends_with('}');
-        let bare = !s.is_empty() && !s.starts_with('"') && !s.chars().any(|c| c.is_whitespace() || c == '"' || c == '=');
+        let bare =
+            !s.is_empty() && !s.starts_with('"') && !s.chars().any(|c| c.is_whitespace() || c == '"' || c == '=');
         let bare = bare || delimited && !s.contains('"');
         if bare {
             self.put(field, format_args!("{s}"));

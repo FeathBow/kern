@@ -135,10 +135,7 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
 
     // 1. format
     if m.schema_version != SCHEMA_VERSION {
-        errs.push(format!(
-            "unsupported schema_version {} (this runtime reads {SCHEMA_VERSION})",
-            m.schema_version
-        ));
+        errs.push(format!("unsupported schema_version {} (this runtime reads {SCHEMA_VERSION})", m.schema_version));
     }
 
     // 2. vars
@@ -187,14 +184,9 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
     // 4. buffers
     let mut buf_sizes: BTreeMap<&str, u64> = BTreeMap::new();
     for (name, b) in &m.buffers {
-        if let Some(sz) = shaped_size(
-            &format!("buffer `{name}`"),
-            b.dtype,
-            &b.shape,
-            &env_max,
-            &mut used_vars,
-            &mut errs,
-        ) {
+        if let Some(sz) =
+            shaped_size(&format!("buffer `{name}`"), b.dtype, &b.shape, &env_max, &mut used_vars, &mut errs)
+        {
             buf_sizes.insert(name, sz);
         }
         if let Some(d) = &b.domain {
@@ -213,7 +205,9 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
                 errs.push(format!("{ctx}: a peer buffer's contents are runtime-filled addresses; it takes no domain"));
             }
             match &b.of {
-                None => errs.push(format!("{ctx}: a peer buffer must name the exported buffer or state it holds addresses `of`")),
+                None => errs.push(format!(
+                    "{ctx}: a peer buffer must name the exported buffer or state it holds addresses `of`"
+                )),
                 Some(of) if of == name => errs.push(format!("{ctx}: a peer buffer cannot be `of` itself")),
                 Some(of) => match (m.buffers.get(of), m.states.get(of)) {
                     (Some(_), Some(_)) => errs.push(format!("{ctx}: `of` `{of}` is both a buffer and a state")),
@@ -232,7 +226,8 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
                 },
             }
             match &b.group {
-                None => errs.push(format!("{ctx}: a peer buffer must name the topology `group` its addresses are indexed by")),
+                None => errs
+                    .push(format!("{ctx}: a peer buffer must name the topology `group` its addresses are indexed by")),
                 Some(g) => {
                     if let Some(sz) = group_ctx(g, &mut errs, &mut used_groups, &ctx) {
                         match b.shape.as_slice() {
@@ -301,8 +296,7 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
 
         // Impl-level dataflow over slots: interface `out` params and scratch
         // start unwritten; `in`/`inout` interface params are caller-provided.
-        let mut iface_written: Vec<bool> =
-            op.params.iter().map(|p| p.dir() != Some(Dir::Out)).collect();
+        let mut iface_written: Vec<bool> = op.params.iter().map(|p| p.dir() != Some(Dir::Out)).collect();
         let mut scratch_written: BTreeSet<&str> = BTreeSet::new();
         let mut scratch_used: BTreeSet<&str> = BTreeSet::new();
 
@@ -345,9 +339,7 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
                             Ok(v) => {
                                 let limit = if *axis == "x" { MAX_GRID_X } else { MAX_GRID_YZ };
                                 if v > limit {
-                                    errs.push(format!(
-                                        "{ectx}: {v} exceeds CUDA limit {limit} at var upper bounds"
-                                    ));
+                                    errs.push(format!("{ectx}: {v} exceeds CUDA limit {limit} at var upper bounds"));
                                 }
                             }
                             Err(err) => errs.push(format!("{ectx}: {err}")),
@@ -396,11 +388,7 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
             let params = launch.params_of(op);
             let args = launch.args_of(op);
             if args.len() != params.len() {
-                errs.push(format!(
-                    "{ctx}: takes {} params, got {} args",
-                    params.len(),
-                    args.len()
-                ));
+                errs.push(format!("{ctx}: takes {} params, got {} args", params.len(), args.len()));
                 continue;
             }
             for (j, (arg, param)) in args.iter().zip(params).enumerate() {
@@ -430,9 +418,7 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
                         }
                         if let (Some(idir), Some(ldir)) = (iface.dir(), param.dir()) {
                             if matches!(ldir, Dir::Out | Dir::InOut) && idir == Dir::In {
-                                errs.push(format!(
-                                    "{actx}: launch writes through interface `in` param #{i}"
-                                ));
+                                errs.push(format!("{actx}: launch writes through interface `in` param #{i}"));
                             }
                             if matches!(ldir, Dir::In | Dir::InOut) && !iface_written[*i] {
                                 errs.push(format!(
@@ -453,9 +439,7 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
                         };
                         scratch_used.insert(scratch.as_str());
                         let ParamType::Buf { dtype, dir } = param else {
-                            errs.push(format!(
-                                "{actx}: scratch `{scratch}` bound to non-buffer param `{param}`"
-                            ));
+                            errs.push(format!("{actx}: scratch `{scratch}` bound to non-buffer param `{param}`"));
                             continue;
                         };
                         if sdecl.dtype != *dtype {
@@ -464,12 +448,8 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
                                 sdecl.dtype, dtype
                             ));
                         }
-                        if matches!(dir, Dir::In | Dir::InOut)
-                            && !scratch_written.contains(scratch.as_str())
-                        {
-                            errs.push(format!(
-                                "{actx}: scratch `{scratch}` is read before any launch wrote it"
-                            ));
+                        if matches!(dir, Dir::In | Dir::InOut) && !scratch_written.contains(scratch.as_str()) {
+                            errs.push(format!("{actx}: scratch `{scratch}` is read before any launch wrote it"));
                         }
                         if matches!(dir, Dir::Out | Dir::InOut) {
                             scratch_written.insert(scratch.as_str());
@@ -525,9 +505,7 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
 
         for (i, (p, written)) in op.params.iter().zip(&iface_written).enumerate() {
             if !written {
-                errs.push(format!(
-                    "op `{oname}`: interface `{p}` param #{i} is never written by any launch"
-                ));
+                errs.push(format!("op `{oname}`: interface `{p}` param #{i} is never written by any launch"));
             }
         }
         for sname in imp.scratch.keys() {
@@ -571,12 +549,7 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
             let has_extern = op.imp.launches.iter().any(|l| l.is_extern());
 
             if c.args.len() != op.params.len() {
-                errs.push(format!(
-                    "{ctx}: op `{}` takes {} params, got {} args",
-                    c.op,
-                    op.params.len(),
-                    c.args.len()
-                ));
+                errs.push(format!("{ctx}: op `{}` takes {} params, got {} args", c.op, op.params.len(), c.args.len()));
                 continue;
             }
             for (j, (arg, param)) in c.args.iter().zip(&op.params).enumerate() {
@@ -613,8 +586,7 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
                         if matches!(dir, Dir::In | Dir::InOut) && !written.contains(buf) {
                             errs.push(format!("{actx}: buffer `{buf}` is read before ever being written"));
                         }
-                        if let (Some(tms), Some(&sz)) =
-                            (op_tensormaps.get(c.op.as_str()), buf_sizes.get(buf.as_str()))
+                        if let (Some(tms), Some(&sz)) = (op_tensormaps.get(c.op.as_str()), buf_sizes.get(buf.as_str()))
                         {
                             for (_, fp, tctx) in tms.iter().filter(|(p, _, _)| *p == j) {
                                 let avail = sz.saturating_sub(*offset);
@@ -633,10 +605,7 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
                         }
                         if matches!(dir, Dir::Out | Dir::InOut) {
                             if matches!(b.kind, BufferKind::Input | BufferKind::Weight | BufferKind::Peer) {
-                                errs.push(format!(
-                                    "{actx}: op writes to read-only {} buffer `{buf}`",
-                                    b.kind
-                                ));
+                                errs.push(format!("{actx}: op writes to read-only {} buffer `{buf}`", b.kind));
                             }
                             written.insert(buf.clone());
                             actually_written.insert(buf.clone());
@@ -659,10 +628,7 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
                                 if *st == ScalarType::F32 {
                                     errs.push(format!("{actx}: var `{var}` cannot bind to an f32 param"));
                                 } else if !scalar_fits(*st, v.max) {
-                                    errs.push(format!(
-                                        "{actx}: var `{var}` max {} exceeds {st} range",
-                                        v.max
-                                    ));
+                                    errs.push(format!("{actx}: var `{var}` max {} exceeds {st} range", v.max));
                                 }
                             }
                         }
@@ -824,13 +790,7 @@ fn check_domain(
     }
 }
 
-fn check_expr(
-    e: &Expr,
-    m: &Manifest,
-    used_vars: &mut BTreeSet<String>,
-    errs: &mut Vec<String>,
-    ctx: &str,
-) {
+fn check_expr(e: &Expr, m: &Manifest, used_vars: &mut BTreeSet<String>, errs: &mut Vec<String>, ctx: &str) {
     match e {
         Expr::Const(_) => {}
         Expr::Var(var) => {
@@ -932,10 +892,7 @@ mod tests {
 
     fn assert_err(v: serde_json::Value, needle: &str) {
         let errs = check(v).expect_err("expected verification failure");
-        assert!(
-            errs.iter().any(|e| e.contains(needle)),
-            "no error containing `{needle}` in {errs:#?}"
-        );
+        assert!(errs.iter().any(|e| e.contains(needle)), "no error containing `{needle}` in {errs:#?}");
     }
 
     #[test]
@@ -949,8 +906,10 @@ mod tests {
         let j = m.to_json();
         let v: serde_json::Value = serde_json::from_str(&j).unwrap();
         let embed = &v["ops"]["embed"]["impl"]["launches"][0];
-        assert!(embed.get("args").is_none() && embed.get("params").is_none(),
-            "defaulted wiring must not be materialized: {embed}");
+        assert!(
+            embed.get("args").is_none() && embed.get("params").is_none(),
+            "defaulted wiring must not be materialized: {embed}"
+        );
         let again = Manifest::from_json(&j).unwrap();
         assert_eq!(again.to_json(), j);
     }
@@ -963,8 +922,12 @@ mod tests {
         assert_eq!(l.params_of(op), &op.params[..]);
         assert_eq!(
             l.args_of(op).as_ref(),
-            &[LaunchArg::Param { param: 0 }, LaunchArg::Param { param: 1 },
-              LaunchArg::Param { param: 2 }, LaunchArg::Param { param: 3 }]
+            &[
+                LaunchArg::Param { param: 0 },
+                LaunchArg::Param { param: 1 },
+                LaunchArg::Param { param: 2 },
+                LaunchArg::Param { param: 3 }
+            ]
         );
     }
 
@@ -1012,8 +975,7 @@ mod tests {
         assert_eq!((r.path.as_str(), r.revision.as_str()), ("a/b.cubin", "main"));
         let r = RegistryRef::parse("hf:org/repo/a.cubin@abc123").unwrap().unwrap();
         assert_eq!(r.revision, "abc123");
-        for bad in ["hf:org", "hf:org/repo", "hf:org/repo/", "hf:org//x", "hf:o/r/x@",
-                    "hf:o/r/../x", "hf:o/r/a//b"] {
+        for bad in ["hf:org", "hf:org/repo", "hf:org/repo/", "hf:org//x", "hf:o/r/x@", "hf:o/r/../x", "hf:o/r/a//b"] {
             assert!(RegistryRef::parse(bad).unwrap().is_err(), "{bad}");
         }
     }
@@ -1131,16 +1093,14 @@ mod tests {
     #[test]
     fn grid_division_by_zero() {
         let mut v = base();
-        v["ops"]["embed"]["impl"]["launches"][0]["grid"][0] =
-            serde_json::json!({ "ceil_div": ["tokens", 0] });
+        v["ops"]["embed"]["impl"]["launches"][0]["grid"][0] = serde_json::json!({ "ceil_div": ["tokens", 0] });
         assert_err(v, "division by zero");
     }
 
     #[test]
     fn unused_buffer() {
         let mut v = base();
-        v["buffers"]["dead"] =
-            serde_json::json!({ "dtype": "bf16", "shape": [8], "kind": "workspace" });
+        v["buffers"]["dead"] = serde_json::json!({ "dtype": "bf16", "shape": [8], "kind": "workspace" });
         assert_err(v, "buffer `dead` is never used");
     }
 
@@ -1299,8 +1259,7 @@ mod tests {
     #[test]
     fn scratch_offset_is_gone() {
         let mut v = base();
-        v["ops"]["attn"]["impl"]["launches"][1]["args"][0] =
-            serde_json::json!({ "scratch": "part", "offset": 4096 });
+        v["ops"]["attn"]["impl"]["launches"][1]["args"][0] = serde_json::json!({ "scratch": "part", "offset": 4096 });
         let errs = check(v).expect_err("scratch offsets are not a thing");
         assert!(errs[0].contains("did not match any variant"), "{errs:?}");
         // and a typo in a call arg is a parse error, not a silently ignored key
@@ -1350,7 +1309,8 @@ mod tests {
         let mut v = base();
         v["topology"] = serde_json::json!({ "groups": { "ep": 4 } });
         v["buffers"]["flags"] = serde_json::json!({ "dtype": "u32", "shape": [64], "kind": "carry", "export": true });
-        v["buffers"]["flags_peers"] = serde_json::json!({ "dtype": "u64", "shape": [4], "kind": "peer", "of": "flags", "group": "ep" });
+        v["buffers"]["flags_peers"] =
+            serde_json::json!({ "dtype": "u64", "shape": [4], "kind": "peer", "of": "flags", "group": "ep" });
         v["ops"]["barrier"] = serde_json::json!({
             "params": ["inout buffer<u32>", "in buffer<u64>", "i32", "i32"],
             "impl": { "launches": [
@@ -1440,7 +1400,9 @@ mod tests {
         assert_err(v, "writes to read-only peer buffer `flags_peers`");
         // a peer buffer reaching an op with an extern launch
         let mut v = peer_base();
-        v["ops"]["barrier"]["impl"]["launches"].as_array_mut().unwrap()
+        v["ops"]["barrier"]["impl"]["launches"]
+            .as_array_mut()
+            .unwrap()
             .push(serde_json::json!({ "entry": "extern:cublaslt_bf16_tn", "params": [], "args": [] }));
         assert_err(v, "runtime built-ins never receive peer memory");
     }
@@ -1515,7 +1477,8 @@ mod tests {
         // only over a buffer param
         let mut v = tensormap_base();
         v["ops"]["tm"]["impl"]["launches"][0]["args"][1]["tensormap"]["param"] = 0.into();
-        v["ops"]["tm"]["impl"]["launches"][0]["args"][0] = serde_json::json!({ "tensormap": { "param": 1, "dtype": "u8", "dims": [128], "box": [128] } });
+        v["ops"]["tm"]["impl"]["launches"][0]["args"][0] =
+            serde_json::json!({ "tensormap": { "param": 1, "dtype": "u8", "dims": [128], "box": [128] } });
         assert_err(v, "arg #0: a tensormap binds only to a `tensormap` param, not `out buffer<bf16>`");
         // never on the interface
         let mut v = tensormap_base();

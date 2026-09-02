@@ -11,8 +11,7 @@
 fn main() {
     let schema = schemars::schema_for!(kern_manifest::Manifest);
     let mut v = serde_json::to_value(&schema).expect("schema serializes");
-    v["$id"] =
-        "https://kern-baa.pages.dev/schema/manifest-v3.schema.json".into();
+    v["$id"] = "https://kern-baa.pages.dev/schema/manifest-v3.schema.json".into();
     v["title"] = "kern manifest v3".into();
     println!("{}", serde_json::to_string_pretty(&v).expect("schema serializes"));
 }

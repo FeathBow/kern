@@ -37,16 +37,17 @@ impl PeerHandle {
         if b.len() != Self::BYTES {
             return None;
         }
-        Some(PeerHandle {
-            fabric: b[..64].try_into().ok()?,
-            bytes: u64::from_le_bytes(b[64..].try_into().ok()?),
-        })
+        Some(PeerHandle { fabric: b[..64].try_into().ok()?, bytes: u64::from_le_bytes(b[64..].try_into().ok()?) })
     }
 }
 
 impl std::fmt::Debug for PeerHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "PeerHandle({} bytes, {:02x}{:02x}{:02x}{:02x}…)", self.bytes, self.fabric[0], self.fabric[1], self.fabric[2], self.fabric[3])
+        write!(
+            f,
+            "PeerHandle({} bytes, {:02x}{:02x}{:02x}{:02x}…)",
+            self.bytes, self.fabric[0], self.fabric[1], self.fabric[2], self.fabric[3]
+        )
     }
 }
 
@@ -159,7 +160,12 @@ fn granularity(prop: &sys::CUmemAllocationProp) -> Result<usize> {
 /// Reserve `size` bytes of address space, map `handle` there and grant
 /// this device read/write access. On failure nothing leaks: the handle is
 /// the caller's to release.
-fn map_handle(dev: i32, handle: sys::CUmemGenericAllocationHandle, size: usize, align: usize) -> Result<sys::CUdeviceptr> {
+fn map_handle(
+    dev: i32,
+    handle: sys::CUmemGenericAllocationHandle,
+    size: usize,
+    align: usize,
+) -> Result<sys::CUdeviceptr> {
     let mut va: sys::CUdeviceptr = 0;
     cuda_check(unsafe { sys::cuMemAddressReserve(&mut va, size, align, 0, 0) }, "cuMemAddressReserve")?;
     if let Err(e) = cuda_check(unsafe { sys::cuMemMap(va, size, 0, handle, 0) }, "cuMemMap") {
@@ -364,12 +370,7 @@ impl DevicePtrMut<bf16> for RawBf16 {
 /// `C_cm[n,m] = W_cm^T[n,k] x A_cm[k,m]` -> transa=T on W (lda=k),
 /// transb=N on A (ldb=k), m'=n, n'=m, ldc=n.
 /// `extern:cublaslt_bf16_tn_acc` is the same with beta=1: `C += A @ W^T`.
-pub(crate) fn gemm_bf16_tn(
-    blt: &CudaBlasLT,
-    stream: &Arc<CudaStream>,
-    args: &[RVal],
-    beta: f32,
-) -> Result<()> {
+pub(crate) fn gemm_bf16_tn(blt: &CudaBlasLT, stream: &Arc<CudaStream>, args: &[RVal], beta: f32) -> Result<()> {
     // `c[m, n] (+)= a[m, k] @ w[n, k]^T`; an optional 7th arg is C's row
     // stride in elements (default n) so a call can write every `ldc`-th row.
     let (a, w, c, m, n, k, ldc) = match args {
@@ -380,11 +381,7 @@ pub(crate) fn gemm_bf16_tn(
     if ldc < n {
         bail!(Manifest, "gemm: ldc {ldc} < n {n}");
     }
-    let view = |rv: &RVal| RawBf16 {
-        ptr: rv.val,
-        len: (rv.bytes / 2) as usize,
-        stream: stream.clone(),
-    };
+    let view = |rv: &RVal| RawBf16 { ptr: rv.val, len: (rv.bytes / 2) as usize, stream: stream.clone() };
     let cfg = MatmulConfig {
         transa: true,
         transb: false,

@@ -40,9 +40,9 @@ use cudarc::driver::{sys, CudaContext, CudaStream, PinnedHostSlice};
 use kern_manifest::types::{BufferKind, Manifest, State};
 
 use compile::{CompiledProgram, Launch, LaunchKind, RVal, Slot, TmaBlob};
+pub use device::PeerHandle;
 use device::{alloc, alloc_vmm, gemm_bf16_tn, gemm_bf16_tn_f32, Blas, DeviceBuf, Share};
 use error::{bail, cuda_check};
-pub use device::PeerHandle;
 pub use error::{Error, Result};
 pub use pages::{Denied, Lease};
 
@@ -147,10 +147,7 @@ impl Events {
 
     fn elapsed_ms(&self, a: usize, b: usize) -> Result<f32> {
         let mut ms = 0f32;
-        cuda_check(
-            unsafe { sys::cuEventElapsedTime_v2(&mut ms, self.0[a], self.0[b]) },
-            "cuEventElapsedTime",
-        )?;
+        cuda_check(unsafe { sys::cuEventElapsedTime_v2(&mut ms, self.0[a], self.0[b]) }, "cuEventElapsedTime")?;
         Ok(ms)
     }
 }
@@ -212,8 +209,7 @@ impl Runtime {
         ctx.bind_to_thread()?;
 
         let remote = cubin::fetch_registry_cubins(&manifest)?;
-        let wanted: BTreeSet<String> =
-            manifest.modules.values().map(|md| md.sha256.to_lowercase()).collect();
+        let wanted: BTreeSet<String> = manifest.modules.values().map(|md| md.sha256.to_lowercase()).collect();
         let modules = cubin::load_pinned_modules(kernels_dir, &remote, &wanted)?;
 
         // Paged states are paged: every `index_into` one comes in `stride`
@@ -224,8 +220,7 @@ impl Runtime {
         // many tokens", not for that page. (A per-sequence state's stride
         // is bytes per line, not tokens: not a page.)
         let page = page_unit(&manifest);
-        let max_env: BTreeMap<_, _> =
-            manifest.vars.iter().map(|(s, v)| (s.clone(), v.max)).collect();
+        let max_env: BTreeMap<_, _> = manifest.vars.iter().map(|(s, v)| (s.clone(), v.max)).collect();
 
         // Buffer sizes are static: shapes only reference vars, sized at max.
         // Exported buffers come from the virtual-memory API with a fabric
@@ -234,12 +229,7 @@ impl Runtime {
         let mut buffers = BTreeMap::new();
         let mut peers = BTreeMap::new();
         for (name, b) in &manifest.buffers {
-            let bytes = compile::shaped_bytes(
-                &format!("buffer `{name}`"),
-                &b.shape,
-                b.dtype.bytes(),
-                &max_env,
-            )?;
+            let bytes = compile::shaped_bytes(&format!("buffer `{name}`"), &b.shape, b.dtype.bytes(), &max_env)?;
             let buf = if b.export {
                 alloc_vmm(&stream, dev, bytes, Share::Required, &format!("buffer `{name}`"))?
             } else {
@@ -249,7 +239,11 @@ impl Runtime {
                 // The verifier guarantees `of` and `group` are set.
                 peers.insert(
                     name.clone(),
-                    PeerSlot { of: b.of.clone().unwrap_or_default(), group: b.group.clone().unwrap_or_default(), filled: false },
+                    PeerSlot {
+                        of: b.of.clone().unwrap_or_default(),
+                        group: b.group.clone().unwrap_or_default(),
+                        filled: false,
+                    },
                 );
             }
             buffers.insert(name.clone(), buf);
@@ -257,8 +251,7 @@ impl Runtime {
         let mut staging = BTreeMap::new();
         for (name, b) in &manifest.buffers {
             if b.kind == BufferKind::Input {
-                let mut pinned =
-                    unsafe { ctx.alloc_pinned::<u8>(buffers[name].bytes.max(1) as usize)? };
+                let mut pinned = unsafe { ctx.alloc_pinned::<u8>(buffers[name].bytes.max(1) as usize)? };
                 pinned.as_mut_slice()?.fill(0);
                 staging.insert(name.clone(), pinned);
             }
@@ -279,9 +272,7 @@ impl Runtime {
                     )));
                 }
                 if aligned != asked {
-                    tracing::warn!(
-                        "state capacity {asked} is not a multiple of the page unit {page}; using {aligned}"
-                    );
+                    tracing::warn!("state capacity {asked} is not a multiple of the page unit {page}; using {aligned}");
                 }
                 aligned
             }
@@ -294,7 +285,8 @@ impl Runtime {
         for (name, s) in &manifest.states {
             let bytes = state_bytes(s, state_capacity_tokens, manifest.seq_slots())
                 .ok_or_else(|| Error::Manifest(format!("state `{name}`: size overflow")))?;
-            states.insert(name.clone(), alloc_vmm(&stream, dev, bytes, Share::IfSupported, &format!("state `{name}`"))?);
+            states
+                .insert(name.clone(), alloc_vmm(&stream, dev, bytes, Share::IfSupported, &format!("state `{name}`"))?);
         }
         for p in peers.values() {
             if let Some(st) = states.get(&p.of) {
@@ -350,7 +342,9 @@ impl Runtime {
         let mut out = BTreeMap::new();
         for (name, b) in &self.buffers {
             if self.manifest.buffers[name].export {
-                let h = b.export()?.ok_or_else(|| Error::Cuda(format!("buffer `{name}`: exported without a fabric handle")))?;
+                let h = b
+                    .export()?
+                    .ok_or_else(|| Error::Cuda(format!("buffer `{name}`: exported without a fabric handle")))?;
                 out.insert(name.clone(), h);
             }
         }
@@ -405,7 +399,8 @@ impl Runtime {
                         if h.bytes != own_bytes {
                             bail!(Api, "group `{group}` rank {i}: `{of}` is {} bytes there, {own_bytes} here", h.bytes);
                         }
-                        let buf = device::import(&stream, self.gpu as i32, h, &format!("group `{group}` rank {i} `{of}`"))?;
+                        let buf =
+                            device::import(&stream, self.gpu as i32, h, &format!("group `{group}` rank {i} `{of}`"))?;
                         let p = buf.ptr;
                         self.imports.push(buf);
                         mapped.insert(key, p);
@@ -417,7 +412,12 @@ impl Runtime {
             let bytes: Vec<u8> = addrs.iter().flat_map(|a| a.to_le_bytes()).collect();
             let dst = self.buffers.get_mut(&name).unwrap();
             if bytes.len() as u64 != dst.bytes {
-                bail!(Manifest, "peer buffer `{name}`: {} bytes for {size} addresses, allocated {}", bytes.len(), dst.bytes);
+                bail!(
+                    Manifest,
+                    "peer buffer `{name}`: {} bytes for {size} addresses, allocated {}",
+                    bytes.len(),
+                    dst.bytes
+                );
             }
             stream.memcpy_htod(&bytes, dst)?;
             self.peers.get_mut(&name).unwrap().filled = true;
@@ -438,20 +438,12 @@ impl Runtime {
 
     /// (name, class, allocated bytes) for every buffer.
     pub fn buffer_sizes(&self) -> Vec<(&str, BufferKind, u64)> {
-        self.manifest
-            .buffers
-            .iter()
-            .map(|(n, b)| (n.as_str(), b.kind, self.buffers[n].bytes))
-            .collect()
+        self.manifest.buffers.iter().map(|(n, b)| (n.as_str(), b.kind, self.buffers[n].bytes)).collect()
     }
 
     /// (name, declaration, allocated bytes) for every state.
     pub fn state_sizes(&self) -> Vec<(&str, &State, u64)> {
-        self.manifest
-            .states
-            .iter()
-            .map(|(n, s)| (n.as_str(), s, self.states[n].bytes))
-            .collect()
+        self.manifest.states.iter().map(|(n, s)| (n.as_str(), s, self.states[n].bytes)).collect()
     }
 
     /// Per kernel: the module each impl step resolved to, in step order.
@@ -508,12 +500,7 @@ impl Runtime {
         let fmt_bound = |v: Option<f64>| v.map_or("∞".to_string(), |x| format!("{x}"));
         for (i, &v) in vals.iter().enumerate() {
             if !r.contains(v) {
-                bail!(
-                    Domain,
-                    "buffer `{name}`[{i}] = {v} outside declared [{}, {}]",
-                    fmt_bound(r.lo),
-                    fmt_bound(r.hi)
-                );
+                bail!(Domain, "buffer `{name}`[{i}] = {v} outside declared [{}, {}]", fmt_bound(r.lo), fmt_bound(r.hi));
             }
             if r.monotone && i > 0 && v < vals[i - 1] {
                 bail!(Domain, "buffer `{name}` is declared monotone but [{i}] = {v} < [{}] = {}", i - 1, vals[i - 1]);
@@ -526,8 +513,7 @@ impl Runtime {
     /// next run will use; `write_input` checks against var upper bounds
     /// (the loosest valid reading), `write_input_at` against exact values.
     pub fn write_input(&mut self, name: &str, data: &[u8]) -> Result<()> {
-        let max_env: BTreeMap<_, _> =
-            self.manifest.vars.iter().map(|(s, v)| (s.clone(), v.max)).collect();
+        let max_env: BTreeMap<_, _> = self.manifest.vars.iter().map(|(s, v)| (s.clone(), v.max)).collect();
         self.write_input_at(name, data, &max_env)
     }
 
@@ -705,13 +691,7 @@ impl Runtime {
     }
 
     /// Execute calls `[lo, hi)` of a program eagerly, then synchronize.
-    pub fn run_range(
-        &self,
-        program: &str,
-        env: &BTreeMap<String, u64>,
-        lo: usize,
-        hi: usize,
-    ) -> Result<()> {
+    pub fn run_range(&self, program: &str, env: &BTreeMap<String, u64>, lo: usize, hi: usize) -> Result<()> {
         let Some(prog) = self.programs.get(program) else {
             bail!(Api, "no program `{program}`");
         };
@@ -726,10 +706,7 @@ impl Runtime {
             let (l0, _) = prog.call_ranges[lo];
             let (_, l1) = prog.call_ranges[hi - 1];
             for l in &prog.launches[l0..l1] {
-                self.launch(l, &env).map_err(|e| Error::Call {
-                    context: l.ctx.clone(),
-                    source: Box::new(e),
-                })?;
+                self.launch(l, &env).map_err(|e| Error::Call { context: l.ctx.clone(), source: Box::new(e) })?;
             }
         }
         self.stream.synchronize()?;
@@ -739,12 +716,7 @@ impl Runtime {
     /// Per-call GPU time in ms (eager, event-bracketed), minimum over
     /// `iters` replays of the whole program. Note this attributes launch
     /// gaps to the call that follows them.
-    pub fn time_calls(
-        &self,
-        program: &str,
-        env: &BTreeMap<String, u64>,
-        iters: usize,
-    ) -> Result<Vec<f32>> {
+    pub fn time_calls(&self, program: &str, env: &BTreeMap<String, u64>, iters: usize) -> Result<Vec<f32>> {
         let n = self.call_count(program)?;
         self.time_range(program, env, 0, n, iters)
     }
@@ -775,10 +747,7 @@ impl Runtime {
             events.record(0, &self.stream)?;
             for (di, &(l0, l1)) in prog.call_ranges[lo..hi].iter().enumerate() {
                 for l in &prog.launches[l0..l1] {
-                    self.launch(l, &env).map_err(|e| Error::Call {
-                        context: l.ctx.clone(),
-                        source: Box::new(e),
-                    })?;
+                    self.launch(l, &env).map_err(|e| Error::Call { context: l.ctx.clone(), source: Box::new(e) })?;
                 }
                 events.record(di + 1, &self.stream)?;
             }
@@ -792,22 +761,14 @@ impl Runtime {
 
     /// Median wall time per replay of a captured program, in ms, over
     /// `iters` back-to-back graph launches.
-    pub fn time_captured(
-        &self,
-        program: &str,
-        env: &BTreeMap<String, u64>,
-        iters: usize,
-    ) -> Result<f32> {
+    pub fn time_captured(&self, program: &str, env: &BTreeMap<String, u64>, iters: usize) -> Result<f32> {
         let exec = self.graph(program, env)?;
         self.ctx.bind_to_thread()?;
         let iters = iters.max(1);
         let events = Events::new(iters + 1)?;
         events.record(0, &self.stream)?;
         for i in 0..iters {
-            cuda_check(
-                unsafe { sys::cuGraphLaunch(exec, self.stream.cu_stream()) },
-                "cuGraphLaunch",
-            )?;
+            cuda_check(unsafe { sys::cuGraphLaunch(exec, self.stream.cu_stream()) }, "cuGraphLaunch")?;
             events.record(i + 1, &self.stream)?;
         }
         self.stream.synchronize()?;
@@ -836,13 +797,7 @@ impl Runtime {
 
     /// `var=value` in manifest var order, for error messages.
     fn fmt_env(&self, env: &[u64]) -> String {
-        self.manifest
-            .vars
-            .keys()
-            .zip(env)
-            .map(|(s, v)| format!("{s}={v}"))
-            .collect::<Vec<_>>()
-            .join(", ")
+        self.manifest.vars.keys().zip(env).map(|(s, v)| format!("{s}={v}")).collect::<Vec<_>>().join(", ")
     }
 
     /// Execute one program with the given var values, then synchronize.
@@ -904,8 +859,7 @@ impl Runtime {
     /// Whether `capture(program, env)` has been done for exactly these var
     /// values.
     pub fn is_captured(&self, program: &str, env: &BTreeMap<String, u64>) -> bool {
-        self.dense_env(env)
-            .is_ok_and(|env| self.graphs.contains_key(&(program.to_string(), env)))
+        self.dense_env(env).is_ok_and(|env| self.graphs.contains_key(&(program.to_string(), env)))
     }
 
     /// The graph captured for (program, env), or an `Api` error naming the
@@ -915,31 +869,19 @@ impl Runtime {
         if let Some(exec) = self.graphs.get(&(program.to_string(), dense.clone())) {
             return Ok(*exec);
         }
-        let others: Vec<String> = self
-            .graphs
-            .keys()
-            .filter(|(p, _)| p == program)
-            .map(|(_, e)| format!("{{{}}}", self.fmt_env(e)))
-            .collect();
+        let others: Vec<String> =
+            self.graphs.keys().filter(|(p, _)| p == program).map(|(_, e)| format!("{{{}}}", self.fmt_env(e))).collect();
         if others.is_empty() {
             bail!(Api, "program `{program}` has not been captured");
         }
-        bail!(
-            Api,
-            "program `{program}` called with {{{}}} but captured at {}",
-            self.fmt_env(&dense),
-            others.join(", ")
-        )
+        bail!(Api, "program `{program}` called with {{{}}} but captured at {}", self.fmt_env(&dense), others.join(", "))
     }
 
     /// Replay a previously captured program, then synchronize.
     pub fn run_captured(&self, program: &str, env: &BTreeMap<String, u64>) -> Result<()> {
         let exec = self.graph(program, env)?;
         self.ctx.bind_to_thread()?;
-        cuda_check(
-            unsafe { sys::cuGraphLaunch(exec, self.stream.cu_stream()) },
-            "cuGraphLaunch",
-        )?;
+        cuda_check(unsafe { sys::cuGraphLaunch(exec, self.stream.cu_stream()) }, "cuGraphLaunch")?;
         self.stream.synchronize()?;
         Ok(())
     }
@@ -947,10 +889,7 @@ impl Runtime {
     /// Issue every launch of a compiled program onto the stream (no sync).
     fn replay(&self, prog: &CompiledProgram, env: &[u64]) -> Result<()> {
         for l in &prog.launches {
-            self.launch(l, env).map_err(|e| Error::Call {
-                context: l.ctx.clone(),
-                source: Box::new(e),
-            })?;
+            self.launch(l, env).map_err(|e| Error::Call { context: l.ctx.clone(), source: Box::new(e) })?;
         }
         Ok(())
     }
@@ -998,11 +937,8 @@ impl Runtime {
                 }];
                 let num_attrs = match cluster {
                     Some(c) => {
-                        attrs[0].value.clusterDim = sys::CUlaunchAttributeValue_union__bindgen_ty_1 {
-                            x: c[0],
-                            y: c[1],
-                            z: c[2],
-                        };
+                        attrs[0].value.clusterDim =
+                            sys::CUlaunchAttributeValue_union__bindgen_ty_1 { x: c[0], y: c[1], z: c[2] };
                         1
                     }
                     None => 0,
@@ -1020,9 +956,7 @@ impl Runtime {
                     numAttrs: num_attrs,
                 };
                 cuda_check(
-                    unsafe {
-                        sys::cuLaunchKernelEx(&cfg, *func, params.as_mut_ptr(), std::ptr::null_mut())
-                    },
+                    unsafe { sys::cuLaunchKernelEx(&cfg, *func, params.as_mut_ptr(), std::ptr::null_mut()) },
                     "cuLaunchKernelEx",
                 )
             }
@@ -1035,7 +969,11 @@ fn fmt_groups(t: &kern_manifest::types::Topology) -> String {
 }
 
 fn gcd(a: u64, b: u64) -> u64 {
-    if b == 0 { a } else { gcd(b, a % b) }
+    if b == 0 {
+        a
+    } else {
+        gcd(b, a % b)
+    }
 }
 
 /// Device memory left untouched when the states are fitted to the device:
@@ -1045,10 +983,7 @@ pub const HEADROOM: u64 = 1 << 30;
 
 /// Bytes a state takes at `capacity` tokens and `slots` sequence slots.
 fn state_bytes(s: &State, capacity: u64, slots: u64) -> Option<u64> {
-    s.bytes_per_token
-        .checked_mul(capacity)?
-        .checked_add(s.bytes)?
-        .checked_add(s.bytes_per_seq.checked_mul(slots)?)
+    s.bytes_per_token.checked_mul(capacity)?.checked_add(s.bytes)?.checked_add(s.bytes_per_seq.checked_mul(slots)?)
 }
 
 /// State capacity that fits the device: free memory (after every buffer
@@ -1089,20 +1024,29 @@ fn fit_capacity(m: &Manifest, ctx: &CudaContext, page: u64) -> Result<u64> {
     if per_token == 0 {
         // Nothing scales with tokens; the capacity only sizes the pool.
         let c = cap.unwrap_or(page);
-        tracing::info!("state capacity {c} tokens (no per-token state); {:.1} GiB free of {:.1}", gib(free), gib(total));
+        tracing::info!(
+            "state capacity {c} tokens (no per-token state); {:.1} GiB free of {:.1}",
+            gib(free),
+            gib(total)
+        );
         return Ok(c);
     }
     let Some(budget) = free.checked_sub(HEADROOM).and_then(|b| b.checked_sub(fixed)) else {
         return Err(Error::Cuda(format!(
             "{:.2} GiB free of {:.1} on the device: not enough for one page of state after {:.1} GiB headroom",
-            gib(free), gib(total), gib(HEADROOM)
+            gib(free),
+            gib(total),
+            gib(HEADROOM)
         )));
     };
     let by_memory = budget / per_token / page * page;
     if by_memory == 0 {
         return Err(Error::Cuda(format!(
             "{:.2} GiB free of {:.1} on the device: one page of state is {:.2} GiB, headroom {:.1} GiB",
-            gib(free), gib(total), gib(per_token * page), gib(HEADROOM)
+            gib(free),
+            gib(total),
+            gib(per_token * page),
+            gib(HEADROOM)
         )));
     }
     let c = cap.map_or(by_memory, |cap| by_memory.min(cap));

@@ -26,7 +26,8 @@ const TOPK: usize = 16;
 fn stage_cubins(cubins: &Path, kernels: &Path) {
     std::fs::create_dir_all(kernels).unwrap();
     for name in ["k3_mega_moe", "k3_mega_stage"] {
-        let bytes = std::fs::read(cubins.join(format!("{name}.cubin"))).expect("cubin (tools/build_k3_mega.sh, build_kernels.sh)");
+        let bytes = std::fs::read(cubins.join(format!("{name}.cubin")))
+            .expect("cubin (tools/build_k3_mega.sh, build_kernels.sh)");
         let sha = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(&bytes));
         std::fs::write(kernels.join(format!("{name}-{}.cubin", &sha[..12])), &bytes).unwrap();
     }
@@ -130,8 +131,20 @@ fn main() {
         let mine = rt.export_handles()?;
         rt.import_peers("ep", &[mine])
     };
-    let (y1, ms1) = run_world(&json1, &kernels, gpus[0], &Topology::one("ep", 0, 1), &w1, &inp, 0, n * t, iters, &self_import, &|| {})
-        .unwrap_or_else(|e| panic!("EP1: {e}"));
+    let (y1, ms1) = run_world(
+        &json1,
+        &kernels,
+        gpus[0],
+        &Topology::one("ep", 0, 1),
+        &w1,
+        &inp,
+        0,
+        n * t,
+        iters,
+        &self_import,
+        &|| {},
+    )
+    .unwrap_or_else(|e| panic!("EP1: {e}"));
     println!("EP1 on gpu {}: {} tokens, {ms1:.1} us/layer (captured)", gpus[0], n * t);
     drop(w1);
 
@@ -162,8 +175,15 @@ fn main() {
     let results: Results = Arc::new(Mutex::new(vec![None; n]));
     let mut threads = Vec::new();
     for (rank, &gpu) in gpus.iter().enumerate() {
-        let (json, kernels, posted, gate, results, inp, weights) =
-            (json_n.clone(), kernels.clone(), posted.clone(), gate.clone(), results.clone(), inp.clone(), weights.clone());
+        let (json, kernels, posted, gate, results, inp, weights) = (
+            json_n.clone(),
+            kernels.clone(),
+            posted.clone(),
+            gate.clone(),
+            results.clone(),
+            inp.clone(),
+            weights.clone(),
+        );
         threads.push(std::thread::spawn(move || {
             let w = std::fs::read(weights.join(format!("ep{n}-r{rank}.safetensors"))).expect("rank shard");
             let rendezvous = |rt: &mut Runtime| -> kern_runtime::Result<()> {
@@ -176,7 +196,19 @@ fn main() {
             let sync = || {
                 gate.wait();
             };
-            let r = run_world(&json, &kernels, gpu, &Topology::one("ep", rank as u64, n as u64), &w, &inp, rank * t, t, iters, &rendezvous, &sync);
+            let r = run_world(
+                &json,
+                &kernels,
+                gpu,
+                &Topology::one("ep", rank as u64, n as u64),
+                &w,
+                &inp,
+                rank * t,
+                t,
+                iters,
+                &rendezvous,
+                &sync,
+            );
             results.lock().unwrap()[rank] = Some(r.map_err(|e| e.to_string()));
         }));
     }

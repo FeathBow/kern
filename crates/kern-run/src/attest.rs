@@ -34,12 +34,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::Instant;
 
+use crate::config::{Config, Target};
+use crate::{env, Caller, DECODE_LIKE, DRIVEN, TOKENS};
 use anyhow::{bail, Context, Result};
 use clap::Args;
 use kern_manifest::types::{Arg, BufferKind, Call, DType, Dim, Dir, Manifest, ParamType};
 use kern_manifest::verify;
-use crate::config::{Config, Target};
-use crate::{env, Caller, DECODE_LIKE, DRIVEN, TOKENS};
 use kern_runtime::{values, Runtime};
 use serde_json::{json, Value};
 
@@ -169,7 +169,11 @@ impl TestOpts {
             a: self.reference.or_else(|| t.and_then(|t| t.reference.clone())).ok_or_else(|| need("reference"))?,
             b: self.manifest.or_else(|| t.map(|t| t.manifest.clone())).ok_or_else(|| need("manifest"))?,
             kernels: self.kernels.or_else(|| t.map(|t| t.kernels.clone())).ok_or_else(|| need("kernels"))?,
-            weights: if self.weights.is_empty() { t.map(|t| t.weights.clone()).filter(|w| !w.is_empty()).ok_or_else(|| need("weights"))? } else { self.weights },
+            weights: if self.weights.is_empty() {
+                t.map(|t| t.weights.clone()).filter(|w| !w.is_empty()).ok_or_else(|| need("weights"))?
+            } else {
+                self.weights
+            },
             tokenizer: self.tokenizer.or_else(|| t.and_then(|t| t.tokenizer.clone())),
             prompt: self.prompt.or_else(|| test.and_then(|x| x.prompt.clone())),
             prefill: self.prefill,
@@ -222,12 +226,22 @@ fn sample_workload(o: &Opts, m: &Manifest, capacity: u64, page: u64, prompt: Opt
         .and_then(|r| r.hi)
         .map(|hi| hi as u64 + 1)
         .ok_or_else(|| anyhow::anyhow!("`token_ids` has no domain to take the vocabulary from"))?;
-    let steps = if o.decode_steps <= 1 { 1 } else { o.decode_steps / 2 + rng.below(o.decode_steps - o.decode_steps / 2 + 1) };
+    let steps =
+        if o.decode_steps <= 1 { 1 } else { o.decode_steps / 2 + rng.below(o.decode_steps - o.decode_steps / 2 + 1) };
     let hi = capacity.saturating_sub(steps).max(1);
-    let chunk = if o.chunk > 0 { o.chunk } else { [tmax, 512.min(tmax), page.min(tmax), 1 + rng.below(tmax)][rng.below(4) as usize] }.clamp(1, tmax);
+    let chunk = if o.chunk > 0 {
+        o.chunk
+    } else {
+        [tmax, 512.min(tmax), page.min(tmax), 1 + rng.below(tmax)][rng.below(4) as usize]
+    }
+    .clamp(1, tmax);
     let (n_pre, how) = match &prompt {
         Some(p) => {
-            anyhow::ensure!(p.len() as u64 <= hi, "prompt is {} tokens; capacity {capacity} leaves room for {hi} before {steps} decode steps", p.len());
+            anyhow::ensure!(
+                p.len() as u64 <= hi,
+                "prompt is {} tokens; capacity {capacity} leaves room for {hi} before {steps} decode steps",
+                p.len()
+            );
             (p.len() as u64, "prompt")
         }
         None if o.prefill > 0 => (o.prefill.min(hi), "given"),
@@ -235,7 +249,21 @@ fn sample_workload(o: &Opts, m: &Manifest, capacity: u64, page: u64, prompt: Opt
         None => {
             // where kernels break: the last partial chunk, the first token
             // of a new page, exactly the var max
-            let mut c: Vec<u64> = vec![1, page - 1, page, page + 1, 2 * page + 1, chunk - 1, chunk, chunk + 1, 2 * chunk + 1, 3 * chunk - 1, tmax, tmax + 1, hi];
+            let mut c: Vec<u64> = vec![
+                1,
+                page - 1,
+                page,
+                page + 1,
+                2 * page + 1,
+                chunk - 1,
+                chunk,
+                chunk + 1,
+                2 * chunk + 1,
+                3 * chunk - 1,
+                tmax,
+                tmax + 1,
+                hi,
+            ];
             c.retain(|&x| (1..=hi).contains(&x));
             c.sort_unstable();
             c.dedup();
@@ -294,7 +322,9 @@ fn logit_row(label: String, dt: DType, a: &[u8], b: &[u8]) -> LogitRow {
     let (va, vb) = (values::to_f64(dt, a), values::to_f64(dt, b));
     let cmp = compare(dt, a, b);
     let max_abs = va.iter().zip(&vb).map(|(x, y)| (x - y).abs()).filter(|d| d.is_finite()).fold(0.0, f64::max);
-    let argmax = |v: &[f64]| v.iter().enumerate().fold((0usize, f64::NEG_INFINITY), |m, (i, &x)| if x > m.1 { (i, x) } else { m });
+    let argmax = |v: &[f64]| {
+        v.iter().enumerate().fold((0usize, f64::NEG_INFINITY), |m, (i, &x)| if x > m.1 { (i, x) } else { m })
+    };
     let (argmax_a, top1) = argmax(&va);
     let top2 = va.iter().enumerate().filter(|(i, _)| *i != argmax_a).map(|(_, &x)| x).fold(f64::NEG_INFINITY, f64::max);
     let (argmax_b, _) = argmax(&vb);
@@ -303,8 +333,24 @@ fn logit_row(label: String, dt: DType, a: &[u8], b: &[u8]) -> LogitRow {
     let (la, lb) = (lse(&va, ma_), lse(&vb, mb_));
     let kl = va.iter().zip(&vb).map(|(x, y)| (x - la).exp() * ((x - la) - (y - lb))).sum::<f64>();
     let scale = va.iter().filter(|x| x.is_finite()).fold(0.0f64, |m, x| m.max(x.abs()));
-    let scale_ulps = if max_abs == 0.0 { 0.0 } else if max_abs.is_finite() { max_abs / ulp_at(dt, scale) } else { f64::INFINITY };
-    LogitRow { label, cmp, max_abs, scale_ulps, scale, argmax_a, argmax_b, margin_a: top1 - top2, kl: if kl.is_finite() { kl } else { f64::INFINITY } }
+    let scale_ulps = if max_abs == 0.0 {
+        0.0
+    } else if max_abs.is_finite() {
+        max_abs / ulp_at(dt, scale)
+    } else {
+        f64::INFINITY
+    };
+    LogitRow {
+        label,
+        cmp,
+        max_abs,
+        scale_ulps,
+        scale,
+        argmax_a,
+        argmax_b,
+        margin_a: top1 - top2,
+        kl: if kl.is_finite() { kl } else { f64::INFINITY },
+    }
 }
 
 // ---------------------------------------------------------------- static diff
@@ -361,11 +407,7 @@ fn align(pa: &[Call], pb: &[Call], changed: &BTreeMap<String, &str>) -> Vec<Segm
     let mut lcs = vec![vec![0u32; m + 1]; n + 1];
     for i in (0..n).rev() {
         for j in (0..m).rev() {
-            lcs[i][j] = if ka[i] == kb[j] {
-                lcs[i + 1][j + 1] + 1
-            } else {
-                lcs[i + 1][j].max(lcs[i][j + 1])
-            };
+            lcs[i][j] = if ka[i] == kb[j] { lcs[i + 1][j + 1] + 1 } else { lcs[i + 1][j].max(lcs[i][j + 1]) };
         }
     }
     let mut pairs = Vec::new();
@@ -730,7 +772,11 @@ fn diff_runs(pre: &[u8], post: &[u8]) -> Vec<(usize, Vec<u8>)> {
 }
 
 /// Write a state pre-image (or post-image at the same offsets) back.
-fn restore_state(c: &mut Caller, runs: &BTreeMap<String, Vec<(usize, Vec<u8>)>>, image: Option<&BTreeMap<String, Vec<u8>>>) -> Result<()> {
+fn restore_state(
+    c: &mut Caller,
+    runs: &BTreeMap<String, Vec<(usize, Vec<u8>)>>,
+    image: Option<&BTreeMap<String, Vec<u8>>>,
+) -> Result<()> {
     for (name, rs) in runs {
         for (off, bytes) in rs {
             match image {
@@ -749,13 +795,8 @@ fn load_side(json: &str, o: &Opts, blobs: &[&[u8]]) -> Result<Caller> {
 }
 
 fn tokens_of(tok: &tokenizers::Tokenizer, s: &str) -> Result<Vec<i64>> {
-    let ids: Vec<i64> = tok
-        .encode(s, false)
-        .map_err(|e| anyhow::anyhow!("encode: {e}"))?
-        .get_ids()
-        .iter()
-        .map(|&u| u as i64)
-        .collect();
+    let ids: Vec<i64> =
+        tok.encode(s, false).map_err(|e| anyhow::anyhow!("encode: {e}"))?.get_ids().iter().map(|&u| u as i64).collect();
     if ids.is_empty() {
         bail!("prompt is empty: {s:?}");
     }
@@ -839,7 +880,13 @@ struct Section {
 
 impl Section {
     fn new(title: &str, subtitle: &str) -> Section {
-        Section { title: title.into(), subtitle: subtitle.into(), blocks: Vec::new(), started: Instant::now(), timed: true }
+        Section {
+            title: title.into(),
+            subtitle: subtitle.into(),
+            blocks: Vec::new(),
+            started: Instant::now(),
+            timed: true,
+        }
     }
     fn untimed(mut self) -> Section {
         self.timed = false;
@@ -881,9 +928,7 @@ impl Renderer {
         let color = match color {
             Color::Always => true,
             Color::Never => false,
-            Color::Auto => {
-                std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
-            }
+            Color::Auto => std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none(),
         } && format == Format::Text;
         Renderer { format, color }
     }
@@ -998,7 +1043,8 @@ impl Renderer {
             format!("| {} |", cells.join(" | "))
         };
         println!();
-        let (head, body) = if header { (line(&rows[0]), &rows[1..]) } else { (line(&vec![Cell::default(); ncol]), rows) };
+        let (head, body) =
+            if header { (line(&rows[0]), &rows[1..]) } else { (line(&vec![Cell::default(); ncol]), rows) };
         println!("{head}");
         println!("|{}", " --- |".repeat(ncol));
         for r in body {
@@ -1023,7 +1069,10 @@ impl Renderer {
                     self.paint(&Cell::dim(&format!("{elapsed:.1?}")))
                 );
                 if let Some(p) = out {
-                    println!("{}", self.paint(&Cell::dim(&format!("          attestation written to {}", p.display()))));
+                    println!(
+                        "{}",
+                        self.paint(&Cell::dim(&format!("          attestation written to {}", p.display())))
+                    );
                 }
             }
             Format::Md => {
@@ -1037,21 +1086,43 @@ impl Renderer {
 }
 
 fn us(ms: f32) -> String {
-    if ms >= 1.0 { format!("{ms:.3} ms") } else { format!("{:.1} µs", ms * 1e3) }
+    if ms >= 1.0 {
+        format!("{ms:.3} ms")
+    } else {
+        format!("{:.1} µs", ms * 1e3)
+    }
 }
 
 /// B − A as a styled cell: faster is good.
 fn delta(a: f32, b: f32) -> Cell {
     let d = (b - a) * 1e3;
     let pct = (b - a) / a.max(1e-9) * 100.0;
-    let s = format!("{}{:.1} µs  {}{:.1}%", if d < 0.0 { "−" } else { "+" }, d.abs(), if pct < 0.0 { "−" } else { "+" }, pct.abs());
-    if pct <= -1.0 { Cell::good(s) } else if pct >= 1.0 { Cell::bad(s) } else { Cell::from(s) }
+    let s = format!(
+        "{}{:.1} µs  {}{:.1}%",
+        if d < 0.0 { "−" } else { "+" },
+        d.abs(),
+        if pct < 0.0 { "−" } else { "+" },
+        pct.abs()
+    );
+    if pct <= -1.0 {
+        Cell::good(s)
+    } else if pct >= 1.0 {
+        Cell::bad(s)
+    } else {
+        Cell::from(s)
+    }
 }
 
 fn pct_cell(a: f32, b: f32) -> Cell {
     let pct = (b - a) / a.max(1e-9) * 100.0;
     let s = format!("{}{:.1}%", if pct < 0.0 { "−" } else { "+" }, pct.abs());
-    if pct <= -1.0 { Cell::good(s) } else if pct >= 1.0 { Cell::bad(s) } else { Cell::from(s) }
+    if pct <= -1.0 {
+        Cell::good(s)
+    } else if pct >= 1.0 {
+        Cell::bad(s)
+    } else {
+        Cell::from(s)
+    }
 }
 
 fn kb(bytes: usize) -> String {
@@ -1134,7 +1205,11 @@ fn execute(o: Opts) -> Result<i32> {
             .collect();
         names.dedup();
         let n = names.join(" + ");
-        if ls.len() > 1 { format!("{} launches: {n}", ls.len()) } else { n }
+        if ls.len() > 1 {
+            format!("{} launches: {n}", ls.len())
+        } else {
+            n
+        }
     };
     for (k, kind) in &changed {
         let detail = match *kind {
@@ -1185,7 +1260,15 @@ fn execute(o: Opts) -> Result<i32> {
         }
         let shared = pa.len() - cuts.iter().map(|s| s.a.1 - s.a.0).sum::<usize>();
         for (gi, ((ka, kb, reads, writes), n)) in groups.iter().enumerate() {
-            let what = if ka == kb { ka.clone() } else if ka.is_empty() { format!("∅ → {kb}") } else if kb.is_empty() { format!("{ka} → ∅") } else { format!("{ka} → {kb}") };
+            let what = if ka == kb {
+                ka.clone()
+            } else if ka.is_empty() {
+                format!("∅ → {kb}")
+            } else if kb.is_empty() {
+                format!("{ka} → ∅")
+            } else {
+                format!("{ka} → {kb}")
+            };
             rows.push(row![
                 if gi == 0 { pname.clone() } else { String::new() },
                 Cell::bold(format!("{n} cut{}", if *n == 1 { "" } else { "s" })),
@@ -1202,7 +1285,9 @@ fn execute(o: Opts) -> Result<i32> {
     }
     sec.table(rows);
     if frontier_warn {
-        sec.note(Cell::warn("⚠ some cuts read or write different buffers on the two sides — not a cut-internal replacement"));
+        sec.note(Cell::warn(
+            "⚠ some cuts read or write different buffers on the two sides — not a cut-internal replacement",
+        ));
     }
     r.section(&sec);
     report["diff"] = json!({
@@ -1233,7 +1318,9 @@ fn execute(o: Opts) -> Result<i32> {
     let load_t = t.elapsed();
     let prompt_ids = match &o.prompt {
         Some(text) => {
-            let Some(tk) = &o.tokenizer else { bail!("--prompt needs a tokenizer (--tokenizer or the target's `tokenizer`)") };
+            let Some(tk) = &o.tokenizer else {
+                bail!("--prompt needs a tokenizer (--tokenizer or the target's `tokenizer`)")
+            };
             let tokenizer = tokenizers::Tokenizer::from_file(tk).map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
             Some(tokens_of(&tokenizer, text)?)
         }
@@ -1259,7 +1346,13 @@ fn execute(o: Opts) -> Result<i32> {
     s.b.reset();
     // Run one program in lockstep; at each cut snapshot A's frontier inputs
     // (from A, before the cut), A's outputs after, and compare B's outputs.
-    let mut lockstep = |s: &mut Sides, pname: &str, e: &BTreeMap<String, u64>, label_prefix: &str, keep: bool, image: usize| -> Result<()> {
+    let mut lockstep = |s: &mut Sides,
+                        pname: &str,
+                        e: &BTreeMap<String, u64>,
+                        label_prefix: &str,
+                        keep: bool,
+                        image: usize|
+     -> Result<()> {
         let Some(segs) = segments.get(pname) else {
             s.a.rt.run(pname, e)?;
             s.b.rt.run(pname, e)?;
@@ -1333,26 +1426,36 @@ fn execute(o: Opts) -> Result<i32> {
                 let ap = &a_post[st];
                 let runs = &pre_states[st];
                 let set: usize = runs.iter().map(|(_, b)| b.len()).sum();
-                let n_diff: usize = runs
-                    .iter()
-                    .map(|(off, b)| (0..b.len()).filter(|i| ap[off + i] != b_post[off + i]).count())
-                    .sum();
+                let n_diff: usize =
+                    runs.iter().map(|(off, b)| (0..b.len()).filter(|i| ap[off + i] != b_post[off + i]).count()).sum();
                 // bytes B changed that lie outside A's write-set
                 let outside: usize = diff_runs(&b_pre[st], &b_post)
                     .iter()
                     .map(|(boff, bb)| {
                         (0..bb.len())
-                            .filter(|i| !runs.iter().any(|(aoff, ab)| (aoff..&(aoff + ab.len())).contains(&&(boff + i))))
+                            .filter(|i| {
+                                !runs.iter().any(|(aoff, ab)| (aoff..&(aoff + ab.len())).contains(&&(boff + i)))
+                            })
                             .count()
                     })
                     .sum();
                 states.insert(st.clone(), StateCmp { set, n_diff, outside });
             }
             for (n, cmp) in &bufs {
-                local_res.entry(pname.into()).or_default().entry(n.clone()).or_default().push((label.clone(), cmp.clone()));
+                local_res
+                    .entry(pname.into())
+                    .or_default()
+                    .entry(n.clone())
+                    .or_default()
+                    .push((label.clone(), cmp.clone()));
             }
             for (st, c) in &states {
-                local_states.entry(pname.into()).or_default().entry(st.clone()).or_default().push((label.clone(), c.clone()));
+                local_states
+                    .entry(pname.into())
+                    .or_default()
+                    .entry(st.clone())
+                    .or_default()
+                    .push((label.clone(), c.clone()));
             }
             one_sided_all.extend(one_sided.iter().cloned());
             local_json.push(json!({"program": pname, "cut": label,
@@ -1365,7 +1468,16 @@ fn execute(o: Opts) -> Result<i32> {
                     ref_out.insert(n.clone(), s.a.rt.read_buffer_prefix(n, live_bytes(&ma, n, e))?);
                 }
                 snap_state_bytes += pre_states.values().flatten().map(|(_, b)| b.len()).sum::<usize>();
-                snaps.push(Snap { program: pname.into(), seg: seg.clone(), env: e.clone(), inputs, ref_out, ref_states: a_post, pre_states, image });
+                snaps.push(Snap {
+                    program: pname.into(),
+                    seg: seg.clone(),
+                    env: e.clone(),
+                    inputs,
+                    ref_out,
+                    ref_states: a_post,
+                    pre_states,
+                    image,
+                });
             }
         }
         Ok(())
@@ -1382,11 +1494,24 @@ fn execute(o: Opts) -> Result<i32> {
     };
     // `logits*` buffers a program writes: the end-to-end oracle.
     let logits_of = |prog: &str| -> Vec<String> {
-        access(&ma, prog, 0, ma.programs[prog].len()).writes.into_iter().filter(|n| n.starts_with("logits") && mb.buffers.contains_key(n)).collect()
+        access(&ma, prog, 0, ma.programs[prog].len())
+            .writes
+            .into_iter()
+            .filter(|n| n.starts_with("logits") && mb.buffers.contains_key(n))
+            .collect()
     };
     // (run label, buffer, env, bytes)
-    let read_logits = |c: &Caller, prog: &str, e: &BTreeMap<String, u64>, label: &str| -> Result<Vec<(String, String, BTreeMap<String, u64>, Vec<u8>)>> {
-        logits_of(prog).into_iter().map(|n| Ok((label.to_string(), n.clone(), e.clone(), c.rt.read_buffer_prefix(&n, live_bytes(&ma, &n, e))?))).collect()
+    let read_logits = |c: &Caller,
+                       prog: &str,
+                       e: &BTreeMap<String, u64>,
+                       label: &str|
+     -> Result<Vec<(String, String, BTreeMap<String, u64>, Vec<u8>)>> {
+        logits_of(prog)
+            .into_iter()
+            .map(|n| {
+                Ok((label.to_string(), n.clone(), e.clone(), c.rt.read_buffer_prefix(&n, live_bytes(&ma, &n, e))?))
+            })
+            .collect()
     };
     let pre = &wl.prefill;
     let chunk = wl.chunk;
@@ -1411,7 +1536,8 @@ fn execute(o: Opts) -> Result<i32> {
     let decode_progs: Vec<&str> = DECODE_LIKE.into_iter().filter(|p| ma.programs.contains_key(*p)).collect();
     let prog_of = |k: usize| decode_progs[k % decode_progs.len()];
     // A's state after prefill: the image every decode-step-0 replay starts from.
-    let s0: BTreeMap<String, Vec<u8>> = shared_states.iter().map(|n| Ok((n.clone(), s.a.rt.read_state(n)?))).collect::<Result<_>>()?;
+    let s0: BTreeMap<String, Vec<u8>> =
+        shared_states.iter().map(|n| Ok((n.clone(), s.a.rt.read_state(n)?))).collect::<Result<_>>()?;
     for (k, &tok) in wl.decode.iter().enumerate() {
         let p = prog_of(k);
         s.a.stage_decode(tok)?;
@@ -1456,7 +1582,11 @@ fn execute(o: Opts) -> Result<i32> {
         let rows = if row > 0 { a.len() / row } else { 0 };
         for r in 0..rows.max(1) {
             let (lo, hi) = if rows > 1 { (r * row, (r + 1) * row) } else { (0, a.len()) };
-            let lbl = if a_logits.iter().filter(|x| x.0 == *label).count() > 1 || rows > 1 { format!("{label} {name}{}", if rows > 1 { format!("[{r}]") } else { String::new() }) } else { label.clone() };
+            let lbl = if a_logits.iter().filter(|x| x.0 == *label).count() > 1 || rows > 1 {
+                format!("{label} {name}{}", if rows > 1 { format!("[{r}]") } else { String::new() })
+            } else {
+                label.clone()
+            };
             logit_rows.push(logit_row(lbl, dt, &a[lo..hi], &b[lo..hi]));
         }
     }
@@ -1482,7 +1612,12 @@ fn execute(o: Opts) -> Result<i32> {
             for (buf, res) in bufs {
                 local_identical &= res.iter().all(|(_, c)| c.value_identical());
                 local_bit &= res.iter().all(|(_, c)| c.identical());
-                rows.push(row![if first { pname.to_string() } else { String::new() }, count.clone(), buf.clone(), summarize(res)]);
+                rows.push(row![
+                    if first { pname.to_string() } else { String::new() },
+                    count.clone(),
+                    buf.clone(),
+                    summarize(res)
+                ]);
                 first = false;
             }
         }
@@ -1496,13 +1631,24 @@ fn execute(o: Opts) -> Result<i32> {
                     Cell::good(format!("bit-identical on the cut's write-set ({})", kb(set)))
                 } else {
                     let (label, c) = bad[0];
-                    let mut t = format!("{}/{} cuts differ · {}/{} bytes of the write-set at {label}", bad.len(), res.len(), c.n_diff, c.set);
+                    let mut t = format!(
+                        "{}/{} cuts differ · {}/{} bytes of the write-set at {label}",
+                        bad.len(),
+                        res.len(),
+                        c.n_diff,
+                        c.set
+                    );
                     if c.outside > 0 {
                         t += &format!(" · B wrote {} outside A's write-set", kb(c.outside));
                     }
                     Cell::bad(t)
                 };
-                rows.push(row![if first { pname.to_string() } else { String::new() }, format!("{n_cuts} cuts (first run)"), format!("state {st}"), txt]);
+                rows.push(row![
+                    if first { pname.to_string() } else { String::new() },
+                    format!("{n_cuts} cuts (first run)"),
+                    format!("state {st}"),
+                    txt
+                ]);
                 first = false;
             }
         }
@@ -1514,7 +1660,8 @@ fn execute(o: Opts) -> Result<i32> {
     for (name, b) in &ma.buffers {
         if b.kind == BufferKind::Output && mb.buffers.contains_key(name) {
             let bytes = live_bytes(&ma, name, &e1);
-            let c = compare(b.dtype, &s.a.rt.read_buffer_prefix(name, bytes)?, &s.b.rt.read_buffer_prefix(name, bytes)?);
+            let c =
+                compare(b.dtype, &s.a.rt.read_buffer_prefix(name, bytes)?, &s.b.rt.read_buffer_prefix(name, bytes)?);
             if !c.value_identical() {
                 e2e_outputs_identical = false;
                 e2e_differs.push(name.clone());
@@ -1528,20 +1675,36 @@ fn execute(o: Opts) -> Result<i32> {
     for name in ma.states.keys().filter(|n| mb.states.contains_key(*n)) {
         let (a, b) = (s.a.rt.read_state(name)?, s.b.rt.read_state(name)?);
         let d = a.iter().zip(&b).filter(|(p, q)| p != q).count() + a.len().abs_diff(b.len());
-        let txt = if d == 0 { Cell::good(format!("bit-identical ({})", kb(a.len()))) } else { Cell::warn(format!("{d} of {} bytes differ ({:.2}%)", a.len(), d as f64 * 100.0 / a.len().max(1) as f64)) };
+        let txt = if d == 0 {
+            Cell::good(format!("bit-identical ({})", kb(a.len())))
+        } else {
+            Cell::warn(format!("{d} of {} bytes differ ({:.2}%)", a.len(), d as f64 * 100.0 / a.len().max(1) as f64))
+        };
         rows.push(row![if first { "end-to-end" } else { "" }, "", format!("state {name}"), txt]);
         first = false;
         e2e_states.insert(name.clone(), json!({"differ": d, "bytes": a.len()}));
     }
     sec.table(rows);
     sec.note(Cell::dim(format!("end-to-end: B re-ran the whole workload from zero state with nothing injected ({:.1?}); the cut rows above are B on A's inputs and A's state", free_t)));
-    let snap_bytes: usize = snaps.iter().map(|sn| sn.inputs.iter().map(|(_, b)| b.len()).sum::<usize>() + sn.ref_out.values().map(|b| b.len()).sum::<usize>()).sum();
-    sec.note(Cell::dim(format!("{} cuts snapshotted ({} of frontier inputs + reference outputs)", snaps.len(), kb(snap_bytes))));
+    let snap_bytes: usize = snaps
+        .iter()
+        .map(|sn| {
+            sn.inputs.iter().map(|(_, b)| b.len()).sum::<usize>() + sn.ref_out.values().map(|b| b.len()).sum::<usize>()
+        })
+        .sum();
+    sec.note(Cell::dim(format!(
+        "{} cuts snapshotted ({} of frontier inputs + reference outputs)",
+        snaps.len(),
+        kb(snap_bytes)
+    )));
     if snap_state_bytes > 0 {
         sec.note(Cell::dim(format!("inout state: B ran every cut from A's pre-image of the cut's write-set; {} of pre-image kept — every replay below starts from it and puts A's post-image back", kb(snap_state_bytes))));
     }
     if !one_sided_all.is_empty() {
-        sec.note(Cell::dim(format!("written on one side only (implementation-internal, not compared): {:?}", one_sided_all)));
+        sec.note(Cell::dim(format!(
+            "written on one side only (implementation-internal, not compared): {:?}",
+            one_sided_all
+        )));
     }
     for p in &undriven {
         sec.note(Cell::bad(format!("{p}: changed but not tapped — the workload driver only stages {DRIVEN:?}")));
@@ -1559,19 +1722,66 @@ fn execute(o: Opts) -> Result<i32> {
     let wide_flip = logit_rows.iter().find(|r| r.flip() && !r.near_tie());
     let logits_within = have_logits && logits_max_ulp <= o.logit_ulp as f64 && wide_flip.is_none();
     {
-        let mut sec = Section::new("LOGITS", &format!("end-to-end oracle · A (lockstep, nothing injected into A) vs B (free run) · {} rows over {} runs", logit_rows.len(), a_logits.len()));
+        let mut sec = Section::new(
+            "LOGITS",
+            &format!(
+                "end-to-end oracle · A (lockstep, nothing injected into A) vs B (free run) · {} rows over {} runs",
+                logit_rows.len(),
+                a_logits.len()
+            ),
+        );
         let mut rows = Vec::new();
         if !have_logits {
-            rows.push(row![Cell::warn("no logits"), "no driven program writes a `logits*` buffer — the verdict falls back to cut identity"]);
+            rows.push(row![
+                Cell::warn("no logits"),
+                "no driven program writes a `logits*` buffer — the verdict falls back to cut identity"
+            ]);
         } else {
-            let worst = logit_rows.iter().max_by(|x, y| x.scale_ulps.total_cmp(&y.scale_ulps).then(x.cmp.n_diff.cmp(&y.cmp.n_diff))).unwrap();
+            let worst = logit_rows
+                .iter()
+                .max_by(|x, y| x.scale_ulps.total_cmp(&y.scale_ulps).then(x.cmp.n_diff.cmp(&y.cmp.n_diff)))
+                .unwrap();
             let worst_kl = logit_rows.iter().max_by(|x, y| x.kl.total_cmp(&y.kl)).unwrap();
-            rows.push(row!["argmax", if n_flips == 0 { Cell::good(format!("agrees on all {} rows", logit_rows.len())) } else if wide_flip.is_none() { Cell::warn(format!("{n_flips} flip{} on {} rows, all near-ties (A's own margin ≤ Δ)", if n_flips == 1 { "" } else { "s" }, logit_rows.len())) } else { Cell::bad(format!("{} wide-margin flip{} ({n_near} near-tie) on {} rows", n_flips - n_near, if n_flips - n_near == 1 { "" } else { "s" }, logit_rows.len())) }]);
-            rows.push(row!["max Δ", if logits_bit { Cell::good("bit-identical everywhere") } else { Cell::from(format!("{:.4} = {:.2} ulp at the row's scale (max |logit| {:.1}) at {} · {}/{} elements differ", worst.max_abs, worst.scale_ulps, worst.scale, worst.label, worst.cmp.n_diff, worst.cmp.n)) }]);
+            rows.push(row![
+                "argmax",
+                if n_flips == 0 {
+                    Cell::good(format!("agrees on all {} rows", logit_rows.len()))
+                } else if wide_flip.is_none() {
+                    Cell::warn(format!(
+                        "{n_flips} flip{} on {} rows, all near-ties (A's own margin ≤ Δ)",
+                        if n_flips == 1 { "" } else { "s" },
+                        logit_rows.len()
+                    ))
+                } else {
+                    Cell::bad(format!(
+                        "{} wide-margin flip{} ({n_near} near-tie) on {} rows",
+                        n_flips - n_near,
+                        if n_flips - n_near == 1 { "" } else { "s" },
+                        logit_rows.len()
+                    ))
+                }
+            ]);
+            rows.push(row![
+                "max Δ",
+                if logits_bit {
+                    Cell::good("bit-identical everywhere")
+                } else {
+                    Cell::from(format!(
+                        "{:.4} = {:.2} ulp at the row's scale (max |logit| {:.1}) at {} · {}/{} elements differ",
+                        worst.max_abs, worst.scale_ulps, worst.scale, worst.label, worst.cmp.n_diff, worst.cmp.n
+                    ))
+                }
+            ]);
             rows.push(row!["KL(A‖B)", format!("max {:.3e} at {}", worst_kl.kl, worst_kl.label)]);
             for r in logit_rows.iter().filter(|r| r.flip()) {
-                let t = format!("A {} → B {} · A's margin {:.4} · Δ max {:.4}", r.argmax_a, r.argmax_b, r.margin_a, r.max_abs);
-                rows.push(row![r.label.clone(), if r.near_tie() { Cell::warn(format!("near-tie · {t}")) } else { Cell::bad(format!("✗ {t}")) }]);
+                let t = format!(
+                    "A {} → B {} · A's margin {:.4} · Δ max {:.4}",
+                    r.argmax_a, r.argmax_b, r.margin_a, r.max_abs
+                );
+                rows.push(row![
+                    r.label.clone(),
+                    if r.near_tie() { Cell::warn(format!("near-tie · {t}")) } else { Cell::bad(format!("✗ {t}")) }
+                ]);
             }
         }
         sec.table(rows);
@@ -1587,7 +1797,12 @@ fn execute(o: Opts) -> Result<i32> {
     // sees what it saw in the tap, on either side) and to A's post-image
     // after (so the next cut's reads see the reference, not this replay's
     // output — under fuzz, garbage).
-    let replay = |c: &mut Caller, m: &Manifest, sn: &Snap, side_b: bool, inputs: &[(String, Vec<u8>)]| -> Result<(BTreeMap<String, Vec<u8>>, BTreeMap<String, Vec<u8>>)> {
+    let replay = |c: &mut Caller,
+                  m: &Manifest,
+                  sn: &Snap,
+                  side_b: bool,
+                  inputs: &[(String, Vec<u8>)]|
+     -> Result<(BTreeMap<String, Vec<u8>>, BTreeMap<String, Vec<u8>>)> {
         restore_state(c, &sn.pre_states, None)?;
         for (n, bytes) in inputs {
             c.rt.write_buffer(n, bytes)?;
@@ -1636,7 +1851,10 @@ fn execute(o: Opts) -> Result<i32> {
     let mut noise_clean = true;
     let mut noisy_states: BTreeSet<(String, String)> = BTreeSet::new();
     if !o.no_noise {
-        let mut sec = Section::new("NOISE FLOOR", &format!("A re-run from each snapshot (inout state restored) vs A's own output · {} cuts", snaps.len()));
+        let mut sec = Section::new(
+            "NOISE FLOOR",
+            &format!("A re-run from each snapshot (inout state restored) vs A's own output · {} cuts", snaps.len()),
+        );
         let mut state_noise = Vec::new();
         let mut cur = None;
         for sn in &snaps {
@@ -1651,7 +1869,10 @@ fn execute(o: Opts) -> Result<i32> {
             }
             for (name, bytes) in st {
                 let refp = &sn.ref_states[&name];
-                let d: usize = sn.pre_states[&name].iter().map(|(off, b)| (0..b.len()).filter(|i| bytes[off + i] != refp[off + i]).count()).sum();
+                let d: usize = sn.pre_states[&name]
+                    .iter()
+                    .map(|(off, b)| (0..b.len()).filter(|i| bytes[off + i] != refp[off + i]).count())
+                    .sum();
                 if d > 0 {
                     noise_clean = false;
                     noisy_states.insert((sn.program.clone(), name.clone()));
@@ -1684,7 +1905,15 @@ fn execute(o: Opts) -> Result<i32> {
     let mut fuzz_identical = true; // value-identical under every distribution
     let mut fuzz_bit = true;
     if o.fuzz > 0 {
-        let mut sec = Section::new("FUZZ", &format!("{} rounds per cut · {} cuts · float inputs perturbed around the tap ({}) · integers kept as tapped", o.fuzz, snaps.len(), MODES.join(" / ")));
+        let mut sec = Section::new(
+            "FUZZ",
+            &format!(
+                "{} rounds per cut · {} cuts · float inputs perturbed around the tap ({}) · integers kept as tapped",
+                o.fuzz,
+                snaps.len(),
+                MODES.join(" / ")
+            ),
+        );
         let mut rng = Rng(o.seed);
         let progs: Vec<String> = segments.keys().cloned().collect();
         // round -> program -> worst cell
@@ -1720,27 +1949,45 @@ fn execute(o: Opts) -> Result<i32> {
                 }
                 let (out_a, st_a) = match replay(&mut s.a, &ma, sn, false, &inputs) {
                     Ok(x) => x,
-                    Err(err) => bail!("A crashed under fuzz ({}) at {} cut {}: {err}", MODES[mode], sn.program, seg_label(&sn.seg)),
+                    Err(err) => bail!(
+                        "A crashed under fuzz ({}) at {} cut {}: {err}",
+                        MODES[mode],
+                        sn.program,
+                        seg_label(&sn.seg)
+                    ),
                 };
                 let (out_b, st_b) = match replay(&mut s.b, &mb, sn, true, &inputs) {
                     Ok(x) => x,
                     Err(err) => {
-                        println!("  ✗ B crashed under `{}` at {} cut {}: {err}", MODES[mode], sn.program, seg_label(&sn.seg));
+                        println!(
+                            "  ✗ B crashed under `{}` at {} cut {}: {err}",
+                            MODES[mode],
+                            sn.program,
+                            seg_label(&sn.seg)
+                        );
                         bail!("B crashed under fuzz; the CUDA context is unusable past this point");
                     }
                 };
                 for (name, b) in &st_b {
                     // on the cut's write-set, like the tap
                     let a = &st_a[name];
-                    let d: usize = sn.pre_states[name].iter().map(|(off, r)| (0..r.len()).filter(|i| a[off + i] != b[off + i]).count()).sum();
+                    let d: usize = sn.pre_states[name]
+                        .iter()
+                        .map(|(off, r)| (0..r.len()).filter(|i| a[off + i] != b[off + i]).count())
+                        .sum();
                     if d > 0 {
-                        state_diffs.entry(sn.program.clone()).or_default().push(format!("state {name}: {d} bytes at {}", seg_label(&sn.seg)));
+                        state_diffs
+                            .entry(sn.program.clone())
+                            .or_default()
+                            .push(format!("state {name}: {d} bytes at {}", seg_label(&sn.seg)));
                     }
                 }
                 for (name, b) in &out_b {
                     let c = compare(ma.buffers[name].dtype, &out_a[name], b);
                     let w = worst.entry(sn.program.clone()).or_default();
-                    if (c.n_diff - c.signed_zero, c.max_ulp, c.signed_zero) > (w.n_diff - w.signed_zero, w.max_ulp, w.signed_zero) {
+                    if (c.n_diff - c.signed_zero, c.max_ulp, c.signed_zero)
+                        > (w.n_diff - w.signed_zero, w.max_ulp, w.signed_zero)
+                    {
                         *w = c;
                     }
                     // Post-condition: produced values must lie in the
@@ -1751,7 +1998,10 @@ fn execute(o: Opts) -> Result<i32> {
                         for (side, bytes) in [("A", &out_a[name]), ("B", b)] {
                             let v = values::to_f64(mb.buffers[name].dtype, bytes);
                             if let Some(i) = v.iter().position(|x| !r.contains(*x)) {
-                                violations.entry(sn.program.clone()).or_default().push(format!("{side} {name}[{i}] = {} outside domain", v[i]));
+                                violations
+                                    .entry(sn.program.clone())
+                                    .or_default()
+                                    .push(format!("{side} {name}[{i}] = {} outside domain", v[i]));
                             }
                         }
                     }
@@ -1775,21 +2025,39 @@ fn execute(o: Opts) -> Result<i32> {
                         fuzz_ok = false;
                         Cell::bad(format!("✗ {}", v.join("; ")))
                     }
-                    (None, Some(d)) => Cell::bad(format!("{} · {}{}", cell(&w).s, d[0], if d.len() > 1 { format!(" (+{} cuts)", d.len() - 1) } else { String::new() })),
+                    (None, Some(d)) => Cell::bad(format!(
+                        "{} · {}{}",
+                        cell(&w).s,
+                        d[0],
+                        if d.len() > 1 { format!(" (+{} cuts)", d.len() - 1) } else { String::new() }
+                    )),
                     (None, None) => cell(&w),
                 };
                 grid.entry(round).or_default().insert(p.clone(), txt);
                 rounds_json.push(json!({"mode": MODES[mode], "program": p, "worst": w.to_json(), "violations": violations.get(p), "state_diffs": sd}));
             }
         }
-        let mut rows = vec![std::iter::once(Cell::default()).chain(progs.iter().map(|p| Cell::from(p.as_str()))).collect::<Vec<_>>()];
+        let mut rows = vec![std::iter::once(Cell::default())
+            .chain(progs.iter().map(|p| Cell::from(p.as_str())))
+            .collect::<Vec<_>>()];
         for (round, cells) in &grid {
-            let name = if o.fuzz > MODES.len() { format!("{} #{}", MODES[round % MODES.len()], round / MODES.len()) } else { MODES[round % MODES.len()].to_string() };
-            rows.push(std::iter::once(Cell::from(name)).chain(progs.iter().map(|p| cells.get(p).cloned().unwrap_or_default())).collect());
+            let name = if o.fuzz > MODES.len() {
+                format!("{} #{}", MODES[round % MODES.len()], round / MODES.len())
+            } else {
+                MODES[round % MODES.len()].to_string()
+            };
+            rows.push(
+                std::iter::once(Cell::from(name))
+                    .chain(progs.iter().map(|p| cells.get(p).cloned().unwrap_or_default()))
+                    .collect(),
+            );
         }
         sec.table_h(rows);
         for (p, u) in &ints_kept {
-            sec.note(Cell::dim(format!("{p}: integer inputs kept as tapped: {}", u.iter().cloned().collect::<Vec<_>>().join(", "))));
+            sec.note(Cell::dim(format!(
+                "{p}: integer inputs kept as tapped: {}",
+                u.iter().cloned().collect::<Vec<_>>().join(", ")
+            )));
         }
         r.section(&sec);
         report["fuzz"] = json!({"ok": fuzz_ok, "value_identical": fuzz_identical, "bit_identical": fuzz_bit, "rounds": rounds_json,
@@ -1799,14 +2067,26 @@ fn execute(o: Opts) -> Result<i32> {
     // ---- 5. perf: eager step attribution, graph step, sweep, roofline
     if !o.no_perf {
         let sweep_iters = o.iters.min(10);
-        let mut sec = Section::new("PERF", &format!("eager per-call timing, min of {} (sweep: {sweep_iters}){}", o.iters, if o.no_graph_step { "" } else { " · graph step median of 100" }));
+        let mut sec = Section::new(
+            "PERF",
+            &format!(
+                "eager per-call timing, min of {} (sweep: {sweep_iters}){}",
+                o.iters,
+                if o.no_graph_step { "" } else { " · graph step median of 100" }
+            ),
+        );
         let mut rows = vec![row!["", "", "A", "B measured", "B derived", "Δ measured (B − A)"]];
         let mut per_kernel: BTreeMap<String, [(usize, f32, usize); 2]> = BTreeMap::new(); // kernel -> per side (bytes, ms, count)
         let mut state_traffic = false;
         let mut perf_json = serde_json::Map::new();
         // Time a whole program on both sides at `e`; returns (step, Σ cuts)
         // per side and feeds the roofline accumulator.
-        let mut step = |s: &mut Sides, pname: &str, e: &BTreeMap<String, u64>, iters: usize, roof: bool| -> Result<[(f32, f32); 2]> {
+        let mut step = |s: &mut Sides,
+                        pname: &str,
+                        e: &BTreeMap<String, u64>,
+                        iters: usize,
+                        roof: bool|
+         -> Result<[(f32, f32); 2]> {
             let ta = s.a.rt.time_range(pname, e, 0, s.a.rt.call_count(pname)?, iters)?;
             let tb = s.b.rt.time_range(pname, e, 0, s.b.rt.call_count(pname)?, iters)?;
             let mut out = [(ta.iter().sum::<f32>(), 0f32), (tb.iter().sum::<f32>(), 0f32)];
@@ -1833,17 +2113,39 @@ fn execute(o: Opts) -> Result<i32> {
         // derived = A's step with A's cuts swapped for B's cuts (both timed
         // eager); the gap to the measurement is launch-gap / L2 interaction.
         let derived = |a_step: f32, st: [(f32, f32); 2]| a_step - st[0].1 + st[1].1;
-        let push_step = |rows: &mut Vec<Vec<Cell>>, label: &str, n_cuts: usize, st: [(f32, f32); 2], graph: Option<(f32, f32)>| {
-            let d = derived(st[0].0, st);
-            rows.push(row![Cell::bold(label), "step, eager", us(st[0].0), us(st[1].0), Cell::bold(us(d)), delta(st[0].0, st[1].0),
-                Cell::dim(format!("measured − derived {:+.1} µs", (st[1].0 - d) * 1e3))]);
-            if let Some((ga, gb)) = graph {
-                let d = derived(ga, st);
-                rows.push(row!["", "step, graph (TPOT)", us(ga), us(gb), Cell::bold(us(d)), delta(ga, gb),
-                    Cell::dim(format!("{:.0} → {:.0} tok/s", 1e3 / ga, 1e3 / gb))]);
-            }
-            rows.push(row!["", format!("Σ {n_cuts} cuts (the swap)"), us(st[0].1), us(st[1].1), "", delta(st[0].1, st[1].1)]);
-        };
+        let push_step =
+            |rows: &mut Vec<Vec<Cell>>, label: &str, n_cuts: usize, st: [(f32, f32); 2], graph: Option<(f32, f32)>| {
+                let d = derived(st[0].0, st);
+                rows.push(row![
+                    Cell::bold(label),
+                    "step, eager",
+                    us(st[0].0),
+                    us(st[1].0),
+                    Cell::bold(us(d)),
+                    delta(st[0].0, st[1].0),
+                    Cell::dim(format!("measured − derived {:+.1} µs", (st[1].0 - d) * 1e3))
+                ]);
+                if let Some((ga, gb)) = graph {
+                    let d = derived(ga, st);
+                    rows.push(row![
+                        "",
+                        "step, graph (TPOT)",
+                        us(ga),
+                        us(gb),
+                        Cell::bold(us(d)),
+                        delta(ga, gb),
+                        Cell::dim(format!("{:.0} → {:.0} tok/s", 1e3 / ga, 1e3 / gb))
+                    ]);
+                }
+                rows.push(row![
+                    "",
+                    format!("Σ {n_cuts} cuts (the swap)"),
+                    us(st[0].1),
+                    us(st[1].1),
+                    "",
+                    delta(st[0].1, st[1].1)
+                ]);
+            };
         let n_cuts = |p: &str| cuts_of(p).len();
         // each decode-step program at the position after the workload
         for &p in &decode_progs {
@@ -1877,7 +2179,15 @@ fn execute(o: Opts) -> Result<i32> {
             let vocab = s.a.vocab();
             let mut rng = Rng(o.seed);
             let mut sweep = Vec::new();
-            let mut sw = vec![row!["step A, eager"], row!["step B, measured"], row![Cell::bold("step B, derived")], row!["Δ measured"], row![Cell::dim("Σ cuts A")], row![Cell::dim("Σ cuts B")], row![Cell::dim("Δ")]];
+            let mut sw = vec![
+                row!["step A, eager"],
+                row!["step B, measured"],
+                row![Cell::bold("step B, derived")],
+                row!["Δ measured"],
+                row![Cell::dim("Σ cuts A")],
+                row![Cell::dim("Σ cuts B")],
+                row![Cell::dim("Δ")],
+            ];
             for &t in &points {
                 let tid: Vec<i64> = (0..t).map(|_| rng.below(vocab) as i64).collect();
                 s.a.reset();
@@ -1921,7 +2231,12 @@ fn execute(o: Opts) -> Result<i32> {
             };
             let n = sides[0].2.max(sides[1].2);
             let per = sides.iter().find(|s| s.2 > 0).map_or(0, |s| s.0 / s.2);
-            rows.push(row![Cell::bold(format!("{k} ×{n}")), format!("{}{}", kb(per), if state_traffic { " + opaque state" } else { "" }), fmt(sides[0]), fmt(sides[1])]);
+            rows.push(row![
+                Cell::bold(format!("{k} ×{n}")),
+                format!("{}{}", kb(per), if state_traffic { " + opaque state" } else { "" }),
+                fmt(sides[0]),
+                fmt(sides[1])
+            ]);
             roof.push(json!({"op": k, "bytes_per_call": per, "a": {"ms": sides[0].1, "n": sides[0].2}, "b": {"ms": sides[1].1, "n": sides[1].2}}));
         }
         sec.table_h(rows);
@@ -1933,26 +2248,44 @@ fn execute(o: Opts) -> Result<i32> {
 
     // Is every local difference inside A's own noise band?
     let states_within = local_states.iter().all(|(p, sts)| {
-        sts.iter().all(|(st, res)| res.iter().all(|(_, c)| c.n_diff == 0 && c.outside == 0) || noisy_states.contains(&(p.clone(), st.clone())))
-    });
-    let within_noise = !local_identical && !noise_clean && states_within && local_res.iter().all(|(p, bufs)| {
-        bufs.iter().all(|(b, res)| {
-            let worst_local = res.iter().filter_map(|(_, c)| if c.value_identical() { None } else { c.max_ulp.or(Some(u64::MAX)) }).max();
-            let worst_noise = noise_res.get(p).and_then(|nb| nb.get(b)).and_then(|nr| nr.iter().filter_map(|(_, c)| if c.value_identical() { None } else { c.max_ulp.or(Some(u64::MAX)) }).max());
-            match (worst_local, worst_noise) {
-                (None, _) => true,
-                (Some(l), Some(n)) => l <= n,
-                (Some(_), None) => false,
-            }
+        sts.iter().all(|(st, res)| {
+            res.iter().all(|(_, c)| c.n_diff == 0 && c.outside == 0) || noisy_states.contains(&(p.clone(), st.clone()))
         })
     });
+    let within_noise = !local_identical
+        && !noise_clean
+        && states_within
+        && local_res.iter().all(|(p, bufs)| {
+            bufs.iter().all(|(b, res)| {
+                let worst_local = res
+                    .iter()
+                    .filter_map(|(_, c)| if c.value_identical() { None } else { c.max_ulp.or(Some(u64::MAX)) })
+                    .max();
+                let worst_noise = noise_res.get(p).and_then(|nb| nb.get(b)).and_then(|nr| {
+                    nr.iter()
+                        .filter_map(|(_, c)| if c.value_identical() { None } else { c.max_ulp.or(Some(u64::MAX)) })
+                        .max()
+                });
+                match (worst_local, worst_noise) {
+                    (None, _) => true,
+                    (Some(l), Some(n)) => l <= n,
+                    (Some(_), None) => false,
+                }
+            })
+        });
 
     // ---- verdict
     let n_rows = logit_rows.len();
     let (code, verdict) = if !fuzz_ok {
         (1, "B violates a declared domain (or crashed) under fuzz".to_string())
     } else if let (Some(f), true) = (wide_flip, noise_clean) {
-        (1, format!("B changes the argmax end-to-end at {}: A {} → B {} with A's margin {:.4} above the logit Δ {:.4}", f.label, f.argmax_a, f.argmax_b, f.margin_a, f.max_abs))
+        (
+            1,
+            format!(
+                "B changes the argmax end-to-end at {}: A {} → B {} with A's margin {:.4} above the logit Δ {:.4}",
+                f.label, f.argmax_a, f.argmax_b, f.margin_a, f.max_abs
+            ),
+        )
     } else if !undriven.is_empty() {
         (2, "a changed program was not tapped — the workload driver can't stage it".to_string())
     } else if local_bit && fuzz_bit {

@@ -80,12 +80,10 @@ pub(crate) fn load_pinned_modules(
         bail!(KernelArtifact, "no .cubin files in {}", kernels_dir.display());
     }
     let mut modules: Vec<LoadedModule> = Vec::new();
-    let local = cubins
-        .iter()
-        .map(|p| (p.file_name().unwrap().to_string_lossy().into_owned(), p.clone()));
+    let local = cubins.iter().map(|p| (p.file_name().unwrap().to_string_lossy().into_owned(), p.clone()));
     for (label, path) in local.chain(remote.iter().map(|(r, p)| (r.clone(), p.clone()))) {
-        let bytes = std::fs::read(&path)
-            .map_err(|e| Error::KernelArtifact(format!("reading {}: {e}", path.display())))?;
+        let bytes =
+            std::fs::read(&path).map_err(|e| Error::KernelArtifact(format!("reading {}: {e}", path.display())))?;
         let sha = format!("{:x}", sha2::Sha256::digest(&bytes));
         if !wanted.contains(&sha) {
             tracing::debug!("{label} ({}): not pinned by this manifest, not loaded", &sha[..12]);
@@ -123,18 +121,13 @@ fn fetch_registry_cubin(reg: &RegistryRef, sha256: &str) -> Result<PathBuf> {
         }
     }
 
-    let url = format!(
-        "https://huggingface.co/{}/{}/resolve/{}/{}",
-        reg.org, reg.repo, reg.revision, reg.path
-    );
+    let url = format!("https://huggingface.co/{}/{}/resolve/{}/{}", reg.org, reg.repo, reg.revision, reg.path);
     tracing::info!("fetching {url}");
     let mut req = ureq::get(&url);
     if let Ok(tok) = std::env::var("HF_TOKEN") {
         req = req.set("Authorization", &format!("Bearer {tok}"));
     }
-    let resp = req
-        .call()
-        .map_err(|e| Error::KernelArtifact(format!("fetching {url}: {e}")))?;
+    let resp = req.call().map_err(|e| Error::KernelArtifact(format!("fetching {url}: {e}")))?;
     let mut data = Vec::new();
     std::io::Read::read_to_end(&mut resp.into_reader(), &mut data)
         .map_err(|e| Error::KernelArtifact(format!("reading {url}: {e}")))?;
@@ -178,11 +171,7 @@ fn elf_section<'a>(bytes: &'a [u8], name: &str) -> Option<&'a [u8]> {
     let shstrndx = le16(bytes, 0x3e)? as usize;
     let sh = |i: usize| {
         let base = shoff.checked_add(i.checked_mul(shentsize)?)?;
-        Some((
-            le32(bytes, base)? as usize,
-            le64(bytes, base + 0x18)? as usize,
-            le64(bytes, base + 0x20)? as usize,
-        ))
+        Some((le32(bytes, base)? as usize, le64(bytes, base + 0x18)? as usize, le64(bytes, base + 0x20)? as usize))
     };
     let (_, stroff, strsz) = sh(shstrndx)?;
     let strtab = bytes.get(stroff..stroff.checked_add(strsz)?)?;
@@ -231,19 +220,17 @@ const EM_CUDA: u16 = 190;
 /// so each embedded fatbin container is loaded on its own and the usual
 /// entry + param-layout resolution picks the right function out.
 fn load_device_modules(path: &Path) -> Result<Vec<sys::CUmodule>> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| Error::KernelArtifact(format!("reading {}: {e}", path.display())))?;
+    let bytes = std::fs::read(path).map_err(|e| Error::KernelArtifact(format!("reading {}: {e}", path.display())))?;
     let host_elf = bytes.get(..4) == Some(b"\x7fELF".as_slice()) && le16(&bytes, 0x12) != Some(EM_CUDA);
     if !host_elf {
         let cpath = CString::new(path.to_str().unwrap())
             .map_err(|e| Error::KernelArtifact(format!("cubin path {}: {e}", path.display())))?;
-        let cmod = cu::module::load(cpath)
-            .map_err(|e| Error::KernelArtifact(format!("loading {}: {e:?}", path.display())))?;
+        let cmod =
+            cu::module::load(cpath).map_err(|e| Error::KernelArtifact(format!("loading {}: {e:?}", path.display())))?;
         return Ok(vec![cmod]);
     }
-    let sec = elf_section(&bytes, ".nv_fatbin").ok_or_else(|| {
-        Error::KernelArtifact(format!("{}: host ELF without a .nv_fatbin section", path.display()))
-    })?;
+    let sec = elf_section(&bytes, ".nv_fatbin")
+        .ok_or_else(|| Error::KernelArtifact(format!("{}: host ELF without a .nv_fatbin section", path.display())))?;
     let chunks = split_fatbins(sec);
     if chunks.is_empty() {
         bail!(KernelArtifact, "{}: .nv_fatbin holds no fatbin containers", path.display());
@@ -376,11 +363,7 @@ pub(crate) fn multicast_by_function(text: &str) -> BTreeMap<String, Vec<String>>
         let Some(rest) = t.strip_prefix("/*") else { continue };
         let Some(end) = rest.find("*/") else { continue };
         let body = rest[end + 2..].trim();
-        let opcode = body
-            .split_whitespace()
-            .find(|tok| !tok.starts_with('@'))
-            .unwrap_or("")
-            .trim_end_matches(';');
+        let opcode = body.split_whitespace().find(|tok| !tok.starts_with('@')).unwrap_or("").trim_end_matches(';');
         // Only memory-moving multicast wedges the GPU at a peer address:
         // TMA (UTMALDG/UTMASTG/UTMAREDG/UTMACCTL) and bulk copies
         // (UBLKCP/UBLKRED). A cluster barrier's multicast arrive

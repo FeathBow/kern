@@ -83,7 +83,8 @@ fn main() {
     let results = Arc::new(Mutex::new(vec![None; n]));
     let mut threads = Vec::new();
     for (rank, &gpu) in gpus.iter().enumerate() {
-        let (json, kernels, posted, gate, results) = (json.clone(), kernels.clone(), posted.clone(), gate.clone(), results.clone());
+        let (json, kernels, posted, gate, results) =
+            (json.clone(), kernels.clone(), posted.clone(), gate.clone(), results.clone());
         threads.push(std::thread::spawn(move || {
             let run = || -> kern_runtime::Result<(f64, f64, i32)> {
                 let topo = Topology::one("ep", rank as u64, n as u64);
@@ -130,11 +131,18 @@ fn main() {
     for (rank, r) in results.lock().unwrap().iter().enumerate() {
         match r {
             Some(Ok(_)) if drop == Some(rank) => println!("rank {rank}: dropped out, no barrier run"),
-            Some(Ok((eager, graph, 0))) => println!("rank {rank} gpu {}: eager {eager:.2} us/barrier (run+sync), captured burst {graph:.2} us/barrier", gpus[rank]),
+            Some(Ok((eager, graph, 0))) => println!(
+                "rank {rank} gpu {}: eager {eager:.2} us/barrier (run+sync), captured burst {graph:.2} us/barrier",
+                gpus[rank]
+            ),
             Some(Ok((_, _, err))) => {
                 let expected = drop.is_some_and(|d| (d == rank && *err == 0) || (d != rank && *err == d as i32 + 1));
                 ok &= expected;
-                println!("rank {rank}: barrier timed out waiting for rank {}{}", err - 1, if expected { " (as expected)" } else { "" });
+                println!(
+                    "rank {rank}: barrier timed out waiting for rank {}{}",
+                    err - 1,
+                    if expected { " (as expected)" } else { "" }
+                );
             }
             Some(Err(e)) => {
                 ok = false;

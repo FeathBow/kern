@@ -53,33 +53,17 @@ struct Golden {
 impl Golden {
     fn load(path: &Path) -> Golden {
         let j: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(path).expect("fixture"))
-                .expect("fixture json");
+            serde_json::from_str(&std::fs::read_to_string(path).expect("fixture")).expect("fixture json");
         let steps = j["steps"].as_array().expect("steps");
-        let ints = |v: &serde_json::Value| {
-            v.as_array()
-                .unwrap()
-                .iter()
-                .map(|x| x.as_i64().unwrap())
-                .collect::<Vec<_>>()
-        };
+        let ints =
+            |v: &serde_json::Value| v.as_array().unwrap().iter().map(|x| x.as_i64().unwrap()).collect::<Vec<_>>();
         Golden {
             feed: steps.iter().map(|s| s["feed"].as_i64().unwrap()).collect(),
-            argmax: steps
-                .iter()
-                .map(|s| s["argmax"].as_i64().unwrap())
-                .collect(),
+            argmax: steps.iter().map(|s| s["argmax"].as_i64().unwrap()).collect(),
             top5: steps.iter().map(|s| ints(&s["top5_ids"])).collect(),
             top5_logits: steps
                 .iter()
-                .map(|s| {
-                    s["top5_logits"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .map(|x| x.as_f64().unwrap() as f32)
-                        .collect()
-                })
+                .map(|s| s["top5_logits"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap() as f32).collect())
                 .collect(),
             num_layers: j["num_layers"].as_u64().expect("num_layers") as usize,
             noise_abs: None,
@@ -179,10 +163,7 @@ fn read_handles(r: &mut impl Read) -> std::io::Result<Vec<(u64, Handles)>> {
             r.read_exact(&mut name)?;
             let mut h = [0u8; PeerHandle::BYTES];
             r.read_exact(&mut h)?;
-            map.insert(
-                String::from_utf8(name).unwrap(),
-                PeerHandle::from_bytes(&h).unwrap(),
-            );
+            map.insert(String::from_utf8(name).unwrap(), PeerHandle::from_bytes(&h).unwrap());
         }
         out.push((rank, map));
     }
@@ -217,15 +198,10 @@ fn exchange(addr: &str, mine: &[(u64, Handles)], world: usize) -> anyhow::Result
             Err(_) => std::thread::sleep(std::time::Duration::from_millis(500)),
         }
     }
-    let mut s =
-        s.ok_or_else(|| anyhow::anyhow!("rendezvous {addr}: no listener after 5 minutes"))?;
+    let mut s = s.ok_or_else(|| anyhow::anyhow!("rendezvous {addr}: no listener after 5 minutes"))?;
     write_handles(&mut s, mine)?;
     let table = read_handles(&mut s)?;
-    anyhow::ensure!(
-        table.len() == world,
-        "rendezvous returned {} ranks, world is {world}",
-        table.len()
-    );
+    anyhow::ensure!(table.len() == world, "rendezvous returned {} ranks, world is {world}", table.len());
     for (i, (r, _)) in table.iter().enumerate() {
         anyhow::ensure!(*r == i as u64, "rendezvous table has rank {r} at index {i}");
     }
@@ -405,7 +381,13 @@ fn run_rank(
     // (`--distinct`: a different one per row); plain mode feeds the fixture
     // everywhere and only checks row agreement.
     let feeds: Vec<Vec<i64>> = (0..seqs)
-        .map(|r| if mixed && r > 0 { random_feed(steps, vocab, if distinct { seed + r as u64 } else { seed }) } else { golden.feed.clone() })
+        .map(|r| {
+            if mixed && r > 0 {
+                random_feed(steps, vocab, if distinct { seed + r as u64 } else { seed })
+            } else {
+                golden.feed.clone()
+            }
+        })
         .collect();
     let mut solo: Vec<Option<Vec<i64>>> = vec![None; seqs];
     if mixed && seqs > 1 {
@@ -494,11 +476,7 @@ fn main() {
     let golden = Arc::new(golden);
     let n = gpus.len();
     let world = world.unwrap_or(n);
-    assert!(
-        rank_base + n <= world,
-        "ranks {rank_base}..{} exceed world {world}",
-        rank_base + n
-    );
+    assert!(rank_base + n <= world, "ranks {rank_base}..{} exceed world {world}", rank_base + n);
     let kernels = std::env::temp_dir().join(format!("kern-k3-golden-{}", std::process::id()));
     stage_cubins(&cubins, &kernels);
     println!(
@@ -508,19 +486,18 @@ fn main() {
         rank_base + n,
         golden.feed.len(),
         if graph { "graph replay" } else { "eager" },
-        if seqs > 1 { format!(", {seqs} rows/rank{}", if mixed { " (row 0 fixture, rest random)" } else { "" }) } else { String::new() }
+        if seqs > 1 {
+            format!(", {seqs} rows/rank{}", if mixed { " (row 0 fixture, rest random)" } else { "" })
+        } else {
+            String::new()
+        }
     );
     if world > n {
-        let addr = rendezvous_addr
-            .clone()
-            .expect("--rendezvous is required when the world spans processes");
+        let addr = rendezvous_addr.clone().expect("--rendezvous is required when the world spans processes");
         if rank_base == 0 {
             let port = addr.rsplit(':').next().unwrap().to_string();
-            let listener =
-                TcpListener::bind(format!("0.0.0.0:{port}")).expect("bind rendezvous port");
-            std::thread::spawn(move || {
-                serve_rendezvous(listener, world).expect("rendezvous server")
-            });
+            let listener = TcpListener::bind(format!("0.0.0.0:{port}")).expect("bind rendezvous port");
+            std::thread::spawn(move || serve_rendezvous(listener, world).expect("rendezvous server"));
         }
     }
 
@@ -613,9 +590,7 @@ fn main() {
                 match &first {
                     None => first = Some(o.tokens.clone()),
                     Some(t) if *t != o.tokens => {
-                        println!(
-                            "  rank {rank} disagrees with rank {rank_base} on the sampled tokens"
-                        );
+                        println!("  rank {rank} disagrees with rank {rank_base} on the sampled tokens");
                         ok = false;
                     }
                     _ => {}
