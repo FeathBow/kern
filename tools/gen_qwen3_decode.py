@@ -957,6 +957,10 @@ def build(by, eps, scale, pf, pins, spec=False, silu="mined"):
     return normalize({
         "schema_version": 3,
         "model": "qwen3-4b-dspark" if spec else "qwen3-4b",
+        # DSpark's caller contract: draft rows = [anchor] + [mask] * 6
+        # (block7), verify = anchor + 7 drafts; the mask id is the draft
+        # config's mask_token_id
+        **({"spec": {"block": 7, "mask_token": 151669}} if spec else {}),
         # prefill 按 chunk 调用（tokens ≤ CHUNK_MAX，seqs=1），decode 恒
         # tokens=seqs=1，decode_batch 以 tokens=seqs=b 调用；
         # spec 附加契约：draft 以 tokens=7、verify 以 tokens=8、

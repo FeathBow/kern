@@ -114,13 +114,13 @@ impl Manifest {
     }
 }
 
-/// Speculative-decoding contract: `draft` and `verify` run over `block` rows — the anchor token followed by `block - 1` mask tokens (draft) or drafted tokens (verify).
+/// Speculative-decoding caller contract: `draft` runs over `block` rows per sequence — the anchor token followed by `block - 1` mask tokens; `verify` runs over the anchor and every drafted token. The runtime assigns no meaning to it.
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Spec {
-    /// Rows per draft/verify call, e.g. `8`.
+    /// Rows per `draft` call, e.g. `8`.
     pub block: u64,
-    /// Token id filling the undrafted rows, e.g. `248070`.
+    /// Token id filling the undrafted rows of `draft`, e.g. `248070`.
     pub mask_token: i64,
 }
 

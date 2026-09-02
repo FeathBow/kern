@@ -26,8 +26,8 @@
 //!   the scheduler leases for them and nobody reads;
 //! - greedy only: the manifest's `argmax` is the sampler. Non-greedy
 //!   sampling params are logged once and served greedily;
-//! - `--spec` (a manifest with `draft` / `verify` / `draft_precompute` /
-//!   `decode_spec`): every step is one speculative round over the batch —
+//! - `--spec` (a manifest with a `spec` block and `draft` / `verify` /
+//!   `draft_precompute` / `decode_spec`): every step is one speculative round over the batch —
 //!   `draft` proposes `n` tokens per sequence, `verify` runs the target
 //!   over `[anchor, drafts]` per sequence, `draft_precompute` projects the
 //!   target's taps into the draft's context KV for every row (rejected
@@ -108,9 +108,6 @@ impl LineTable {
     }
 }
 
-/// DSpark's mask token when the manifest declares no `spec` block.
-const DSPARK_MASK_TOKEN: i64 = 151669;
-
 /// The manifest's speculative contract, one row-group per sequence.
 struct SpecPlan {
     /// Tokens `draft` proposes per sequence (`draft_tokens` is `[seqs, n]`).
@@ -119,6 +116,7 @@ struct SpecPlan {
     draft_rows: usize,
     /// Rows per sequence in `verify`: `[anchor, drafts...]` = n + 1.
     verify_rows: usize,
+    /// Fills the undrafted rows of `draft`.
     mask_token: i64,
     /// The target resumes a recurrent state from `num_accepted_tokens`
     /// (one per sequence) and commits the accepted rows with `advance`.
@@ -162,10 +160,10 @@ impl SpecPlan {
             (false, true) => bail!("program `advance` without a `num_accepted_tokens` input"),
             (false, false) => {}
         }
-        let (draft_rows, mask_token) = match &m.spec {
-            Some(s) => (s.block as usize, s.mask_token),
-            None => (n_drafts, DSPARK_MASK_TOKEN),
+        let Some(spec) = &m.spec else {
+            bail!("the manifest has no `spec` block (draft rows per sequence and the mask token)");
         };
+        let (draft_rows, mask_token) = (spec.block as usize, spec.mask_token);
         if fused && draft_rows != verify_rows {
             bail!("`round` needs draft and verify rows per sequence to coincide, got {draft_rows} and {verify_rows}");
         }
@@ -1114,13 +1112,6 @@ mod tests {
         assert_eq!(s.counters.num_spec_tokens, 3);
         // Four rows per sequence per round fit twice in 8 tokens.
         assert_eq!((c.max_seqs(1), c.max_seqs(4)), (1, 2));
-        // Without a `spec` block the draft rows are the drafts and the
-        // mask is DSpark's.
-        let mut m = speculative();
-        m.spec = None;
-        let c = check(&m, true).unwrap();
-        let s = c.spec.as_ref().unwrap();
-        assert_eq!((s.draft_rows, s.mask_token), (3, DSPARK_MASK_TOKEN));
         // A plain manifest has no `decode_batch` to miss under --spec.
         let mut m = speculative();
         m.programs.remove("decode_batch");
@@ -1129,6 +1120,10 @@ mod tests {
 
     #[test]
     fn speculative_rejections() {
+        // The draft rows and the mask token come from the manifest, nowhere else.
+        let mut m = speculative();
+        m.spec = None;
+        rejects(&m, true, "no `spec` block");
         let mut m = speculative();
         m.programs.remove("verify");
         rejects(&m, true, "--spec: the manifest's speculative contract: manifest has no program `verify`");

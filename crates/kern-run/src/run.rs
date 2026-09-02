@@ -21,11 +21,6 @@ use kern_manifest::types::{Dim, Manifest};
 use kern_runtime::Runtime;
 use tracing::info;
 
-// DSpark draft fill token for the 6 non-anchor query slots (draft config).
-const MASK_TOKEN: i64 = 151669;
-// DSpark block size: 7 draft queries per round, verified as anchor + 7.
-const DRAFT_TOKENS: usize = 7;
-
 /// Flags of `kern run`; anything not given comes from the target in
 /// kern.toml, then from the defaults.
 #[derive(Args, Debug, Clone)]
@@ -517,16 +512,15 @@ fn probe(caller: &mut Caller, prompt_ids: &[i64], dir: &std::path::Path, chunk: 
 /// overwritten by the next round (paged KV: the caller's lease, addressed
 /// by position).
 ///
-/// Two manifest contracts, told apart by `meta.spec`:
-/// - DSpark (no `meta.spec`): draft rows = [anchor, mask x6] (7), verify
-///   rows = 8; the last prompt token goes through `decode_spec`.
-/// - `meta.spec = {block, mask_token}` (DFlash2): draft and verify both run
-///   over `block` rows ([anchor, mask x block-1] / [anchor, drafts]); the
-///   manifest's prefill emits the first token, so `decode_spec` is only
-///   needed when it doesn't. If the manifest takes a `num_accepted_tokens`
-///   input (the target's recurrent state resumes from the checkpoint of the
-///   last accepted row), it is 1 + the drafts accepted in the previous
-///   round.
+/// The manifest's `spec` block is the caller contract: `draft` runs over
+/// `block` rows per round ([anchor, mask x block-1], `mask_token` filling
+/// the undrafted rows), `verify` over the anchor and every drafted token
+/// (`draft_tokens`' row width + 1). DSpark's block is its draft count (7
+/// rows, 8 to verify); DFlash2's is one more (8 and 8). The last prompt
+/// token goes through `decode_spec` unless the manifest's prefill emits the
+/// first token. If the manifest takes a `num_accepted_tokens` input (the
+/// target's recurrent state resumes from the checkpoint of the last
+/// accepted row), it is 1 + the drafts accepted in the previous round.
 fn spec_decode(caller: &mut Caller, o: &Opts, prompt_ids: &[i64], mut generated: Vec<i64>) -> Result<Vec<i64>> {
     let rt = &mut caller.rt;
     for p in ["verify", "draft", "draft_precompute"] {
@@ -539,10 +533,10 @@ fn spec_decode(caller: &mut Caller, o: &Opts, prompt_ids: &[i64], mut generated:
         s => bail!("unexpected draft_tokens shape {s:?}"),
     };
     let verify_n = n_drafts + 1;
-    let (draft_rows, mask_token) = match &rt.manifest.spec {
-        Some(s) => (s.block as usize, s.mask_token),
-        None => (DRAFT_TOKENS, MASK_TOKEN),
+    let Some(spec) = &rt.manifest.spec else {
+        bail!("--spec needs the manifest's `spec` block (draft rows and the mask token); this one has none");
     };
+    let (draft_rows, mask_token) = (spec.block as usize, spec.mask_token);
     ensure!(draft_rows == n_drafts || draft_rows == verify_n, "draft rows {draft_rows} vs {n_drafts} drafts");
     let has_nacc = rt.manifest.buffers.contains_key("num_accepted_tokens");
     // The recurrent state is committed by an `advance` pass after the

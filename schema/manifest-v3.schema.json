@@ -757,16 +757,16 @@
     },
     "Spec": {
       "additionalProperties": false,
-      "description": "Speculative-decoding contract: `draft` and `verify` run over `block` rows — the anchor token followed by `block - 1` mask tokens (draft) or drafted tokens (verify).",
+      "description": "Speculative-decoding caller contract: `draft` runs over `block` rows per sequence — the anchor token followed by `block - 1` mask tokens; `verify` runs over the anchor and every drafted token. The runtime assigns no meaning to it.",
       "properties": {
         "block": {
-          "description": "Rows per draft/verify call, e.g. `8`.",
+          "description": "Rows per `draft` call, e.g. `8`.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
         },
         "mask_token": {
-          "description": "Token id filling the undrafted rows, e.g. `248070`.",
+          "description": "Token id filling the undrafted rows of `draft`, e.g. `248070`.",
           "format": "int64",
           "type": "integer"
         }

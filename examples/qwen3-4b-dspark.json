@@ -1,6 +1,10 @@
 {
  "schema_version": 3,
  "model": "qwen3-4b-dspark",
+ "spec": {
+  "block": 7,
+  "mask_token": 151669
+ },
  "vars": {
   "tokens": {
    "max": 2048
