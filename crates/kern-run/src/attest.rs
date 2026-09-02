@@ -743,7 +743,7 @@ fn restore_state(c: &mut Caller, runs: &BTreeMap<String, Vec<(usize, Vec<u8>)>>,
 }
 
 fn load_side(json: &str, o: &Opts, blobs: &[&[u8]]) -> Result<Caller> {
-    let mut rt = Runtime::load(json, &o.kernels, o.gpu, Some(o.capacity))?;
+    let mut rt = Runtime::load(json, &o.kernels, o.gpu, Some(o.capacity), None)?;
     rt.load_weights(blobs)?;
     Caller::new(rt)
 }

@@ -166,7 +166,7 @@ fn execute(o: Opts) -> Result<()> {
     // One sequence: its reach, unless told otherwise (a manifest without
     // paged state takes the runtime's fit).
     let capacity = o.capacity.or_else(|| kern_runtime::seq_capacity(&Manifest::from_json(&manifest_json).ok()?));
-    let mut rt = Runtime::load(&manifest_json, &o.kernels, o.gpu, capacity)?;
+    let mut rt = Runtime::load(&manifest_json, &o.kernels, o.gpu, capacity, None)?;
     let load_t = t0.elapsed();
 
     let m = &rt.manifest;

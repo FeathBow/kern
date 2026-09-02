@@ -17,6 +17,12 @@
 //! ABIs across modules; resolution picks the instance whose
 //! `cuFuncGetParamInfo` layout matches the manifest's declared params — the
 //! phase-2 ABI check doubles as instance selection.
+//!
+//! A manifest with a `topology` is SPMD: every rank loads it with its own
+//! [`Topology`] (index per group). States and `export` buffers are
+//! virtual-memory allocations with fabric handles; [`Runtime::export_handles`]
+//! hands them out, [`Runtime::import_peers`] maps the other ranks' and fills
+//! the `peer` address arrays. Nothing runs until every peer array is filled.
 
 mod compile;
 mod cubin;
@@ -34,10 +40,37 @@ use cudarc::driver::{result as cu, sys, CudaContext, CudaStream, PinnedHostSlice
 use kern_manifest::types::{BufferKind, Manifest, State};
 
 use compile::{CompiledProgram, Launch, LaunchKind, RVal, Slot};
-use device::{alloc, gemm_bf16_tn, DeviceBuf};
+use device::{alloc, alloc_vmm, gemm_bf16_tn, DeviceBuf, Share};
 use error::{bail, cuda_check};
+pub use device::PeerHandle;
 pub use error::{Error, Result};
 pub use pages::{Denied, Lease};
+
+/// This rank's place in every group the manifest's `topology` declares.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Topology {
+    pub groups: BTreeMap<String, GroupRank>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GroupRank {
+    pub index: u64,
+    pub size: u64,
+}
+
+impl Topology {
+    /// A single group, e.g. `Topology::one("ep", 2, 4)`.
+    pub fn one(group: &str, index: u64, size: u64) -> Topology {
+        Topology { groups: BTreeMap::from([(group.to_string(), GroupRank { index, size })]) }
+    }
+}
+
+/// A `peer` buffer waiting for (or holding) its group's addresses.
+struct PeerSlot {
+    of: String,
+    group: String,
+    filled: bool,
+}
 
 pub struct Runtime {
     pub manifest: Manifest,
@@ -73,6 +106,15 @@ pub struct Runtime {
     /// graph per var assignment it was captured at (a batched decode keeps
     /// one per batch bucket).
     graphs: BTreeMap<(String, Vec<u64>), sys::CUgraphExec>,
+    /// CUDA device ordinal, for the virtual-memory calls.
+    gpu: usize,
+    /// This rank's index per group (empty without a topology).
+    ranks: BTreeMap<String, u64>,
+    /// Every `peer` buffer, by name.
+    peers: BTreeMap<String, PeerSlot>,
+    /// Peer mappings kept alive as long as the addresses in `peers`.
+    #[allow(dead_code)]
+    imports: Vec<DeviceBuf>,
 }
 
 impl Drop for Runtime {
@@ -127,14 +169,37 @@ impl Runtime {
     /// `None` fits the states to the device: whatever memory is free once
     /// everything else is allocated, less [`HEADROOM`], but never more
     /// than every sequence the manifest can run at once could reference.
+    /// A manifest with a `topology` needs this rank's [`Topology`]: one
+    /// entry per declared group, sizes matching; without one the argument
+    /// is ignored.
     pub fn load(
         manifest_json: &str,
         kernels_dir: &std::path::Path,
         gpu: usize,
         state_capacity_tokens: Option<u64>,
+        topology: Option<&Topology>,
     ) -> Result<Runtime> {
         let manifest = Manifest::from_json(manifest_json)?;
         kern_manifest::verify(&manifest)?;
+        let mut ranks = BTreeMap::new();
+        if let Some(t) = &manifest.topology {
+            let Some(mine) = topology else {
+                bail!(Api, "the manifest declares a topology ({}); load needs this rank's place in it", fmt_groups(t));
+            };
+            for (g, &size) in &t.groups {
+                let Some(r) = mine.groups.get(g) else {
+                    bail!(Api, "topology group `{g}`: no rank given");
+                };
+                if r.size != size {
+                    bail!(Api, "topology group `{g}`: manifest declares {size} members, rank given for {}", r.size);
+                }
+                if r.index >= size {
+                    bail!(Api, "topology group `{g}`: rank {} outside 0..{size}", r.index);
+                }
+                ranks.insert(g.clone(), r.index);
+            }
+        }
+        let dev = gpu as i32;
 
         let ctx = CudaContext::new(gpu)?;
         // A created (non-legacy) stream: the NULL stream cannot be captured
@@ -160,7 +225,11 @@ impl Runtime {
             manifest.vars.iter().map(|(s, v)| (s.clone(), v.max)).collect();
 
         // Buffer sizes are static: shapes only reference vars, sized at max.
+        // Exported buffers come from the virtual-memory API with a fabric
+        // handle; a peer array is an ordinary local buffer the runtime
+        // fills; everything else is pool memory.
         let mut buffers = BTreeMap::new();
+        let mut peers = BTreeMap::new();
         for (name, b) in &manifest.buffers {
             let bytes = compile::shaped_bytes(
                 &format!("buffer `{name}`"),
@@ -168,7 +237,19 @@ impl Runtime {
                 b.dtype.bytes(),
                 &max_env,
             )?;
-            buffers.insert(name.clone(), alloc(&stream, bytes)?);
+            let buf = if b.export {
+                alloc_vmm(&stream, dev, bytes, Share::Required, &format!("buffer `{name}`"))?
+            } else {
+                alloc(&stream, bytes)?
+            };
+            if b.kind == BufferKind::Peer {
+                // The verifier guarantees `of` and `group` are set.
+                peers.insert(
+                    name.clone(),
+                    PeerSlot { of: b.of.clone().unwrap_or_default(), group: b.group.clone().unwrap_or_default(), filled: false },
+                );
+            }
+            buffers.insert(name.clone(), buf);
         }
         let mut staging = BTreeMap::new();
         for (name, b) in &manifest.buffers {
@@ -204,14 +285,25 @@ impl Runtime {
             None => fit_capacity(&manifest, &ctx, page)?,
         };
 
+        // States are always virtual-memory allocations, with a fabric
+        // handle when the device has one: a peer array may be `of` a state.
         let mut states = BTreeMap::new();
         for (name, s) in &manifest.states {
             let bytes = state_bytes(s, state_capacity_tokens, manifest.seq_slots())
                 .ok_or_else(|| Error::Manifest(format!("state `{name}`: size overflow")))?;
-            states.insert(name.clone(), alloc(&stream, bytes)?);
+            states.insert(name.clone(), alloc_vmm(&stream, dev, bytes, Share::IfSupported, &format!("state `{name}`"))?);
+        }
+        for p in peers.values() {
+            if let Some(st) = states.get(&p.of) {
+                if !st.is_shareable() {
+                    bail!(Cuda, "state `{}` has no fabric handle on device {dev}, but a peer buffer is `of` it", p.of);
+                }
+            }
         }
         let resolution = resolved.iter().map(|(n, rk)| (n.clone(), rk.launch_modules())).collect();
-        let programs = compile::compile_programs(&manifest, &resolved, &buffers, &states)?;
+        let peer_names: BTreeSet<String> = peers.keys().cloned().collect();
+        let rank_env = compile::RankEnv { ranks: &ranks, peer_buffers: &peer_names };
+        let programs = compile::compile_programs(&manifest, &resolved, &buffers, &states, &rank_env)?;
         let scratch = resolved.into_values().flat_map(|rk| rk.scratch.into_values()).collect();
 
         let pool = Arc::new(pages::Pool::new(&manifest, state_capacity_tokens, page)?);
@@ -230,11 +322,114 @@ impl Runtime {
             resolution,
             n_modules: modules.len(),
             graphs: BTreeMap::new(),
+            gpu,
+            ranks,
+            peers,
+            imports: Vec::new(),
         })
     }
 
     pub fn module_count(&self) -> usize {
         self.n_modules
+    }
+
+    // ---- peers: what this rank exports, what it maps from the others.
+
+    /// This rank's index in a topology group.
+    pub fn rank(&self, group: &str) -> Option<u64> {
+        self.ranks.get(group).copied()
+    }
+
+    /// Fabric handles for every `export` buffer and every state that has
+    /// one, by name: what the other ranks pass to [`Runtime::import_peers`].
+    pub fn export_handles(&self) -> Result<BTreeMap<String, PeerHandle>> {
+        let mut out = BTreeMap::new();
+        for (name, b) in &self.buffers {
+            if self.manifest.buffers[name].export {
+                let h = b.export()?.ok_or_else(|| Error::Cuda(format!("buffer `{name}`: exported without a fabric handle")))?;
+                out.insert(name.clone(), h);
+            }
+        }
+        for (name, s) in &self.states {
+            if let Some(h) = s.export()? {
+                out.insert(name.clone(), h);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The `peer` buffers not yet filled, by name.
+    pub fn pending_peers(&self) -> Vec<&str> {
+        self.peers.iter().filter(|(_, p)| !p.filled).map(|(n, _)| n.as_str()).collect()
+    }
+
+    /// Map every group member's exported allocations and fill the group's
+    /// `peer` buffers with their addresses. `members[i]` is what rank `i`'s
+    /// [`Runtime::export_handles`] returned (this rank's own entry may be
+    /// anything: its local addresses are used). Synchronous.
+    pub fn import_peers(&mut self, group: &str, members: &[BTreeMap<String, PeerHandle>]) -> Result<()> {
+        let Some(&me) = self.ranks.get(group) else {
+            bail!(Api, "no topology group `{group}`");
+        };
+        let size = self.manifest.group_size(group).unwrap_or(0);
+        if members.len() as u64 != size {
+            bail!(Api, "group `{group}` has {size} members, got handles for {}", members.len());
+        }
+        let stream = self.stream.clone();
+        let mut mapped: BTreeMap<(usize, String), u64> = BTreeMap::new();
+        let names: Vec<String> = self.peers.iter().filter(|(_, p)| p.group == group).map(|(n, _)| n.clone()).collect();
+        for name in names {
+            let of = self.peers[&name].of.clone();
+            let own = self.buffers.get(&of).or_else(|| self.states.get(&of)).ok_or_else(|| {
+                Error::Manifest(format!("peer buffer `{name}`: `of` `{of}` is neither a buffer nor a state"))
+            })?;
+            let own_bytes = own.export()?.map(|h| h.bytes).unwrap_or(own.bytes);
+            let own_ptr = own.ptr;
+            let mut addrs = Vec::with_capacity(size as usize);
+            for (i, m) in members.iter().enumerate() {
+                if i as u64 == me {
+                    addrs.push(own_ptr);
+                    continue;
+                }
+                let key = (i, of.clone());
+                let ptr = match mapped.get(&key) {
+                    Some(&p) => p,
+                    None => {
+                        let Some(h) = m.get(&of) else {
+                            bail!(Api, "group `{group}` rank {i}: no handle for `{of}`");
+                        };
+                        if h.bytes != own_bytes {
+                            bail!(Api, "group `{group}` rank {i}: `{of}` is {} bytes there, {own_bytes} here", h.bytes);
+                        }
+                        let buf = device::import(&stream, self.gpu as i32, h, &format!("group `{group}` rank {i} `{of}`"))?;
+                        let p = buf.ptr;
+                        self.imports.push(buf);
+                        mapped.insert(key, p);
+                        p
+                    }
+                };
+                addrs.push(ptr);
+            }
+            let bytes: Vec<u8> = addrs.iter().flat_map(|a| a.to_le_bytes()).collect();
+            let dst = self.buffers.get_mut(&name).unwrap();
+            if bytes.len() as u64 != dst.bytes {
+                bail!(Manifest, "peer buffer `{name}`: {} bytes for {size} addresses, allocated {}", bytes.len(), dst.bytes);
+            }
+            stream.memcpy_htod(&bytes, dst)?;
+            self.peers.get_mut(&name).unwrap().filled = true;
+            tracing::info!("peer buffer `{name}`: {size} addresses of `{of}` over group `{group}`");
+        }
+        stream.synchronize()?;
+        Ok(())
+    }
+
+    /// Nothing launches with a peer array still holding zeros.
+    fn require_peers(&self) -> Result<()> {
+        let pending = self.pending_peers();
+        if pending.is_empty() {
+            return Ok(());
+        }
+        bail!(Api, "peer buffers not imported yet: {}", pending.join(", "))
     }
 
     /// (name, class, allocated bytes) for every buffer.
@@ -288,7 +483,7 @@ impl Runtime {
                     dst.bytes
                 );
             }
-            self.stream.memcpy_htod(t.data(), &mut dst.slice)?;
+            self.stream.memcpy_htod(t.data(), dst)?;
         }
         self.stream.synchronize()?;
         Ok(())
@@ -350,7 +545,7 @@ impl Runtime {
         // (variable-length inputs) still DMAs the whole buffer — the stale
         // tail is never read, grids are bounded by the vars.
         pinned.as_mut_slice()?[..data.len()].copy_from_slice(data);
-        self.stream.memcpy_htod(pinned, &mut dst.slice)?;
+        self.stream.memcpy_htod(pinned, dst)?;
         Ok(())
     }
 
@@ -361,7 +556,7 @@ impl Runtime {
         if b.kind != BufferKind::Output {
             bail!(Api, "buffer `{name}` is {}, not output", b.kind);
         }
-        Ok(self.stream.clone_dtoh(&self.buffers[name].slice)?)
+        Ok(self.stream.clone_dtoh(&self.buffers[name])?)
     }
 
     // ---- token slots: the states are addressed only through leases.
@@ -377,7 +572,7 @@ impl Runtime {
         for (name, st) in &self.manifest.states {
             let Some(range) = lease.seq_bytes(st.bytes_per_seq).filter(|_| st.is_per_seq()) else { continue };
             let s = self.states.get_mut(name).unwrap();
-            let mut view = s.slice.slice_mut(range);
+            let mut view = s.view(range)?;
             self.stream.memset_zeros(&mut view)?;
         }
         Ok(lease)
@@ -440,7 +635,7 @@ impl Runtime {
         let Some(b) = self.buffers.get(name) else {
             bail!(Api, "no buffer `{name}`");
         };
-        Ok(self.stream.clone_dtoh(&b.slice)?)
+        Ok(self.stream.clone_dtoh(b)?)
     }
 
     /// The first `bytes` of any buffer (the live prefix at a var value
@@ -452,7 +647,7 @@ impl Runtime {
         if bytes as u64 > b.bytes {
             bail!(Api, "buffer `{name}`: prefix {bytes} exceeds allocation {}", b.bytes);
         }
-        let view = b.slice.slice(0..bytes);
+        let view = b.view(0..bytes)?;
         Ok(self.stream.clone_dtoh(&view)?)
     }
 
@@ -464,7 +659,7 @@ impl Runtime {
         if data.len() as u64 > b.bytes {
             bail!(Api, "buffer `{name}`: got {} bytes, buffer is {}", data.len(), b.bytes);
         }
-        let mut view = b.slice.slice_mut(0..data.len());
+        let mut view = b.view(0..data.len())?;
         self.stream.memcpy_htod(data, &mut view)?;
         self.stream.synchronize()?;
         Ok(())
@@ -481,7 +676,7 @@ impl Runtime {
         if end as u64 > s.bytes {
             bail!(Api, "state `{name}`: write [{offset}, {end}) exceeds allocation {}", s.bytes);
         }
-        let mut view = s.slice.slice_mut(offset..end);
+        let mut view = s.view(offset..end)?;
         self.stream.memcpy_htod(data, &mut view)?;
         self.stream.synchronize()?;
         Ok(())
@@ -491,7 +686,7 @@ impl Runtime {
     /// the way the runtime was loaded.
     pub fn zero_states(&mut self) -> Result<()> {
         for s in self.states.values_mut() {
-            self.stream.memset_zeros(&mut s.slice)?;
+            self.stream.memset_zeros(s)?;
         }
         self.stream.synchronize()?;
         Ok(())
@@ -502,7 +697,7 @@ impl Runtime {
         let Some(s) = self.states.get(name) else {
             bail!(Api, "no state `{name}`");
         };
-        Ok(self.stream.clone_dtoh(&s.slice)?)
+        Ok(self.stream.clone_dtoh(s)?)
     }
 
     /// Execute calls `[lo, hi)` of a program eagerly, then synchronize.
@@ -520,6 +715,7 @@ impl Runtime {
         if lo > hi || hi > n {
             bail!(Api, "program `{program}`: call range [{lo}, {hi}) outside 0..{n}");
         }
+        self.require_peers()?;
         let env = self.dense_env(env)?;
         self.ctx.bind_to_thread()?;
         if lo < hi {
@@ -565,6 +761,7 @@ impl Runtime {
         if lo > hi || hi > prog.call_ranges.len() {
             bail!(Api, "program `{program}`: call range [{lo}, {hi}) outside 0..{}", prog.call_ranges.len());
         }
+        self.require_peers()?;
         let env = self.dense_env(env)?;
         self.ctx.bind_to_thread()?;
         let n = hi - lo;
@@ -649,6 +846,7 @@ impl Runtime {
         let Some(prog) = self.programs.get(program) else {
             bail!(Api, "no program `{program}`");
         };
+        self.require_peers()?;
         let env = self.dense_env(env)?;
         self.ctx.bind_to_thread()?;
         self.replay(prog, &env)?;
@@ -665,6 +863,7 @@ impl Runtime {
         let Some(prog) = self.programs.get(program) else {
             bail!(Api, "no program `{program}`");
         };
+        self.require_peers()?;
         let env = self.dense_env(env)?;
         self.ctx.bind_to_thread()?;
         cuda_check(
@@ -790,6 +989,10 @@ impl Runtime {
             }
         }
     }
+}
+
+fn fmt_groups(t: &kern_manifest::types::Topology) -> String {
+    t.groups.iter().map(|(g, n)| format!("{g}={n}")).collect::<Vec<_>>().join(", ")
 }
 
 fn gcd(a: u64, b: u64) -> u64 {

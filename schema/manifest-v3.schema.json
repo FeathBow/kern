@@ -125,9 +125,22 @@
             "u8"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "This rank's index in the named topology group, a load-time constant, e.g. `{\"rank\": \"ep\"}`.",
+          "properties": {
+            "rank": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "rank"
+          ],
+          "type": "object"
         }
       ],
-      "description": "A call argument, e.g. `{\"buf\": \"hidden\"}`, `{\"state\": \"kv\", \"offset\": 65536}`, `{\"var\": \"tokens\"}`, `{\"i32\": 2560}`."
+      "description": "A call argument, e.g. `{\"buf\": \"hidden\"}`, `{\"state\": \"kv\", \"offset\": 65536}`, `{\"var\": \"tokens\"}`, `{\"i32\": 2560}`, `{\"rank\": \"ep\"}`."
     },
     "Bound": {
       "anyOf": [
@@ -164,9 +177,27 @@
           "$ref": "#/$defs/DType",
           "description": "Element type, e.g. `\"bf16\"`."
         },
+        "export": {
+          "description": "Allocate through the driver's virtual-memory API with a fabric-shareable handle so other ranks can map it; the address of every rank's copy lands in the `peer` buffers `of` it. e.g. `true`.",
+          "type": "boolean"
+        },
+        "group": {
+          "description": "`peer` buffers only: the topology group the addresses are indexed by, e.g. `\"ep\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "kind": {
           "$ref": "#/$defs/BufferKind",
           "description": "Who provides the buffer and how long its contents live."
+        },
+        "of": {
+          "description": "`peer` buffers only: the exported buffer or state whose per-rank base addresses this buffer holds, e.g. `\"flags\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "shape": {
           "description": "Extents, constants or var names, e.g. `[\"tokens\", 2560]`.",
@@ -210,6 +241,11 @@
           "const": "carry",
           "description": "Written by one program and read by another, kept between runs, e.g. the `fc_out` hidden states a draft reads.",
           "type": "string"
+        },
+        {
+          "const": "peer",
+          "description": "`u64[group size]` of device addresses: every group member's copy of the buffer or state named by `of` (`export`ed), this rank's own included. Filled by the runtime once the peers' handles are imported, read-only to ops.",
+          "type": "string"
         }
       ]
     },
@@ -252,6 +288,7 @@
         "i32",
         "u32",
         "i64",
+        "u64",
         "u8"
       ],
       "type": "string"
@@ -606,9 +643,22 @@
             "u8"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "This rank's index in the named topology group, a load-time constant.",
+          "properties": {
+            "rank": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "rank"
+          ],
+          "type": "object"
         }
       ],
-      "description": "A launch argument: a forwarded op param, a scratch buffer, or a literal, e.g. `{\"param\": 0}`, `{\"scratch\": \"pmax\"}`, `{\"i32\": 64}`."
+      "description": "A launch argument: a forwarded op param, a scratch buffer, a literal, or this rank's index in a group, e.g. `{\"param\": 0}`, `{\"scratch\": \"pmax\"}`, `{\"i32\": 64}`, `{\"rank\": \"ep\"}`."
     },
     "Module": {
       "additionalProperties": false,
@@ -653,7 +703,7 @@
     },
     "ParamType": {
       "description": "One parameter: a scalar (`\"i32\"`, `\"i64\"`, `\"f32\"`, `\"u8\"`) or a directional pointer (`\"in buffer<bf16>\"`, `\"out buffer<f32>\"`, `\"inout state\"`).",
-      "pattern": "^(i32|i64|f32|u8|(in|out|inout) (state|buffer<(bf16|f16|f32|fp8e4m3|i32|u32|i64|u8)>))$",
+      "pattern": "^(i32|i64|f32|u8|(in|out|inout) (state|buffer<(bf16|f16|f32|fp8e4m3|i32|u32|i64|u64|u8)>))$",
       "type": "string"
     },
     "Scratch": {
@@ -702,7 +752,7 @@
     },
     "State": {
       "additionalProperties": false,
-      "description": "Opaque persistent memory; the runtime provisions the bytes and hands the base pointer to `inout state` params. Exactly one of the three sizes is non-zero.",
+      "description": "Opaque persistent memory; the runtime provisions the bytes and hands the base pointer to `inout state` params. Exactly one of the three sizes is non-zero. States are always allocated through the driver's virtual-memory API with a fabric-shareable handle when the device has one, so a `peer` buffer may be `of` a state.",
       "properties": {
         "bytes": {
           "description": "Fixed byte count independent of capacity and sequences, e.g. `4096`.",
@@ -723,6 +773,25 @@
           "type": "integer"
         }
       },
+      "type": "object"
+    },
+    "Topology": {
+      "additionalProperties": false,
+      "description": "Rank groups, e.g. `{\"groups\": {\"ep\": 4}}`. Sizes are fixed in the manifest; the loading rank's index in each group is a load-time constant that `{\"rank\": \"<group>\"}` args receive and `peer` buffers are ordered by.",
+      "properties": {
+        "groups": {
+          "additionalProperties": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": "Group name to member count, e.g. `{\"ep\": 4}`.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "groups"
+      ],
       "type": "object"
     },
     "Var": {
@@ -805,6 +874,17 @@
       },
       "description": "Opaque persistent memory the runtime provisions by size, e.g. a paged KV cache.",
       "type": "object"
+    },
+    "topology": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Topology"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Rank groups a multi-GPU manifest is SPMD over, e.g. `{\"groups\": {\"ep\": 4}}`; every rank loads the same manifest."
     },
     "vars": {
       "additionalProperties": {

@@ -22,9 +22,15 @@
 //!        interface `out` param written by some launch
 //!   7. calls: op refs resolve, arg/param arity and per-position type match
 //!      against the interface, var ranges fit scalar params
-//!   8. dataflow per program: no read-before-write, no writes to input or
-//!      weight buffers, every output / carry buffer written by some program
+//!   8. dataflow per program: no read-before-write, no writes to input,
+//!      weight or peer buffers, every output / carry buffer written by some
+//!      program
 //!   9. no unused declarations
+//!  10. topology: group sizes > 0, every group used; a `peer` buffer is
+//!      `u64[group size]` `of` an exported buffer or a state; `export`,
+//!      `of` and `group` only where they mean something; `{"rank": g}`
+//!      binds only to i32/i64 params; an op with an extern launch never
+//!      receives a peer buffer (runtime built-ins may not touch peer memory)
 //!
 //! What this deliberately cannot check: kernel *behavior*, and the
 //! *semantics* of interface params (that a replacement implementation
@@ -123,6 +129,7 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
     let mut used_states: BTreeSet<String> = BTreeSet::new();
     let mut used_modules: BTreeSet<String> = BTreeSet::new();
     let mut used_ops: BTreeSet<String> = BTreeSet::new();
+    let mut used_groups: BTreeSet<String> = BTreeSet::new();
 
     // 1. format
     if m.schema_version != SCHEMA_VERSION {
@@ -140,6 +147,30 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
     }
     let env_max: BTreeMap<String, u64> = m.vars.iter().map(|(k, v)| (k.clone(), v.max)).collect();
     let env_min: BTreeMap<String, u64> = m.vars.keys().map(|k| (k.clone(), Var::MIN)).collect();
+
+    // 10a. topology
+    if let Some(t) = &m.topology {
+        for (name, size) in &t.groups {
+            if *size == 0 {
+                errs.push(format!("topology group `{name}`: size must be > 0"));
+            }
+        }
+    }
+    let group_ctx = |g: &str, errs: &mut Vec<String>, used_groups: &mut BTreeSet<String>, ctx: &str| -> Option<u64> {
+        match m.group_size(g) {
+            Some(sz) => {
+                used_groups.insert(g.to_string());
+                Some(sz)
+            }
+            None => {
+                errs.push(match &m.topology {
+                    Some(_) => format!("{ctx}: unknown topology group `{g}`"),
+                    None => format!("{ctx}: group `{g}` but the manifest declares no topology"),
+                });
+                None
+            }
+        }
+    };
 
     // 3. states
     for (name, st) in &m.states {
@@ -166,6 +197,58 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
         }
         if let Some(d) = &b.domain {
             check_domain(name, b, d, m, &env_max, &env_min, &mut used_vars, &mut errs);
+        }
+        // 10b. export / peer
+        let ctx = format!("buffer `{name}`");
+        if b.kind == BufferKind::Peer {
+            if b.export {
+                errs.push(format!("{ctx}: a peer buffer cannot itself be exported"));
+            }
+            if b.dtype != DType::U64 {
+                errs.push(format!("{ctx}: a peer buffer holds device addresses, dtype must be u64, not {}", b.dtype));
+            }
+            if b.domain.is_some() {
+                errs.push(format!("{ctx}: a peer buffer's contents are runtime-filled addresses; it takes no domain"));
+            }
+            match &b.of {
+                None => errs.push(format!("{ctx}: a peer buffer must name the exported buffer or state it holds addresses `of`")),
+                Some(of) if of == name => errs.push(format!("{ctx}: a peer buffer cannot be `of` itself")),
+                Some(of) => match (m.buffers.get(of), m.states.get(of)) {
+                    (Some(_), Some(_)) => errs.push(format!("{ctx}: `of` `{of}` is both a buffer and a state")),
+                    (Some(target), None) => {
+                        used_buffers.insert(of.clone());
+                        if target.kind == BufferKind::Peer {
+                            errs.push(format!("{ctx}: `of` `{of}` is itself a peer buffer"));
+                        } else if !target.export {
+                            errs.push(format!("{ctx}: `of` buffer `{of}` is not exported"));
+                        }
+                    }
+                    (None, Some(_)) => {
+                        used_states.insert(of.clone());
+                    }
+                    (None, None) => errs.push(format!("{ctx}: `of` unknown buffer/state `{of}`")),
+                },
+            }
+            match &b.group {
+                None => errs.push(format!("{ctx}: a peer buffer must name the topology `group` its addresses are indexed by")),
+                Some(g) => {
+                    if let Some(sz) = group_ctx(g, &mut errs, &mut used_groups, &ctx) {
+                        match b.shape.as_slice() {
+                            [Dim::Const(n)] if *n == sz => {}
+                            _ => errs.push(format!(
+                                "{ctx}: a peer buffer over group `{g}` has shape [{sz}], one address per member"
+                            )),
+                        }
+                    }
+                }
+            }
+        } else {
+            if b.of.is_some() {
+                errs.push(format!("{ctx}: `of` only applies to peer buffers"));
+            }
+            if b.group.is_some() {
+                errs.push(format!("{ctx}: `group` only applies to peer buffers"));
+            }
         }
     }
 
@@ -359,6 +442,12 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
                     LaunchArg::I64 { .. } if matches!(param, ParamType::Scalar(ScalarType::I64)) => {}
                     LaunchArg::F32 { .. } if matches!(param, ParamType::Scalar(ScalarType::F32)) => {}
                     LaunchArg::U8 { .. } if matches!(param, ParamType::Scalar(ScalarType::U8)) => {}
+                    LaunchArg::Rank { rank } => {
+                        if !matches!(param, ParamType::Scalar(ScalarType::I32 | ScalarType::I64)) {
+                            errs.push(format!("{actx}: a rank binds only to an i32 or i64 param, not `{param}`"));
+                        }
+                        group_ctx(rank, &mut errs, &mut used_groups, &actx);
+                    }
                     arg => {
                         errs.push(format!("{actx}: {arg} does not match launch param `{param}`"));
                     }
@@ -391,7 +480,9 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
             // Carry buffers hold another program's output; whether that
             // program ran first is the caller's sequencing contract, so
             // per-program dataflow treats them as initially written.
-            matches!(b.kind, BufferKind::Input | BufferKind::Weight | BufferKind::Carry)
+            // Peer buffers are filled by the runtime when the group's
+            // handles are imported, before any program runs.
+            matches!(b.kind, BufferKind::Input | BufferKind::Weight | BufferKind::Carry | BufferKind::Peer)
         })
         .map(|(n, _)| n.clone())
         .collect();
@@ -409,6 +500,7 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
                 continue;
             };
             used_ops.insert(c.op.clone());
+            let has_extern = op.imp.launches.iter().any(|l| l.is_extern());
 
             if c.args.len() != op.params.len() {
                 errs.push(format!(
@@ -453,8 +545,14 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
                         if matches!(dir, Dir::In | Dir::InOut) && !written.contains(buf) {
                             errs.push(format!("{actx}: buffer `{buf}` is read before ever being written"));
                         }
+                        if b.kind == BufferKind::Peer && has_extern {
+                            errs.push(format!(
+                                "{actx}: peer buffer `{buf}` passed to op `{}`, which has an extern launch; runtime built-ins never receive peer memory",
+                                c.op
+                            ));
+                        }
                         if matches!(dir, Dir::Out | Dir::InOut) {
-                            if matches!(b.kind, BufferKind::Input | BufferKind::Weight) {
+                            if matches!(b.kind, BufferKind::Input | BufferKind::Weight | BufferKind::Peer) {
                                 errs.push(format!(
                                     "{actx}: op writes to read-only {} buffer `{buf}`",
                                     b.kind
@@ -505,6 +603,9 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
                     | (Arg::I64 { .. }, ParamType::Scalar(ScalarType::I64))
                     | (Arg::F32 { .. }, ParamType::Scalar(ScalarType::F32))
                     | (Arg::U8 { .. }, ParamType::Scalar(ScalarType::U8)) => {}
+                    (Arg::Rank { rank }, ParamType::Scalar(ScalarType::I32 | ScalarType::I64)) => {
+                        group_ctx(rank, &mut errs, &mut used_groups, &actx);
+                    }
                     (arg, param) => {
                         errs.push(format!("{actx}: {arg} does not match param `{param}`"));
                     }
@@ -545,6 +646,13 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
     for name in m.vars.keys() {
         if !used_vars.contains(name) {
             errs.push(format!("var `{name}` is never used"));
+        }
+    }
+    if let Some(t) = &m.topology {
+        for name in t.groups.keys() {
+            if !used_groups.contains(name) {
+                errs.push(format!("topology group `{name}` is never used (no peer buffer or rank arg names it)"));
+            }
         }
     }
 
@@ -1152,6 +1260,137 @@ mod tests {
         v["states"]["kv"] = serde_json::json!({ "bytes": 4096, "align": 256 });
         let errs = check(v).expect_err("align is gone");
         assert!(errs[0].contains("unknown field"), "{errs:?}");
+    }
+
+    // --- topology / export / peer / rank ---
+
+    /// The base fixture plus an `ep` group of 4, an exported flag buffer,
+    /// its peer address array and a barrier op taking both plus the rank.
+    fn peer_base() -> serde_json::Value {
+        let mut v = base();
+        v["topology"] = serde_json::json!({ "groups": { "ep": 4 } });
+        v["buffers"]["flags"] = serde_json::json!({ "dtype": "u32", "shape": [64], "kind": "carry", "export": true });
+        v["buffers"]["flags_peers"] = serde_json::json!({ "dtype": "u64", "shape": [4], "kind": "peer", "of": "flags", "group": "ep" });
+        v["ops"]["barrier"] = serde_json::json!({
+            "params": ["inout buffer<u32>", "in buffer<u64>", "i32", "i32"],
+            "impl": { "launches": [
+                { "module": "toy", "entry": "barrier_k", "block": [32, 1, 1], "grid": [1, 1, 1],
+                  "args": [{ "param": 0 }, { "param": 1 }, { "param": 2 }, { "rank": "ep" }] }
+            ] }
+        });
+        v["programs"]["decode"].as_array_mut().unwrap().push(serde_json::json!({
+            "op": "barrier",
+            "args": [{ "buf": "flags" }, { "buf": "flags_peers" }, { "rank": "ep" }, { "i32": 0 }]
+        }));
+        v
+    }
+
+    #[test]
+    fn peer_manifest_verifies() {
+        check(peer_base()).unwrap();
+        // a peer array of a state
+        let mut v = peer_base();
+        v["buffers"]["flags_peers"]["of"] = "kv".into();
+        check(v).unwrap();
+        // rank into an i64 param
+        let mut v = peer_base();
+        v["ops"]["barrier"]["params"][2] = "i64".into();
+        check(v).unwrap();
+    }
+
+    #[test]
+    fn peer_shape_and_dtype() {
+        let mut v = peer_base();
+        v["buffers"]["flags_peers"]["shape"] = serde_json::json!([8]);
+        assert_err(v, "has shape [4], one address per member");
+        let mut v = peer_base();
+        v["buffers"]["flags_peers"]["shape"] = serde_json::json!([4, 1]);
+        assert_err(v, "has shape [4], one address per member");
+        let mut v = peer_base();
+        v["buffers"]["flags_peers"]["dtype"] = "i64".into();
+        v["ops"]["barrier"]["params"][1] = "in buffer<i64>".into();
+        assert_err(v, "dtype must be u64");
+    }
+
+    #[test]
+    fn peer_of_must_be_exported() {
+        let mut v = peer_base();
+        v["buffers"]["flags"]["export"] = false.into();
+        assert_err(v, "`of` buffer `flags` is not exported");
+        let mut v = peer_base();
+        v["buffers"]["flags_peers"]["of"] = "ghost".into();
+        assert_err(v, "`of` unknown buffer/state `ghost`");
+        let mut v = peer_base();
+        v["buffers"]["flags_peers"]["of"] = "flags_peers".into();
+        assert_err(v, "cannot be `of` itself");
+        let mut v = peer_base();
+        v["buffers"]["flags_peers"].as_object_mut().unwrap().remove("of");
+        assert_err(v, "must name the exported buffer or state");
+    }
+
+    #[test]
+    fn peer_group_rules() {
+        let mut v = peer_base();
+        v["buffers"]["flags_peers"]["group"] = "tp".into();
+        assert_err(v, "unknown topology group `tp`");
+        let mut v = peer_base();
+        v.as_object_mut().unwrap().remove("topology");
+        assert_err(v, "declares no topology");
+        let mut v = peer_base();
+        v["topology"]["groups"]["cp"] = 2.into();
+        assert_err(v, "topology group `cp` is never used");
+        let mut v = peer_base();
+        v["topology"]["groups"]["ep"] = 0.into();
+        assert_err(v, "size must be > 0");
+        let mut v = peer_base();
+        v["buffers"]["flags"]["group"] = "ep".into();
+        assert_err(v, "`group` only applies to peer buffers");
+        let mut v = peer_base();
+        v["buffers"]["flags"]["of"] = "flags".into();
+        assert_err(v, "`of` only applies to peer buffers");
+        let mut v = peer_base();
+        v["buffers"]["flags_peers"]["export"] = true.into();
+        assert_err(v, "cannot itself be exported");
+    }
+
+    #[test]
+    fn peer_is_read_only_and_never_extern() {
+        let mut v = peer_base();
+        v["ops"]["barrier"]["params"][1] = "inout buffer<u64>".into();
+        assert_err(v, "writes to read-only peer buffer `flags_peers`");
+        // a peer buffer reaching an op with an extern launch
+        let mut v = peer_base();
+        v["ops"]["barrier"]["impl"]["launches"].as_array_mut().unwrap()
+            .push(serde_json::json!({ "entry": "extern:cublaslt_bf16_tn", "params": [], "args": [] }));
+        assert_err(v, "runtime built-ins never receive peer memory");
+    }
+
+    #[test]
+    fn rank_binds_integers_only() {
+        let mut v = peer_base();
+        v["ops"]["barrier"]["params"][2] = "f32".into();
+        v["ops"]["barrier"]["impl"]["launches"][0]["args"][2] = serde_json::json!({ "f32": 0.0 });
+        assert_err(v, "rank in group `ep` does not match param `f32`");
+        let mut v = peer_base();
+        v["ops"]["barrier"]["params"][3] = "u8".into();
+        v["programs"]["decode"][2]["args"][3] = serde_json::json!({ "u8": 0 });
+        assert_err(v, "a rank binds only to an i32 or i64 param, not `u8`");
+        let mut v = peer_base();
+        v["ops"]["barrier"]["impl"]["launches"][0]["args"][3] = serde_json::json!({ "rank": "nope" });
+        assert_err(v, "unknown topology group `nope`");
+    }
+
+    #[test]
+    fn exported_buffer_without_peer_array_verifies() {
+        // export alone is legal (a rank may hand its handle to something
+        // outside the manifest); the group must still be used somewhere.
+        let mut v = peer_base();
+        v["buffers"].as_object_mut().unwrap().remove("flags_peers");
+        v["ops"]["barrier"]["params"] = serde_json::json!(["inout buffer<u32>", "i32", "i32"]);
+        v["ops"]["barrier"]["impl"]["launches"][0]["args"] =
+            serde_json::json!([{ "param": 0 }, { "param": 1 }, { "rank": "ep" }]);
+        v["programs"]["decode"][2]["args"] = serde_json::json!([{ "buf": "flags" }, { "rank": "ep" }, { "i32": 0 }]);
+        check(v).unwrap();
     }
 
     // --- domains ---

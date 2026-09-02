@@ -5,15 +5,15 @@
 //! are either finished values or var-indexed expressions — no name lookups,
 //! no wiring, and no panics left for the hot path.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use cudarc::driver::{result as cu, sys, CudaStream};
 use kern_manifest::types::{Arg, Call, Dim, Expr, LaunchArg, Manifest, Op, ParamType};
 
-use crate::cubin::{param_sizes, LoadedModule};
+use crate::cubin::{param_sizes, LoadedModule, MulticastScan};
 use crate::device::{alloc, DeviceBuf};
 use crate::error::{bail, cuda_check, Error, Result};
 
@@ -89,7 +89,7 @@ pub(crate) struct CompiledProgram {
 
 /// One launch of an op implementation, resolved against the loaded modules.
 enum LaunchImpl {
-    Cubin { func: sys::CUfunction, module: String },
+    Cubin { func: sys::CUfunction, module: String, path: PathBuf, entry: String },
     GemmBf16Tn { beta: f32 },
 }
 
@@ -194,7 +194,12 @@ pub(crate) fn resolve_ops(
                 };
                 let got = param_sizes(func)?;
                 if got == want {
-                    resolved = Some(LaunchImpl::Cubin { func, module: format!("{}@{}", m.label, &m.sha[..8]) });
+                    resolved = Some(LaunchImpl::Cubin {
+                        func,
+                        module: format!("{}@{}", m.label, &m.sha[..8]),
+                        path: m.path.clone(),
+                        entry: k.entry.clone(),
+                    });
                     break;
                 }
                 seen.push(format!("{}@{}: {got:?}", m.label, &m.sha[..8]));
@@ -244,15 +249,25 @@ pub(crate) fn resolve_ops(
     Ok(ops)
 }
 
-/// Lower every program's call list into a flat launch list.
+/// What a call binds that a plain single-GPU manifest has none of: this
+/// rank's index per group, and which buffers hold peer addresses.
+pub(crate) struct RankEnv<'a> {
+    pub(crate) ranks: &'a BTreeMap<String, u64>,
+    pub(crate) peer_buffers: &'a BTreeSet<String>,
+}
+
+/// Lower every program's call list into a flat launch list. Every launch
+/// that receives a peer buffer is SASS-scanned for multicast TMA first.
 pub(crate) fn compile_programs(
     manifest: &Manifest,
     ops: &BTreeMap<String, ResolvedOp>,
     buffers: &BTreeMap<String, DeviceBuf>,
     states: &BTreeMap<String, DeviceBuf>,
+    rank_env: &RankEnv,
 ) -> Result<BTreeMap<String, CompiledProgram>> {
     let vars: BTreeMap<&str, usize> =
         manifest.vars.keys().enumerate().map(|(i, s)| (s.as_str(), i)).collect();
+    let mut scan = MulticastScan::new();
     let mut programs = BTreeMap::new();
     for (pname, calls) in &manifest.programs {
         let mut launches = Vec::new();
@@ -263,7 +278,7 @@ pub(crate) fn compile_programs(
                 bail!(Manifest, "program `{pname}` {cctx}: unknown op");
             };
             let lo = launches.len();
-            compile_call(c, op, rop, &cctx, buffers, states, &vars, &mut launches).map_err(|e| {
+            compile_call(c, op, rop, &cctx, buffers, states, &vars, rank_env, &mut scan, &mut launches).map_err(|e| {
                 Error::Call { context: format!("program `{pname}` {cctx}"), source: Box::new(e) }
             })?;
             call_ranges.push((lo, launches.len()));
@@ -290,26 +305,35 @@ fn compile_call(
     buffers: &BTreeMap<String, DeviceBuf>,
     states: &BTreeMap<String, DeviceBuf>,
     vars: &BTreeMap<&str, usize>,
+    rank_env: &RankEnv,
+    scan: &mut MulticastScan,
     launches: &mut Vec<Launch>,
 ) -> Result<()> {
     if c.args.len() != op.params.len() {
         bail!(Manifest, "op takes {} args, call passes {}", op.params.len(), c.args.len());
     }
     // Lower the interface args once; each launch then wires its own params
-    // from these, its scratch, and its private literals.
+    // from these, its scratch, and its private literals. `peer` marks the
+    // args a kernel can derive a peer address from.
     let mut vals = Vec::with_capacity(c.args.len());
+    let mut peer = Vec::with_capacity(c.args.len());
     for (arg, pty) in c.args.iter().zip(&op.params) {
         vals.push(match pty {
             ParamType::Buf { .. } | ParamType::State { .. } => {
                 Slot::Const(pointer_arg(arg, buffers, states)?)
             }
-            ParamType::Scalar(_) => scalar_arg(arg, vars)?,
+            ParamType::Scalar(_) => scalar_arg(arg, vars, rank_env.ranks)?,
         });
+        peer.push(matches!(arg, Arg::Buf { buf, .. } if rank_env.peer_buffers.contains(buf)));
     }
     for (li, (l, imp)) in op.imp.launches.iter().zip(&rop.launches).enumerate() {
         let wiring = l.args_of(op);
         let mut slots = Vec::with_capacity(wiring.len());
+        let mut touches_peer = false;
         for la in wiring.iter() {
+            if let LaunchArg::Param { param } = la {
+                touches_peer |= peer.get(*param).copied().unwrap_or(false);
+            }
             slots.push(match la {
                 LaunchArg::Param { param } => vals.get(*param).cloned().ok_or_else(|| {
                     Error::Manifest(format!("launch #{li}: forwarded param #{param} out of range"))
@@ -324,19 +348,35 @@ fn compile_call(
                 LaunchArg::I64 { i64: v } => lit(*v as u64),
                 LaunchArg::U8 { u8: v } => lit(*v as u64),
                 LaunchArg::F32 { f32: v } => lit(v.to_bits() as u64),
+                LaunchArg::Rank { rank } => lit(rank_index(rank_env.ranks, rank)?),
             });
         }
         let kind = match imp {
             LaunchImpl::GemmBf16Tn { beta } => {
+                if touches_peer {
+                    bail!(Manifest, "launch #{li}: a peer buffer reaches the extern gemm; runtime built-ins never receive peer memory");
+                }
                 if slots.len() != 6 && slots.len() != 7 {
                     bail!(Manifest, "launch #{li}: extern gemm takes 6 args (a, w, c, m, n, k) or 7 (+ ldc), got {}", slots.len());
                 }
                 LaunchKind::Gemm { beta: *beta }
             }
-            LaunchImpl::Cubin { func, .. } => {
+            LaunchImpl::Cubin { func, path, entry, .. } => {
                 let Some(k) = l.kernel() else {
                     bail!(Manifest, "launch #{li}: a cubin resolved for an extern launch");
                 };
+                if touches_peer {
+                    let bad = scan.offending(path, entry)?;
+                    if !bad.is_empty() {
+                        bail!(
+                            KernelArtifact,
+                            "launch #{li}: `{entry}` in {} receives a peer buffer but issues multicast TMA, \
+                             which wedges the GPU at a peer address: {}",
+                            path.display(),
+                            bad.join(" | ")
+                        );
+                    }
+                }
                 LaunchKind::Cubin {
                     func: *func,
                     block: k.block,
@@ -378,9 +418,9 @@ fn offset_into(b: &DeviceBuf, offset: u64, what: impl Fn() -> String) -> Result<
     Ok(RVal { val: b.ptr + offset, bytes })
 }
 
-/// Lower a scalar arg: literals finish now, vars and expressions become
-/// dense-indexed expressions.
-fn scalar_arg(arg: &Arg, vars: &BTreeMap<&str, usize>) -> Result<Slot> {
+/// Lower a scalar arg: literals and ranks finish now, vars and expressions
+/// become dense-indexed expressions.
+fn scalar_arg(arg: &Arg, vars: &BTreeMap<&str, usize>, ranks: &BTreeMap<String, u64>) -> Result<Slot> {
     Ok(match arg {
         Arg::Var { var } => Slot::Expr(CExpr::Var(var_index(vars, var)?)),
         Arg::Expr { expr } => Slot::Expr(compile_expr(expr, vars)?),
@@ -388,8 +428,16 @@ fn scalar_arg(arg: &Arg, vars: &BTreeMap<&str, usize>) -> Result<Slot> {
         Arg::I64 { i64: v } => lit(*v as u64),
         Arg::U8 { u8: v } => lit(*v as u64),
         Arg::F32 { f32: v } => lit(v.to_bits() as u64),
+        Arg::Rank { rank } => lit(rank_index(ranks, rank)?),
         Arg::Buf { .. } | Arg::State { .. } => bail!(Manifest, "expected scalar arg, got {arg}"),
     })
+}
+
+fn rank_index(ranks: &BTreeMap<String, u64>, group: &str) -> Result<u64> {
+    match ranks.get(group) {
+        Some(&i) => Ok(i),
+        None => bail!(Manifest, "no rank for topology group `{group}`"),
+    }
 }
 
 fn lit(val: u64) -> Slot {

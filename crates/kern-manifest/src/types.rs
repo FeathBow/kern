@@ -12,7 +12,8 @@
 //! modules.<name>             an artifact the launches pin {"source": "argmax.cubin", "sha256": "..."}
 //! vars.<name>                a per-call scalar the caller supplies, bounded
 //! states.<name>              opaque persistent memory, sized by the runtime
-//! buffers.<name>             typed tensors: input / output / weight / workspace / carry
+//! buffers.<name>             typed tensors: input / output / weight / workspace / carry / peer
+//! topology.groups.<name>     a rank group and its size; the manifest is SPMD over it
 //! ```
 
 use serde::de::{Error as DeError, MapAccess, Visitor};
@@ -67,6 +68,9 @@ pub struct Manifest {
     /// Speculative-decoding caller contract; absent for plain prefill/decode manifests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec: Option<Spec>,
+    /// Rank groups a multi-GPU manifest is SPMD over, e.g. `{"groups": {"ep": 4}}`; every rank loads the same manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topology: Option<Topology>,
     /// Per-call scalars the caller supplies, e.g. `{"tokens": {"max": 2048}}`.
     #[serde(default, deserialize_with = "unique_map", skip_serializing_if = "BTreeMap::is_empty")]
     pub vars: BTreeMap<String, Var>,
@@ -96,6 +100,11 @@ impl Manifest {
         self.vars.get("seqs").map_or(1, |v| v.max.max(1)) + 2
     }
 
+    /// Size of a declared topology group, if any.
+    pub fn group_size(&self, group: &str) -> Option<u64> {
+        self.topology.as_ref()?.groups.get(group).copied()
+    }
+
     pub fn from_json(s: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(s)
     }
@@ -115,6 +124,15 @@ pub struct Spec {
     pub mask_token: i64,
 }
 
+/// Rank groups, e.g. `{"groups": {"ep": 4}}`. Sizes are fixed in the manifest; the loading rank's index in each group is a load-time constant that `{"rank": "<group>"}` args receive and `peer` buffers are ordered by.
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Topology {
+    /// Group name to member count, e.g. `{"ep": 4}`.
+    #[serde(deserialize_with = "unique_map")]
+    pub groups: BTreeMap<String, u64>,
+}
+
 /// A per-call scalar the caller supplies, bounded `1..=max`; the only kind of number that may size a shape or a grid.
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -128,7 +146,7 @@ impl Var {
     pub const MIN: u64 = 1;
 }
 
-/// Opaque persistent memory; the runtime provisions the bytes and hands the base pointer to `inout state` params. Exactly one of the three sizes is non-zero.
+/// Opaque persistent memory; the runtime provisions the bytes and hands the base pointer to `inout state` params. Exactly one of the three sizes is non-zero. States are always allocated through the driver's virtual-memory API with a fabric-shareable handle when the device has one, so a `peer` buffer may be `of` a state.
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct State {
@@ -167,6 +185,15 @@ pub struct Buffer {
     /// Optional prior on the contents; the runtime rejects out-of-domain input writes and `kern test` synthesizes values from it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain: Option<Domain>,
+    /// Allocate through the driver's virtual-memory API with a fabric-shareable handle so other ranks can map it; the address of every rank's copy lands in the `peer` buffers `of` it. e.g. `true`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub export: bool,
+    /// `peer` buffers only: the exported buffer or state whose per-rank base addresses this buffer holds, e.g. `"flags"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub of: Option<String>,
+    /// `peer` buffers only: the topology group the addresses are indexed by, e.g. `"ep"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 /// A prior on a buffer's contents: bounds (`{"min": 0, "max": "tokens"}`) or an index into a buffer/state (`{"index_into": "kv", "stride": 16}`).
@@ -312,6 +339,8 @@ pub enum BufferKind {
     Workspace,
     /// Written by one program and read by another, kept between runs, e.g. the `fc_out` hidden states a draft reads.
     Carry,
+    /// `u64[group size]` of device addresses: every group member's copy of the buffer or state named by `of` (`export`ed), this rank's own included. Filled by the runtime once the peers' handles are imported, read-only to ops.
+    Peer,
 }
 
 impl fmt::Display for BufferKind {
@@ -322,11 +351,12 @@ impl fmt::Display for BufferKind {
             BufferKind::Weight => "weight",
             BufferKind::Workspace => "workspace",
             BufferKind::Carry => "carry",
+            BufferKind::Peer => "peer",
         })
     }
 }
 
-/// Element type: `bf16`, `f16`, `f32`, `fp8e4m3`, `i32`, `u32`, `i64`, `u8`.
+/// Element type: `bf16`, `f16`, `f32`, `fp8e4m3`, `i32`, `u32`, `i64`, `u64`, `u8`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DType {
     Bf16,
@@ -336,6 +366,7 @@ pub enum DType {
     I32,
     U32,
     I64,
+    U64,
     U8,
 }
 
@@ -344,7 +375,7 @@ impl DType {
         match self {
             DType::Bf16 | DType::F16 => 2,
             DType::F32 | DType::I32 | DType::U32 => 4,
-            DType::I64 => 8,
+            DType::I64 | DType::U64 => 8,
             DType::Fp8E4m3 | DType::U8 => 1,
         }
     }
@@ -358,6 +389,7 @@ impl DType {
             DType::I32 => "i32",
             DType::U32 => "u32",
             DType::I64 => "i64",
+            DType::U64 => "u64",
             DType::U8 => "u8",
         }
     }
@@ -375,6 +407,7 @@ impl FromStr for DType {
             "i32" => DType::I32,
             "u32" => DType::U32,
             "i64" => DType::I64,
+            "u64" => DType::U64,
             "u8" => DType::U8,
             _ => return Err(format!("unknown dtype `{s}`")),
         })
@@ -396,7 +429,7 @@ impl schemars::JsonSchema for DType {
         schemars::json_schema!({
             "description": "Element type of a buffer or scratch, e.g. `\"bf16\"`.",
             "type": "string",
-            "enum": ["bf16", "f16", "f32", "fp8e4m3", "i32", "u32", "i64", "u8"],
+            "enum": ["bf16", "f16", "f32", "fp8e4m3", "i32", "u32", "i64", "u64", "u8"],
         })
     }
 }
@@ -538,7 +571,7 @@ impl schemars::JsonSchema for ParamType {
                 or a directional pointer (`\"in buffer<bf16>\"`, `\"out buffer<f32>\"`, \
                 `\"inout state\"`).",
             "type": "string",
-            "pattern": "^(i32|i64|f32|u8|(in|out|inout) (state|buffer<(bf16|f16|f32|fp8e4m3|i32|u32|i64|u8)>))$",
+            "pattern": "^(i32|i64|f32|u8|(in|out|inout) (state|buffer<(bf16|f16|f32|fp8e4m3|i32|u32|i64|u64|u8)>))$",
         })
     }
 }
@@ -695,7 +728,7 @@ impl Launch {
     }
 }
 
-/// A launch argument: a forwarded op param, a scratch buffer, or a literal, e.g. `{"param": 0}`, `{"scratch": "pmax"}`, `{"i32": 64}`.
+/// A launch argument: a forwarded op param, a scratch buffer, a literal, or this rank's index in a group, e.g. `{"param": 0}`, `{"scratch": "pmax"}`, `{"i32": 64}`, `{"rank": "ep"}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum LaunchArg {
@@ -711,6 +744,8 @@ pub enum LaunchArg {
     F32 { f32: f32 },
     /// A literal `u8`.
     U8 { u8: u8 },
+    /// This rank's index in the named topology group, a load-time constant.
+    Rank { rank: String },
 }
 
 impl fmt::Display for LaunchArg {
@@ -722,6 +757,7 @@ impl fmt::Display for LaunchArg {
             LaunchArg::I64 { i64: v } => write!(f, "i64 literal {v}"),
             LaunchArg::F32 { f32: v } => write!(f, "f32 literal {v}"),
             LaunchArg::U8 { u8: v } => write!(f, "u8 literal {v}"),
+            LaunchArg::Rank { rank } => write!(f, "rank in group `{rank}`"),
         }
     }
 }
@@ -828,7 +864,7 @@ pub struct Call {
     pub args: Vec<Arg>,
 }
 
-/// A call argument, e.g. `{"buf": "hidden"}`, `{"state": "kv", "offset": 65536}`, `{"var": "tokens"}`, `{"i32": 2560}`.
+/// A call argument, e.g. `{"buf": "hidden"}`, `{"state": "kv", "offset": 65536}`, `{"var": "tokens"}`, `{"i32": 2560}`, `{"rank": "ep"}`.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum Arg {
@@ -860,6 +896,8 @@ pub enum Arg {
     F32 { f32: f32 },
     /// A literal `u8`.
     U8 { u8: u8 },
+    /// This rank's index in the named topology group, a load-time constant, e.g. `{"rank": "ep"}`.
+    Rank { rank: String },
 }
 
 impl fmt::Display for Arg {
@@ -875,6 +913,7 @@ impl fmt::Display for Arg {
             Arg::I64 { i64: v } => write!(f, "i64 literal {v}"),
             Arg::F32 { f32: v } => write!(f, "f32 literal {v}"),
             Arg::U8 { u8: v } => write!(f, "u8 literal {v}"),
+            Arg::Rank { rank } => write!(f, "rank in group `{rank}`"),
         }
     }
 }

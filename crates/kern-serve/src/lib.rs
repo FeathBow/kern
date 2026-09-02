@@ -149,7 +149,7 @@ pub fn serve(o: ServeOpts, art: Artifacts, d: Defaults) -> Result<()> {
         .spawn(move || {
             let load = || -> Result<(KernScheduler, scheduler::Facts)> {
                 let t0 = Instant::now();
-                let mut rt = Runtime::load(&manifest_json, &art.kernels, gpu, capacity)?;
+                let mut rt = Runtime::load(&manifest_json, &art.kernels, gpu, capacity, None)?;
                 info!("manifest `{}` verified, {} modules loaded ({:?})", rt.manifest.model, rt.module_count(), t0.elapsed());
                 let t0 = Instant::now();
                 let blobs = art

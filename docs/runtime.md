@@ -42,9 +42,32 @@ kern run / kern test 仍默认 4096（test 的 workload 抽样以 capacity 为�
 `inout`），投机解码的 fc 分块累加与 markov 偏置都靠它，省掉 concat
 缓冲和拷贝核。
 
+**多卡（E0/K0）**：state 一律 VMM 分配（`cuMemCreate` + `cuMemAddressReserve`
++ `cuMemMap` + `cuMemSetAccess`），设备报 `HANDLE_TYPE_FABRIC_SUPPORTED`
+就带 fabric handle（driver 拒绝则退回本地映射并 warn）；`export: true`
+的 buffer 同样，但拿不到 fabric handle 就报错。manifest 带 `topology` 时
+`Runtime::load(.., Some(&Topology))` 给出本 rank 在每个组的下标（大小
+必须与 manifest 一致），`{"rank": g}` 实参在 compile 时烧成常量。
+`export_handles()` 返回每个 export buffer / 每个有 handle 的 state 的
+`PeerHandle`（64 B fabric handle + 映射字节数，`to_bytes()` 72 B 一行，
+传输是 caller 的事：共享盘、TCP 都行）；`import_peers(group, members)`
+收全组每个成员的 handle 表（自己那份随意，用本地地址），
+`cuMemImportFromShareableHandle` + reserve + map 后把 `u64[组大小]` 写进
+该组的每个 `peer` buffer（同一目标只映射一次），映射与 runtime 同寿命。
+所有 peer buffer 填满之前 `run`/`run_range`/`capture`/`time_*` 一律
+`Api` 错误。装载时收到 peer buffer 的每个 kernel launch 都过
+`cuobjdump -sass` 扫描，见 manifest.md 信任边界一节。门禁
+`crates/kern-runtime/examples/peer_barrier.rs`：同进程 4 个 Runtime 各占一
+卡，一份 SPMD manifest（`tools/kernels-src/peer_barrier.cu`：release 存到
+每个成员的 flags、acquire 自旋 + globaltimer 超时、错误码落 output），
+tray03 4×GB300 实测 captured burst **3.75 µs/barrier**、eager run+sync
+15.8 µs；`--drop r` 让 r 缺席，其余 rank 2 s 内报"等 r 超时"而不是挂住；
+换成 multicast bulk copy 的同名 kernel 装载即被拒。
+
 **错误分类**（`kern_runtime::Error`，按"谁需要行动"分变体）：
 `ManifestParse`/`ManifestVerify`/`Manifest`（provider 修生成器）、
-`KernelArtifact`（cubin 缺失/哈希不符/ABI 不匹配，重新抽核）、
+`KernelArtifact`（cubin 缺失/哈希不符/ABI 不匹配/peer launch 含 multicast
+指令，重新抽核）、
 `WeightArtifact`（权重与 manifest 不符，重新导出）、`Api`（caller 用法
 错误：未知 buffer/program、kind 不符、var 越界、graph env 不一致）、
 `Call`（定位 call 表位置并包住底层错误）、`Cuda`/`Driver`/`Blas`

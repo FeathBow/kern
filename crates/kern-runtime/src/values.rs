@@ -18,6 +18,7 @@ pub fn to_f64(dtype: DType, bytes: &[u8]) -> Vec<f64> {
             DType::I32 => i32::from_le_bytes(c.try_into().unwrap()) as f64,
             DType::U32 => u32::from_le_bytes(c.try_into().unwrap()) as f64,
             DType::I64 => i64::from_le_bytes(c.try_into().unwrap()) as f64,
+            DType::U64 => u64::from_le_bytes(c.try_into().unwrap()) as f64,
             DType::U8 => c[0] as f64,
         })
         .collect()
@@ -36,6 +37,7 @@ pub fn from_f64(dtype: DType, vals: &[f64]) -> Vec<u8> {
             DType::I32 => out.extend_from_slice(&(v as i32).to_le_bytes()),
             DType::U32 => out.extend_from_slice(&(v as u32).to_le_bytes()),
             DType::I64 => out.extend_from_slice(&(v as i64).to_le_bytes()),
+            DType::U64 => out.extend_from_slice(&(v as u64).to_le_bytes()),
             DType::U8 => out.push(v as u8),
         }
     }

@@ -14,7 +14,8 @@ ops.<name>.impl.launches[]   launch   起一次 module 入口 {"module": "argmax
 modules.<name>               module   launch 钉住的工件  {"source": "argmax.cubin", "sha256": "…"}
 vars.<name>                  var      caller 每次调用供应的标量，有上界
 states.<name>                state    不透明持久内存，runtime 按字节供应
-buffers.<name>               buffer   有类型的张量：input / output / weight / workspace / carry
+buffers.<name>               buffer   有类型的张量：input / output / weight / workspace / carry / peer
+topology.groups.<name>       group    多卡 SPMD 的 rank 组：只有名字和大小
 ```
 
 `call` 调 `op`，`op` 由若干 `launch` 实现，`launch` 起 `module` 里的
@@ -27,6 +28,7 @@ buffers.<name>               buffer   有类型的张量：input / output / weig
 
 ```json
 { "schema_version": 3, "model": "qwen3.8-27b", "spec": {"block": 8, "mask_token": 248070},
+  "topology": {"groups": {"ep": 4}},
   "vars": …, "states": …, "buffers": …, "modules": …, "ops": …, "programs": … }
 ```
 
@@ -42,13 +44,29 @@ buffers.<name>               buffer   有类型的张量：input / output / weig
   slot：GDN 的 conv + SSM 递归状态；runtime 供应 `seqs.max + 2` 个 slot，
   slot 0 永不出租，kernel 可把 line 下标 0 当 null）或 `bytes`（定长），
   三选一。内部布局是 provider 生成器里的算式，以字面量 offset
-  传给 provider 自己的 kernel。
+  传给 provider 自己的 kernel。state 一律走 VMM 分配（`cuMemCreate` +
+  reserve + map），设备支持时带 fabric handle，所以 `peer` buffer 可以
+  `of` 一个 state（P/D push、跨 rank 读 KV 的入口）。
 - `buffers`：`dtype + shape + kind`。shape 维度是常量或 var 名；kind 说
   的是"谁供应、活多久"：`input`（runtime 写入）/ `output`（runtime 读回）
   / `weight`（按名从权重文件绑定）/ `workspace`（runtime 规划，跨次执行
   不保留）/ `carry`（一个 program 写、另一个 program 读的交接棒，跨次
   执行保留；谁先跑是 caller 契约，verifier 只要求它被某个 program 写到
-  ——投机解码的 aux 隐状态逼出来的）。
+  ——投机解码的 aux 隐状态逼出来的）/ `peer`（runtime 填的地址数组，见
+  下）。任何非 peer buffer 可加 `"export": true`：分配走 VMM 并带 fabric
+  handle，别的 rank 可映射。
+- `topology`（可选）：`{"groups": {"ep": 4}}`，只声明组名和大小。有它的
+  manifest 是 SPMD 的：每个 rank 装同一份，装载时给出自己在每个组里的下标
+  （`Runtime::load(.., Some(&Topology))`）。成员是谁、handle 怎么交换是
+  caller 的事；runtime 不知道什么是 all-reduce。两样东西用到组：
+  - `peer` buffer：`{"dtype": "u64", "shape": [4], "kind": "peer", "of":
+    "flags", "group": "ep"}`——`u64[组大小]`，第 i 项是组内 rank i 的
+    `of`（一个 `export` 的 buffer 或一个 state）的设备基址，本 rank 也在
+    里面。`import_peers` 之后由 runtime 填好；对 op 只读；ABI 上就是
+    `in buffer<u64>`，kernel 拿到指针数组自己寻址（vLLM custom_allreduce
+    / TRT-LLM / DeepEP intranode 都是这个形状）。
+  - `{"rank": "ep"}`：call 或 launch 的标量实参来源，本 rank 在组里的
+    下标，load 时烧成常量，只能接 `i32`/`i64` 参。
 - `modules`：manifest 的依赖清单（必填）——每个 kernel launch 钉住的代码工件：
   `source`（本地文件名 `argmax.cubin`，或 registry ref
   `hf:<org>/<repo>/<path>[@revision]`）+ `sha256`。**身份是 sha256，
@@ -67,8 +85,8 @@ buffers.<name>               buffer   有类型的张量：input / output / weig
     `params`（该 launch 自己的 ABI；**不写 = 同接口**）、
     `block`/`grid`（grid 用下述表达式集合；可选 `shared_mem`，上限 227KB
     opt-in）、`args` 连线：`{"param": i}` 转发接口第 i 参 /
-    `{"scratch": name}` 接私有工作区 / 字面量标量（impl 私有常量）；
-    **不写 = 按序转发接口参数**。所以一个"ABI 即接口"的单 launch op 只
+    `{"scratch": name}` 接私有工作区 / 字面量标量（impl 私有常量）/
+    `{"rank": group}`；**不写 = 按序转发接口参数**。所以一个"ABI 即接口"的单 launch op 只
     需要 `module`、`entry`、`block`、`grid` 四个字段；两段式 argmax、
     vLLM attention（unified + reduce_segments）这类"一个逻辑算子 = 多次
     launch + 私有中间缓冲"整体折叠成一个 impl，不向调用方泄漏。
@@ -83,8 +101,9 @@ buffers.<name>               buffer   有类型的张量：input / output / weig
 `{"ceil_div": [e, c]}`、`{"mul": [e, c]}`——这不是语言，是填空模板，永远
 不会加控制流。grid、`shared_mem`、domain 的界都用它；call 的标量实参
 除 `{"var": "tokens"}` 和字面量外还可以是 `{"expr": {"mul": ["tokens", 32]}}`
-（prefill 逼出来的：head-norm 的"总 head 数"参数 = tokens×heads）。call
-实参里 var 要带 `var` 标签，因为它和 buffer 名混在一起。
+（prefill 逼出来的：head-norm 的"总 head 数"参数 = tokens×heads）或
+`{"rank": "ep"}`。call 实参里 var 要带 `var` 标签，因为它和 buffer 名混在
+一起。
 
 ```json
 "ops": {
@@ -232,7 +251,15 @@ header 重复——没有权重文件也要能 verify。冗余在 manifest 不�
    weight；output / carry 必须被**某个** program 写到（prefill 这类只落
    state 的 program 合法地不写任何 output；carry 在每个 program 内视为
    已写——它的生产者是另一个 program）；
-10. 拒绝一切未使用的声明（buffer / op / module / state / var）。
+10. 拒绝一切未使用的声明（buffer / op / module / state / var / topology
+    group）；
+11. 多卡：组大小 > 0；`peer` buffer 必须 `dtype: u64`、shape 恰为
+    `[组大小]`、`of` 指向一个 `export` 的 buffer 或一个 state（不能是
+    自己、不能是另一个 peer）、`group` 已声明、不带 domain、自身不可
+    `export`；`of`/`group` 只许出现在 peer 上；peer 对 op 只读且视为初始
+    已写；`{"rank": g}` 只接 `i32`/`i64` 参且 g 已声明；**带 extern launch
+    的 op 不得收到 peer buffer**——runtime 内置（cublasLt）永远不碰 peer
+    内存。
 
 反序列化层已拒绝：未知字段（包括实参对象里的未知键）、重复名字、非法
 参数类型串。
@@ -240,7 +267,11 @@ header 重复——没有权重文件也要能 verify。冗余在 manifest 不�
 **信任边界**：verifier 证明的是"声明自洽"，不是 kernel 行为。谎报自己
 读写范围的 cubin 在边界之内被信任（debug 路径可用 compute-sanitizer 兜
 底）。加载 cubin 后用 `cuFuncGetParamInfo` 比对参数个数/字节布局属于
-runtime crate 的 phase-2 校验。
+runtime crate 的 phase-2 校验。唯一一条 runtime 替 verifier 查的 kernel
+行为：**收到 peer buffer 的 launch 在装载时被 `cuobjdump -sass` 反汇编，
+任何带 `.MULTICAST` 的指令（`UTMALDG.*.MULTICAST`、`UBLKCP.*.MULTICAST`）
+都拒绝**——multicast TMA 打到 peer/fabric 地址会把发起的 GPU 卡死到整机
+重启（GB300 实测），而 verifier 看不见 SASS。没有 cuobjdump 就拒绝装载。
 
 ## 从 v2 到 v3
 

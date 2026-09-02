@@ -1,11 +1,13 @@
 //! Getting CUDA modules out of kernel artifacts: local cubins, host shared
 //! libraries with embedded fatbins, and registry refs (`hf:...`) fetched
-//! into a content-addressed cache.
+//! into a content-addressed cache. Also the SASS scan that keeps multicast
+//! TMA away from peer memory.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CString;
 use std::os::raw::c_void;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use cudarc::driver::{result as cu, sys};
 use kern_manifest::types::{Manifest, RegistryRef};
@@ -52,6 +54,8 @@ pub(crate) fn fetch_registry_cubins(manifest: &Manifest) -> Result<BTreeMap<Stri
 pub(crate) struct LoadedModule {
     pub sha: String,
     pub label: String,
+    /// The artifact on disk, for the SASS scan.
+    pub path: PathBuf,
     pub module: sys::CUmodule,
 }
 
@@ -92,7 +96,7 @@ pub(crate) fn load_pinned_modules(
             continue;
         }
         for module in load_device_modules(&path)? {
-            modules.push(LoadedModule { sha: sha.clone(), label: label.clone(), module });
+            modules.push(LoadedModule { sha: sha.clone(), label: label.clone(), path: path.clone(), module });
         }
     }
     Ok(modules)
@@ -265,4 +269,152 @@ fn load_device_modules(path: &Path) -> Result<Vec<sys::CUmodule>> {
         bail!(KernelArtifact, "{}: no loadable fatbin container", path.display());
     }
     Ok(mods)
+}
+
+/// The one thing a kernel may not do to peer memory: multicast TMA
+/// (`cp.async.bulk{.tensor}...multicast::cluster`, SASS `UTMALDG.*.MULTICAST`
+/// and friends) issued at a fabric or peer address wedges the issuing GPU
+/// until a node reboot (GB300, driver 580: "Route Unhealthy: GPU requires
+/// reset"). Plain loads/stores, atomics, non-multicast TMA and 1-D bulk
+/// copies are fine. The verifier cannot see SASS, so the runtime disassembles
+/// every entry that receives a peer-derived pointer and refuses any
+/// multicast instruction in it. No `cuobjdump`, no proof, no launch.
+pub(crate) struct MulticastScan {
+    tool: Option<PathBuf>,
+    /// artifact -> function -> offending instructions
+    cache: BTreeMap<PathBuf, BTreeMap<String, Vec<String>>>,
+}
+
+impl MulticastScan {
+    pub(crate) fn new() -> MulticastScan {
+        MulticastScan { tool: find_cuobjdump(), cache: BTreeMap::new() }
+    }
+
+    /// Multicast instructions in `entry` of the artifact at `path`; an
+    /// error when the artifact cannot be disassembled or `entry` is not in
+    /// the disassembly (fail closed).
+    pub(crate) fn offending(&mut self, path: &Path, entry: &str) -> Result<Vec<String>> {
+        if !self.cache.contains_key(path) {
+            let Some(tool) = &self.tool else {
+                bail!(
+                    KernelArtifact,
+                    "{}: no cuobjdump to scan `{entry}` for multicast TMA before it touches peer memory \
+                     (set KERN_CUOBJDUMP or CUDA_HOME, or put cuobjdump on PATH)",
+                    path.display()
+                );
+            };
+            let out = Command::new(tool)
+                .arg("-sass")
+                .arg(path)
+                .output()
+                .map_err(|e| Error::KernelArtifact(format!("running {}: {e}", tool.display())))?;
+            if !out.status.success() {
+                bail!(
+                    KernelArtifact,
+                    "{} -sass {}: {}\n{}",
+                    tool.display(),
+                    path.display(),
+                    out.status,
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            let text = String::from_utf8_lossy(&out.stdout);
+            self.cache.insert(path.to_path_buf(), multicast_by_function(&text));
+        }
+        match self.cache[path].get(entry) {
+            Some(v) => Ok(v.clone()),
+            None => bail!(
+                KernelArtifact,
+                "{}: `{entry}` not found in the cuobjdump disassembly, cannot prove it free of multicast TMA",
+                path.display()
+            ),
+        }
+    }
+}
+
+fn find_cuobjdump() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("KERN_CUOBJDUMP") {
+        return Some(PathBuf::from(p));
+    }
+    for root in ["CUDA_HOME", "CUDA_PATH"] {
+        if let Some(r) = std::env::var_os(root) {
+            let p = PathBuf::from(r).join("bin/cuobjdump");
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let p = dir.join("cuobjdump");
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    let p = PathBuf::from("/usr/local/cuda/bin/cuobjdump");
+    p.is_file().then_some(p)
+}
+
+/// Parse `cuobjdump -sass` output into function -> instructions whose
+/// opcode carries `.MULTICAST`. Every `Function : <sym>` block is a
+/// function; a symbol appearing in several containers (same-name Triton
+/// instances) accumulates, so one bad instance taints the name.
+pub(crate) fn multicast_by_function(text: &str) -> BTreeMap<String, Vec<String>> {
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut cur: Option<String> = None;
+    for line in text.lines() {
+        let t = line.trim();
+        if let Some(name) = t.strip_prefix("Function :") {
+            let name = name.trim().to_string();
+            out.entry(name.clone()).or_default();
+            cur = Some(name);
+            continue;
+        }
+        let Some(f) = &cur else { continue };
+        // `/*0120*/  @P0 UTMALDG.2D.MULTICAST [UR4], [UR8] ;  /* 0x... */`
+        let Some(rest) = t.strip_prefix("/*") else { continue };
+        let Some(end) = rest.find("*/") else { continue };
+        let body = rest[end + 2..].trim();
+        let opcode = body
+            .split_whitespace()
+            .find(|tok| !tok.starts_with('@'))
+            .unwrap_or("")
+            .trim_end_matches(';');
+        if opcode.contains(".MULTICAST") {
+            out.get_mut(f).unwrap().push(body.split("/*").next().unwrap_or(body).trim().to_string());
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SASS: &str = r#"
+	code for sm_103a
+		Function : k_tma_mcast
+	.headerflags	@"EF_CUDA_TEXMODE_UNIFIED EF_CUDA_64BIT_ADDRESS EF_CUDA_SM103 EF_CUDA_VIRTUAL_SM(EF_CUDA_SM103)"
+        /*0000*/                   LDC R1, c[0x0][0x28] ;                       /* 0x00000a00ff017b82 */
+        /*0010*/              @!P0 UTMALDG.2D.MULTICAST [UR4], [UR8] ;          /* 0x0000000004007fab */
+        /*0020*/                   UBLKCP.S.G [UR4], [UR8] ;                    /* 0x0000000004007fab */
+        /*0030*/                   EXIT ;                                       /* 0x000000000000794d */
+		Function : k_bulk
+        /*0000*/                   UBLKCP.S.G [UR4], [UR8] ;
+        /*0010*/                   UTMALDG.2D [UR4], [UR8] ;
+        /*0020*/                   EXIT ;
+		Function : _Z7k_plainPf
+        /*0000*/                   STG.E [R2.64], R5 ;
+        /*0010*/                   EXIT ;
+"#;
+
+    #[test]
+    fn multicast_only_flags_multicast() {
+        let m = multicast_by_function(SASS);
+        assert_eq!(m["k_tma_mcast"], vec!["@!P0 UTMALDG.2D.MULTICAST [UR4], [UR8] ;"]);
+        assert!(m["k_bulk"].is_empty(), "{:?}", m["k_bulk"]);
+        assert!(m["_Z7k_plainPf"].is_empty());
+        assert!(!m.contains_key("ghost"));
+    }
 }

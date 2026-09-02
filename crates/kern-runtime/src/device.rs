@@ -1,34 +1,336 @@
-//! Device allocations and the runtime's built-in extern ops (cublasLt).
+//! Device allocations — pool allocations and virtual-memory mappings that
+//! other ranks can import — and the runtime's built-in extern ops (cublasLt).
 
+use std::os::raw::c_void;
 use std::sync::Arc;
 
 use cudarc::cublaslt::{CudaBlasLT, Matmul, MatmulConfig};
-use cudarc::driver::{
-    sys, CudaSlice, CudaStream, DevicePtr, DevicePtrMut, DeviceSlice, SyncOnDrop,
-};
+use cudarc::driver::{sys, CudaSlice, CudaStream, DevicePtr, DevicePtrMut, DeviceSlice, SyncOnDrop};
 use half::bf16;
 
 use crate::compile::RVal;
-use crate::error::{bail, Error, Result};
+use crate::error::{bail, cuda_check, Error, Result};
 
-pub(crate) struct DeviceBuf {
-    pub(crate) slice: CudaSlice<u8>,
-    pub(crate) ptr: u64,
-    pub(crate) bytes: u64,
+/// A fabric handle another process — on this tray or across the NVL72
+/// fabric — can map with [`import`]. `bytes` is the mapped size (the
+/// requested size rounded up to the allocation granularity), which the
+/// importer must map in full.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct PeerHandle {
+    pub fabric: [u8; 64],
+    pub bytes: u64,
 }
 
+impl PeerHandle {
+    pub const BYTES: usize = 72;
+
+    /// Wire form: 64 bytes of fabric handle, then the mapped size, little-endian.
+    pub fn to_bytes(&self) -> [u8; Self::BYTES] {
+        let mut out = [0u8; Self::BYTES];
+        out[..64].copy_from_slice(&self.fabric);
+        out[64..].copy_from_slice(&self.bytes.to_le_bytes());
+        out
+    }
+
+    pub fn from_bytes(b: &[u8]) -> Option<PeerHandle> {
+        if b.len() != Self::BYTES {
+            return None;
+        }
+        Some(PeerHandle {
+            fabric: b[..64].try_into().ok()?,
+            bytes: u64::from_le_bytes(b[64..].try_into().ok()?),
+        })
+    }
+}
+
+impl std::fmt::Debug for PeerHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PeerHandle({} bytes, {:02x}{:02x}{:02x}{:02x}…)", self.bytes, self.fabric[0], self.fabric[1], self.fabric[2], self.fabric[3])
+    }
+}
+
+/// One device allocation. `ptr`/`bytes` are what the compiled programs
+/// bake in; the backing decides whether a peer can map it.
+pub(crate) struct DeviceBuf {
+    pub(crate) ptr: u64,
+    pub(crate) bytes: u64,
+    stream: Arc<CudaStream>,
+    backing: Backing,
+}
+
+enum Backing {
+    /// `cuMemAlloc` through cudarc: local only.
+    Pool(#[allow(dead_code)] CudaSlice<u8>),
+    /// `cuMemCreate` + reserve + map: exportable when created with a fabric
+    /// handle, or a peer's allocation mapped into this address space.
+    Vmm(Vmm),
+}
+
+/// A physical allocation mapped at a reserved address; unmapped, freed and
+/// released in that order on drop.
+struct Vmm {
+    handle: sys::CUmemGenericAllocationHandle,
+    va: sys::CUdeviceptr,
+    size: usize,
+    shareable: bool,
+}
+
+impl Drop for Vmm {
+    fn drop(&mut self) {
+        unsafe {
+            sys::cuMemUnmap(self.va, self.size);
+            sys::cuMemAddressFree(self.va, self.size);
+            sys::cuMemRelease(self.handle);
+        }
+    }
+}
+
+/// How a state or exported buffer asks for a shareable handle.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Share {
+    /// A fabric handle or nothing (a state on a device without one).
+    IfSupported,
+    /// A fabric handle or an error (an `export: true` buffer).
+    Required,
+}
+
+/// Pool allocation, zeroed on the stream.
 pub(crate) fn alloc(stream: &Arc<CudaStream>, bytes: u64) -> Result<DeviceBuf> {
     let slice = stream.alloc_zeros::<u8>(bytes.max(1) as usize)?;
     let ptr = {
         let (p, _sync) = slice.device_ptr(stream);
         p
     };
-    Ok(DeviceBuf { slice, ptr, bytes })
+    Ok(DeviceBuf { ptr, bytes, stream: stream.clone(), backing: Backing::Pool(slice) })
+}
+
+fn fabric_handle_type() -> sys::CUmemAllocationHandleType {
+    sys::CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_FABRIC
+}
+
+fn none_handle_type() -> sys::CUmemAllocationHandleType {
+    sys::CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_NONE
+}
+
+/// Whether the device can hand out fabric handles (`cuMemCreate` with
+/// `CU_MEM_HANDLE_TYPE_FABRIC`).
+pub(crate) fn fabric_supported(dev: i32) -> Result<bool> {
+    let mut v: i32 = 0;
+    cuda_check(
+        unsafe {
+            sys::cuDeviceGetAttribute(
+                &mut v,
+                sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED,
+                dev,
+            )
+        },
+        "cuDeviceGetAttribute(HANDLE_TYPE_FABRIC_SUPPORTED)",
+    )?;
+    Ok(v != 0)
+}
+
+fn alloc_prop(dev: i32, handle_type: sys::CUmemAllocationHandleType) -> sys::CUmemAllocationProp {
+    // Zeroed, then the fields that matter: the struct grows across CUDA
+    // versions and cudarc's bindings follow the one it was built against.
+    let mut prop: sys::CUmemAllocationProp = unsafe { std::mem::zeroed() };
+    prop.type_ = sys::CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED;
+    prop.requestedHandleTypes = handle_type;
+    prop.location.type_ = sys::CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE;
+    prop.location.id = dev;
+    prop
+}
+
+fn granularity(prop: &sys::CUmemAllocationProp) -> Result<usize> {
+    let mut g: usize = 0;
+    cuda_check(
+        unsafe {
+            sys::cuMemGetAllocationGranularity(
+                &mut g,
+                prop,
+                sys::CUmemAllocationGranularity_flags::CU_MEM_ALLOC_GRANULARITY_MINIMUM,
+            )
+        },
+        "cuMemGetAllocationGranularity",
+    )?;
+    Ok(g.max(1))
+}
+
+/// Reserve `size` bytes of address space, map `handle` there and grant
+/// this device read/write access. On failure nothing leaks: the handle is
+/// the caller's to release.
+fn map_handle(dev: i32, handle: sys::CUmemGenericAllocationHandle, size: usize, align: usize) -> Result<sys::CUdeviceptr> {
+    let mut va: sys::CUdeviceptr = 0;
+    cuda_check(unsafe { sys::cuMemAddressReserve(&mut va, size, align, 0, 0) }, "cuMemAddressReserve")?;
+    if let Err(e) = cuda_check(unsafe { sys::cuMemMap(va, size, 0, handle, 0) }, "cuMemMap") {
+        unsafe { sys::cuMemAddressFree(va, size) };
+        return Err(e);
+    }
+    let mut access: sys::CUmemAccessDesc = unsafe { std::mem::zeroed() };
+    access.location.type_ = sys::CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE;
+    access.location.id = dev;
+    access.flags = sys::CUmemAccess_flags::CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+    if let Err(e) = cuda_check(unsafe { sys::cuMemSetAccess(va, size, &access, 1) }, "cuMemSetAccess") {
+        unsafe {
+            sys::cuMemUnmap(va, size);
+            sys::cuMemAddressFree(va, size);
+        }
+        return Err(e);
+    }
+    Ok(va)
+}
+
+/// Virtual-memory allocation on `dev`, zeroed on the stream. With
+/// `Share::Required` the allocation carries a fabric handle or the call
+/// fails; with `Share::IfSupported` it carries one when the device offers
+/// them and is a plain local mapping otherwise.
+pub(crate) fn alloc_vmm(stream: &Arc<CudaStream>, dev: i32, bytes: u64, share: Share, what: &str) -> Result<DeviceBuf> {
+    let fabric = fabric_supported(dev)?;
+    if !fabric && share == Share::Required {
+        bail!(Cuda, "{what}: device {dev} does not support fabric handles, cannot export");
+    }
+    let prop = alloc_prop(dev, if fabric { fabric_handle_type() } else { none_handle_type() });
+    let g = granularity(&prop)?;
+    let size = (bytes.max(1) as usize).div_ceil(g) * g;
+    let mut handle: sys::CUmemGenericAllocationHandle = 0;
+    let created = unsafe { sys::cuMemCreate(&mut handle, size, &prop, 0) };
+    let (handle, shareable) = match (created, fabric, share) {
+        (sys::CUresult::CUDA_SUCCESS, _, _) => (handle, fabric),
+        // The attribute says fabric, the driver says no (no IMEX channel,
+        // say): a state falls back to a local mapping, an export cannot.
+        (r, true, Share::IfSupported) => {
+            tracing::warn!("{what}: cuMemCreate with a fabric handle failed ({r:?}); allocating without one");
+            let prop = alloc_prop(dev, none_handle_type());
+            cuda_check(unsafe { sys::cuMemCreate(&mut handle, size, &prop, 0) }, "cuMemCreate")?;
+            (handle, false)
+        }
+        (r, _, _) => return Err(Error::Cuda(format!("{what}: cuMemCreate({size} bytes, fabric={fabric}): {r:?}"))),
+    };
+    let va = match map_handle(dev, handle, size, g) {
+        Ok(va) => va,
+        Err(e) => {
+            unsafe { sys::cuMemRelease(handle) };
+            return Err(e);
+        }
+    };
+    let vmm = Vmm { handle, va, size, shareable };
+    cuda_check(unsafe { sys::cuMemsetD8Async(va, 0, size, stream.cu_stream()) }, "cuMemsetD8Async")?;
+    Ok(DeviceBuf { ptr: va, bytes, stream: stream.clone(), backing: Backing::Vmm(vmm) })
+}
+
+/// Map a peer's exported allocation into this device's address space.
+/// The mapping is a [`DeviceBuf`] so it lives exactly as long as the
+/// pointers derived from it.
+pub(crate) fn import(stream: &Arc<CudaStream>, dev: i32, h: &PeerHandle, what: &str) -> Result<DeviceBuf> {
+    let mut fh = sys::CUmemFabricHandle { data: h.fabric };
+    let mut handle: sys::CUmemGenericAllocationHandle = 0;
+    cuda_check(
+        unsafe {
+            sys::cuMemImportFromShareableHandle(&mut handle, &mut fh as *mut _ as *mut c_void, fabric_handle_type())
+        },
+        &format!("{what}: cuMemImportFromShareableHandle"),
+    )?;
+    let g = granularity(&alloc_prop(dev, fabric_handle_type()))?;
+    let size = h.bytes as usize;
+    if size == 0 || !size.is_multiple_of(g) {
+        unsafe { sys::cuMemRelease(handle) };
+        bail!(Cuda, "{what}: peer handle maps {size} bytes, not a multiple of the {g}-byte granularity");
+    }
+    let va = match map_handle(dev, handle, size, g) {
+        Ok(va) => va,
+        Err(e) => {
+            unsafe { sys::cuMemRelease(handle) };
+            return Err(Error::Cuda(format!("{what}: {e}")));
+        }
+    };
+    let vmm = Vmm { handle, va, size, shareable: false };
+    Ok(DeviceBuf { ptr: va, bytes: h.bytes, stream: stream.clone(), backing: Backing::Vmm(vmm) })
+}
+
+impl DeviceBuf {
+    /// The fabric handle a peer imports, for an allocation that has one.
+    pub(crate) fn export(&self) -> Result<Option<PeerHandle>> {
+        let Backing::Vmm(v) = &self.backing else { return Ok(None) };
+        if !v.shareable {
+            return Ok(None);
+        }
+        let mut fh = sys::CUmemFabricHandle { data: [0; 64] };
+        cuda_check(
+            unsafe {
+                sys::cuMemExportToShareableHandle(&mut fh as *mut _ as *mut c_void, v.handle, fabric_handle_type(), 0)
+            },
+            "cuMemExportToShareableHandle",
+        )?;
+        Ok(Some(PeerHandle { fabric: fh.data, bytes: v.size as u64 }))
+    }
+
+    /// Whether this allocation carries a fabric handle.
+    pub(crate) fn is_shareable(&self) -> bool {
+        matches!(&self.backing, Backing::Vmm(v) if v.shareable)
+    }
+
+    /// A byte range of the allocation, for the cudarc copy/memset entry
+    /// points.
+    pub(crate) fn view(&self, range: std::ops::Range<usize>) -> Result<BufView> {
+        if range.start > range.end || range.end as u64 > self.bytes {
+            bail!(Api, "byte range [{}, {}) outside the {}-byte allocation", range.start, range.end, self.bytes);
+        }
+        Ok(BufView { ptr: self.ptr + range.start as u64, len: range.end - range.start, stream: self.stream.clone() })
+    }
+}
+
+/// Synchronization is trivially correct for these raw views: the whole
+/// runtime is single-stream.
+impl DeviceSlice<u8> for DeviceBuf {
+    fn len(&self) -> usize {
+        self.bytes as usize
+    }
+    fn stream(&self) -> &Arc<CudaStream> {
+        &self.stream
+    }
+}
+
+impl DevicePtr<u8> for DeviceBuf {
+    fn device_ptr<'a>(&'a self, _: &'a CudaStream) -> (sys::CUdeviceptr, SyncOnDrop<'a>) {
+        (self.ptr, SyncOnDrop::Record(None))
+    }
+}
+
+impl DevicePtrMut<u8> for DeviceBuf {
+    fn device_ptr_mut<'a>(&'a mut self, _: &'a CudaStream) -> (sys::CUdeviceptr, SyncOnDrop<'a>) {
+        (self.ptr, SyncOnDrop::Record(None))
+    }
+}
+
+/// A byte range of a [`DeviceBuf`].
+pub(crate) struct BufView {
+    ptr: u64,
+    len: usize,
+    stream: Arc<CudaStream>,
+}
+
+impl DeviceSlice<u8> for BufView {
+    fn len(&self) -> usize {
+        self.len
+    }
+    fn stream(&self) -> &Arc<CudaStream> {
+        &self.stream
+    }
+}
+
+impl DevicePtr<u8> for BufView {
+    fn device_ptr<'a>(&'a self, _: &'a CudaStream) -> (sys::CUdeviceptr, SyncOnDrop<'a>) {
+        (self.ptr, SyncOnDrop::Record(None))
+    }
+}
+
+impl DevicePtrMut<u8> for BufView {
+    fn device_ptr_mut<'a>(&'a mut self, _: &'a CudaStream) -> (sys::CUdeviceptr, SyncOnDrop<'a>) {
+        (self.ptr, SyncOnDrop::Record(None))
+    }
 }
 
 /// Raw device pointer presented as a `DevicePtr<bf16>`/`DevicePtrMut<bf16>`
-/// for the cublasLt extern op. Synchronization is trivially correct: the
-/// whole runtime is single-stream and cublasLt is bound to that stream.
+/// for the cublasLt extern op.
 struct RawBf16 {
     ptr: sys::CUdeviceptr,
     len: usize,
