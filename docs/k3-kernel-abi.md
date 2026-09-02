@@ -304,7 +304,8 @@ extern "C" __global__ void kern_k3_land_situ(const f32* p, bf16* act, int n, int
 
 七族全部交付并入 master（`tools/kernels-src/k3_*.cu`，`tools/build_kernels.sh` 编成 `target/cubins/`）；
 每个核在 harness 上 B ∈ {1, 2, 8, 64} 全过，0 spill，无 `.MULTICAST`；notes/ncu 报告在 `tools/k3-harness/`。
-生成器 `tools/gen_k3_decode.py` 已切到这套核（manifest `examples/k3-*-v2.json`，93 层 1855 launch，其中 742 GEMM）。
+生成器 `tools/gen_k3_decode.py` 已切到这套核（manifest `examples/k3-*.json`，93 层 1855 launch，其中 742 GEMM）；
+pegainfer 的 TileLang 桶核、line shim 和它们的 manifest 已从树里删除（git 历史里有）。
 门禁数字见 roadmap E2 行。
 
 遗留（都是契约层面，核本身不用改）：

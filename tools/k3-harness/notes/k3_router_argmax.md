@@ -212,7 +212,7 @@ each lane's 7 keys once so the per-round local max is free — it removes 3 of t
    the constant table.** §0 says `EXPERTS = 224` and `kern_k3_router_topk` has no
    expert-count parameter, so 224 is baked in (and the 32×7 lane layout depends
    on 224 = 32·7). But the certified pegainfer kernel this replaces,
-   `tools/k3-tilelang/k3_router_topk_batched.cu`, is generated as
+   pegainfer's TileLang `k3_router_topk_batched.cu` (was vendored in `tools/k3-tilelang/`, since removed), is generated as
    `k3_router_topk_b*_e896_topk16` — 896 experts. Full-K3 (896 experts) needs
    either a recompile with `EXPERTS 896` (896 = 32·28, so the layout still
    works, at 28 registers of `ord` + 28 of `sig` per lane — that will want a
