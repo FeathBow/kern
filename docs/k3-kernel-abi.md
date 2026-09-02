@@ -239,6 +239,12 @@ extern "C" __global__ void kern_k3_mla_paged_attn(
 （现有核基线由 harness 给出）；短上下文不慢于现有核。也交付一份 split-KV（长上下文按页段切、再合并 (m, l, acc)）的分析，
 不一定实现。
 
+**交付（2026-09-02）**：grid `(B, 48, 1)` block 512，`__cluster_dims__(1, 8, 1)`，静态 smem 216 320 B：
+6 个头组 × 16 头，每组 8 个 KV split 各占一个 cluster block，(m, l, acc) 经 DSMEM 合并；两遍 softmax，
+分数与 P·V 走 `mma.m16n8k16` bf16。harness 全过；ctx=32768 B=1 **258 µs vs 旧核 10 047 µs（38.9×）**，
+ctx=64 24.6 µs vs 78 µs。SPL=16 变体（155 µs）没上：runtime 的 `cuLaunchKernelEx` 不设
+`NonPortableClusterSizeAllowed`；同理动态 smem > 48 KB 的 opt-in 也没有，所以是静态 smem。
+
 ### K6 `k3_router_topk` / `k3_argmax_f32`（一个 agent，顺带 embedding 与 rms）
 
 ```c
@@ -293,3 +299,20 @@ extern "C" __global__ void kern_k3_land_situ(const f32* p, bf16* act, int n, int
 - `prefix` / `mixed` / `mixed2` / `scores` / `conv_x` / `attn_out` / `mlp_out` / `logits` 等 workspace 删除。
 - `seqs` 变成变量（max 64），`kda.line_index` 按层取行，`blocks` 变 `[seqs, 8, H]`。
 - 每层 launch 数：KDA/MoE 层 3 + 2 + 1 + 1 + 1 + 3(MegaMoE) + 1 + 1 + 1 ≈ 14 + 8 GEMM；MLA 层少 1。
+
+## 4. 交付状态与遗留（2026-09-02）
+
+七族全部交付并入 master（`tools/kernels-src/k3_*.cu`，`tools/build_kernels.sh` 编成 `target/cubins/`）；
+每个核在 harness 上 B ∈ {1, 2, 8, 64} 全过，0 spill，无 `.MULTICAST`；notes/ncu 报告在 `tools/k3-harness/`。
+生成器 `tools/gen_k3_decode.py` 已切到这套核（manifest `examples/k3-*-v2.json`，93 层 1855 launch，其中 742 GEMM）。
+门禁数字见 roadmap E2 行。
+
+遗留（都是契约层面，核本身不用改）：
+
+- K6 `k3_router_topk` 把 `EXPERTS=224` 烤进了核；满血 K3（896 expert）要另编一版或改成参数。
+- K5 SPL=16 变体要 kern-runtime 的 launch 设 `CU_LAUNCH_ATTRIBUTE_CLUSTER_SCHEDULING_POLICY_PREFERENCE` /
+  NonPortableClusterSizeAllowed；>48 KB 动态 smem 也要 `cuFuncSetAttribute` opt-in。两个都是 runtime 加一行属性的事。
+- K1a `nb == 8` 与 snapshot 不能同时用（snapshot 写 blocks 的第 8 槽）；生成器只在 `nb < 8` 时带 snapshot。
+- "snapshot" 在 K1a（把当前 hidden 存进 blocks[8]）和 K1b（把 landing 后的 hidden 存进 blocks[8]）里含义不同，
+  签名同名不同义，改名的事等消融。
+- manifest 传不了空指针：K1c 用 `int two` 标志代替 `p2 == NULL`。

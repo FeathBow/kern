@@ -68,7 +68,7 @@ GEOM = {
     "kern_k3_conv_silu": ([T, 3, INNER // 512], [128, 1, 1], 0),  # 4 columns per thread
     "kern_k3_kda_core": ([T, HEADS, 1], [128, 1, 1], 0),
     "kern_k3_mla_prep": ([T, 4, 1], [512, 1, 1], 0),  # 1 norm/append block + 3 gate segments
-    "kern_k3_mla_paged_attn": ([T, HEADS, 1], [128, 1, 1], 0),  # STAND-IN: naive K5 geometry until K5 lands
+    "kern_k3_mla_paged_attn": ([T, 48, 1], [512, 1, 1], 0),  # 6 head groups x 8 KV splits (cluster of 8), 216 KB static smem
     "kern_k3_router_topk": ([T, 1, 1], [256, 1, 1], 0),
     "kern_k3_argmax_f32_partial": ([T, 64, 1], [1024, 1, 1], 0),
     "kern_k3_argmax_f32_final": ([T, 1, 1], [64, 1, 1], 0),

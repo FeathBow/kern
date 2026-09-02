@@ -46,6 +46,10 @@ def main():
     ap.add_argument("--steps", type=int, default=40)
     ap.add_argument("--layers", type=int, default=93)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--check-last", type=int, default=0,
+                    help="only query the reference for the last N prompt positions (and every continuation "
+                         "step); earlier prompt positions are recorded with argmax -1, which the runner "
+                         "feeds but does not check — long-prompt fixtures without a request per token")
     ap.add_argument("--no-logprobs", action="store_true",
                     help="server returns no logprobs (pegainfer K3): record the argmax alone, every step must match exactly")
     a = ap.parse_args()
@@ -68,6 +72,9 @@ def main():
     for i in range(a.steps):
         if i >= len(feed):
             feed.append(steps[-1]["argmax"])
+        if a.check_last and i < len(prompt) - a.check_last:
+            steps.append({"feed": feed[i], "argmax": -1, "top5_ids": [-1, -1], "top5_logits": [0.0, -1e9]})
+            continue
         resp = complete(a.url, feed[:i + 1], model)
         choice = resp["choices"][0]
         if LOGPROBS:

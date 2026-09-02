@@ -21,6 +21,8 @@
 //! (tests/golden_decode.rs). Every rank runs the same sequence, so an EP
 //! world must also agree with itself token for token.
 //!
+//! `--free N` appends N greedy steps past the fixture (row 0's own argmax fed
+//! back) and prints them, to read the continuation back through a tokenizer.
 //! `--seqs N` runs N sequences per rank as one batch (`tokens` == `seqs` ==
 //! N). Plain: every row feeds the fixture and every row must match row 0
 //! token for token. `--mixed`: row 0 feeds the fixture, rows 1.. feed a
@@ -120,6 +122,9 @@ fn weight_files(weights: &Path, layers: usize, ranks: usize, rank: usize) -> Vec
 
 struct Outcome {
     tokens: Vec<i64>,
+    /// greedy continuation past the fixture (`--free N`), row 0
+    free: Vec<i64>,
+    checked: usize,
     exact: usize,
     excused: usize,
     failures: Vec<String>,
@@ -273,22 +278,27 @@ fn le_bytes_i32(v: &[i32]) -> Vec<u8> {
 }
 
 /// Run `feeds` (one token list per row, all the same length) as a batch;
-/// returns each row's sampled tokens and, with `iters > 0`, the replay time.
+/// returns each row's sampled tokens (`steps + free` of them) and, with
+/// `iters > 0`, the replay time.
 fn run_batch(
     rt: &mut Runtime,
     feeds: &[Vec<i64>],
     tokens_per_row: usize,
     graph: bool,
     iters: usize,
+    free: usize,
 ) -> anyhow::Result<(Vec<Vec<i64>>, Option<f64>)> {
     let rows = feeds.len();
     let steps = feeds[0].len();
     let mut batch = Batch::new(rt, rows, tokens_per_row)?;
-    let mut out = vec![Vec::with_capacity(steps); rows];
+    let mut out: Vec<Vec<i64>> = vec![Vec::with_capacity(steps + free); rows];
     let mut captured = false;
     let mut env = BTreeMap::new();
-    for step in 0..steps {
-        let toks: Vec<i64> = feeds.iter().map(|f| f[step]).collect();
+    // After the scripted feed, `free` more steps run each row on its own
+    // argmax (a greedy continuation, for reading the text back).
+    for step in 0..steps + free {
+        let toks: Vec<i64> =
+            (0..rows).map(|r| if step < steps { feeds[r][step] } else { *out[r].last().unwrap() }).collect();
         env = batch.stage(rt, &toks)?;
         if graph {
             if !captured {
@@ -343,6 +353,7 @@ fn run_rank(
     mixed: bool,
     distinct: bool,
     seed: u64,
+    free: usize,
     rendezvous: &dyn Fn(&mut Runtime) -> kern_runtime::Result<()>,
 ) -> anyhow::Result<Outcome> {
     let manifest = kern_manifest::types::Manifest::from_json(json)?;
@@ -371,7 +382,15 @@ fn run_rank(
         Dim::Const(v) => v as i64,
         _ => 163840,
     };
-    let mut out = Outcome { tokens: Vec::new(), exact: 0, excused: 0, failures: Vec::new(), step_ms: None };
+    let mut out = Outcome {
+        tokens: Vec::new(),
+        free: Vec::new(),
+        checked: 0,
+        exact: 0,
+        excused: 0,
+        failures: Vec::new(),
+        step_ms: None,
+    };
 
     // Every distinct feed first runs as a batch of `seqs` copies of itself,
     // so the mixed batch can be held to it row by row at the same batch
@@ -397,14 +416,19 @@ fn run_rank(
                 continue;
             }
             let copies = vec![feeds[r].clone(); seqs];
-            let (t, _) = run_batch(&mut rt, &copies, per_row, graph, 0)?;
+            let (t, _) = run_batch(&mut rt, &copies, per_row, graph, 0, 0)?;
             solo[r] = Some(t.into_iter().next().unwrap());
         }
     }
-    let (tokens, ms) = run_batch(&mut rt, &feeds, per_row, graph, iters)?;
+    let (tokens, ms) = run_batch(&mut rt, &feeds, per_row, graph, iters, free)?;
     out.step_ms = ms;
-    out.tokens = tokens[0].clone();
-    for (step, &got) in tokens[0].iter().enumerate() {
+    out.tokens = tokens[0][..steps].to_vec();
+    out.free = tokens[0][steps..].to_vec();
+    for (step, &got) in tokens[0][..steps].iter().enumerate() {
+        if golden.argmax[step] < 0 {
+            continue; // fed but unchecked (long-prompt fixture, tools/k3_oracle_dump.py --check-last)
+        }
+        out.checked += 1;
         let (exact, excused) = golden.accept(step, got);
         if exact {
             out.exact += 1;
@@ -421,7 +445,7 @@ fn run_rank(
     }
     for r in 0..seqs {
         let Some(want) = &solo[r] else { continue };
-        if &tokens[r] != want {
+        if &tokens[r][..steps] != want.as_slice() {
             let first = (0..steps).find(|&i| tokens[r][i] != want[i]).unwrap();
             out.failures.push(format!(
                 "row {r} diverges from a batch of its own copies at step {first}: got {}, expected {}",
@@ -448,6 +472,7 @@ fn main() {
     let mut mixed = false;
     let mut distinct = false;
     let mut seed = 1u64;
+    let mut free = 0usize;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut v = || args.next().expect("value");
@@ -467,6 +492,7 @@ fn main() {
             "--mixed" => mixed = true,
             "--distinct" => distinct = true,
             "--seed" => seed = v().parse().unwrap(),
+            "--free" => free = v().parse().unwrap(),
             _ => panic!("unknown arg {a}"),
         }
     }
@@ -559,6 +585,7 @@ fn main() {
                 mixed,
                 distinct,
                 seed,
+                free,
                 &rendezvous,
             );
             results.lock().unwrap()[local] = Some(r.map_err(|e| format!("{e:#}")));
@@ -575,16 +602,21 @@ fn main() {
         match r {
             Some(Ok(o)) => {
                 let steps = golden.feed.len();
+                let fed = if o.checked == steps { String::new() } else { format!(" (of {steps} fed)") };
                 println!(
-                    "rank {rank} gpu {}: {}/{steps} exact, {} excused inside the noise floor, {} wrong{}",
+                    "rank {rank} gpu {}: {}/{}{fed} exact, {} excused inside the noise floor, {} wrong{}",
                     gpus[local],
                     o.exact,
+                    o.checked,
                     o.excused,
                     o.failures.len(),
                     o.step_ms.map(|ms| format!("; {ms:.3} ms/step (captured, {iters} iters)")).unwrap_or_default()
                 );
                 for f in &o.failures {
                     println!("  {f}");
+                }
+                if !o.free.is_empty() {
+                    println!("  free continuation: {:?}", o.free);
                 }
                 ok &= o.failures.is_empty();
                 match &first {
