@@ -34,15 +34,21 @@
 //!   rows land past the sequence's position and are overwritten next
 //!   round, exactly like the target KV's free rollback), and the host
 //!   accepts each sequence's longest matching prefix. The lease grows by
-//!   `n` tokens so the last round's rejected rows have slots. Whether a
-//!   round beats a plain step at a given batch size is the operator's
-//!   call, not the scheduler's: the flag picks the mode for the process.
+//!   `n` tokens so the last round's rejected rows have slots. A manifest
+//!   with a `round` program runs the whole round as one graph: draft,
+//!   verify's ids spliced on device, verify, precompute, accept on device,
+//!   `advance` from the device's `num_accepted` — one launch and one sync
+//!   per round instead of four; the host reads `draft_tokens` /
+//!   `verify_tokens` and accepts the same prefix. Whether a round beats a
+//!   plain step at a given batch size is the operator's call, not the
+//!   scheduler's: the flag picks the mode for the process.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use kern_manifest::types::{Arg, Dim};
+use kern_run::{first_i64, i64_from_le, le_bytes_i32, le_bytes_i64};
 use kern_runtime::{Denied, Error, Lease, Runtime};
 use pegainfer_frontend::engine::{
     FinishReason, QueuedRequest, RejectReason, RequestId, RequestLedger, Scheduler,
@@ -77,10 +83,6 @@ pub struct Policy {
     pub spec: bool,
 }
 
-/// DSpark's mask token when the manifest declares no `spec` block.
-const DSPARK_MASK_TOKEN: i64 = 151669;
-
-/// The manifest's speculative contract, one row-group per sequence.
 /// A line table over a per-sequence state, shaped `[lines, seqs]` or
 /// `[lines, seqs, w]`: `rows` lines per sequence, `width` entries per
 /// (line, sequence) cell.
@@ -90,6 +92,10 @@ struct LineTable {
     width: usize,
 }
 
+/// DSpark's mask token when the manifest declares no `spec` block.
+const DSPARK_MASK_TOKEN: i64 = 151669;
+
+/// The manifest's speculative contract, one row-group per sequence.
 struct SpecPlan {
     /// Tokens `draft` proposes per sequence (`draft_tokens` is `[seqs, n]`).
     n_drafts: usize,
@@ -101,6 +107,9 @@ struct SpecPlan {
     /// The target resumes a recurrent state from `num_accepted_tokens`
     /// (one per sequence) and commits the accepted rows with `advance`.
     advance: bool,
+    /// The manifest has `round`: the whole round is one program (draft
+    /// and verify rows per sequence coincide, so one staging serves both).
+    fused: bool,
     counters: SpecDecodeCounters,
 }
 
@@ -117,6 +126,51 @@ struct Seq {
     pages: Lease,
     prompt_len: usize,
     admitted: Instant,
+}
+
+impl Seq {
+    /// Account `toks` as generated, in order: each is emitted until a stop
+    /// token (itself not emitted, pegainfer convention; it still counts
+    /// against `max_tokens` like vLLM's) or `max_tokens`. Finishes the
+    /// request in the ledger when it is done, otherwise the last token is
+    /// the next step's input. Returns how many tokens were emitted and
+    /// whether the sequence finished.
+    fn emit(&mut self, toks: &[u32], stop: &[u32], ledger: &mut RequestLedger) -> (u64, bool) {
+        let mut out = Vec::with_capacity(toks.len());
+        let mut reason = None;
+        for &tok in toks {
+            self.generated += 1;
+            if !self.ignore_eos && stop.contains(&tok) {
+                reason = Some(FinishReason::Stop);
+                break;
+            }
+            out.push(tok);
+            if self.generated >= self.max_tokens {
+                reason = Some(FinishReason::Length);
+                break;
+            }
+        }
+        if !out.is_empty() {
+            ledger.push_tokens(self.id, &out, &[]);
+        }
+        let done = match reason {
+            Some(r) => {
+                debug!(
+                    "finished {}: {r:?}, {} prompt + {} generated in {:?}",
+                    self.id, self.prompt_len, self.generated, self.admitted.elapsed()
+                );
+                ledger.finish(self.id, r);
+                true
+            }
+            None => {
+                if let Some(&t) = toks.last() {
+                    self.next = t;
+                }
+                false
+            }
+        };
+        (out.len() as u64, done)
+    }
 }
 
 pub struct KernScheduler {
@@ -138,13 +192,25 @@ pub struct KernScheduler {
     waiting: VecDeque<QueuedRequest>,
     running: Vec<Seq>,
     warned_sampling: bool,
-    // Rolling stats for the periodic log line.
-    stat_since: Instant,
-    stat_steps: u64,
-    stat_tokens: u64,
-    stat_decode_ns: u128,
-    stat_prefill_tokens: u64,
-    stat_prefill_ns: u128,
+    stats: Stats,
+}
+
+/// Rolling counters for the periodic log line, reset when it prints.
+struct Stats {
+    since: Instant,
+    /// Decode steps (speculative rounds under `--spec`) and their time.
+    steps: u64,
+    step_ns: u128,
+    /// Tokens emitted to the ledger.
+    tokens: u64,
+    prefill_tokens: u64,
+    prefill_ns: u128,
+}
+
+impl Stats {
+    fn new() -> Stats {
+        Stats { since: Instant::now(), steps: 0, step_ns: 0, tokens: 0, prefill_tokens: 0, prefill_ns: 0 }
+    }
 }
 
 /// Public facts the frontend wants at launch.
@@ -202,8 +268,10 @@ impl KernScheduler {
         policy.max_seqs = policy.max_seqs.clamp(1, seqs_max);
         policy.chunk = policy.chunk.clamp(1, tokens_max);
         let spec = if policy.spec {
-            for p in ["decode_spec", "draft", "verify", "draft_precompute"] {
-                if !m.programs.contains_key(p) {
+            let fused = m.programs.contains_key("round");
+            let phased: &[&str] = if fused { &[] } else { &["draft", "verify"] };
+            for p in ["decode_spec", "draft_precompute"].iter().chain(phased) {
+                if !m.programs.contains_key(*p) {
                     bail!("--spec needs program `{p}` (not in this manifest)");
                 }
             }
@@ -245,6 +313,9 @@ impl KernScheduler {
             if rows > rt.page() as usize {
                 bail!("--spec: {rows} rows per sequence per round exceed the {}-token pad page", rt.page());
             }
+            if fused && draft_rows != verify_rows {
+                bail!("--spec: `round` needs draft and verify rows per sequence to coincide, got {draft_rows} and {verify_rows}");
+            }
             // A round's rows: every sequence's row-group must fit `tokens`.
             policy.max_seqs = policy.max_seqs.min(tokens_max / rows).max(1);
             Some(SpecPlan {
@@ -253,6 +324,7 @@ impl KernScheduler {
                 verify_rows,
                 mask_token,
                 advance,
+                fused,
                 counters: SpecDecodeCounters {
                     num_spec_tokens: n_drafts as u64,
                     num_drafts: 0,
@@ -291,7 +363,10 @@ impl KernScheduler {
             if policy.eager { ", eager" } else { ", graphs captured per bucket on first use" },
             if prefill_emits { ", prefill emits next_token" } else { "" },
             match &spec {
-                Some(s) => format!(", speculative: {} drafts/round ({} draft + {} verify rows per sequence)", s.n_drafts, s.draft_rows, s.verify_rows),
+                Some(s) => format!(
+                    ", speculative: {} drafts/round ({} draft + {} verify rows per sequence{})",
+                    s.n_drafts, s.draft_rows, s.verify_rows, if s.fused { ", fused `round`" } else { "" }
+                ),
                 None => String::new(),
             }
         );
@@ -308,12 +383,7 @@ impl KernScheduler {
                 waiting: VecDeque::new(),
                 running: Vec::new(),
                 warned_sampling: false,
-                stat_since: Instant::now(),
-                stat_steps: 0,
-                stat_tokens: 0,
-                stat_decode_ns: 0,
-                stat_prefill_tokens: 0,
-                stat_prefill_ns: 0,
+                stats: Stats::new(),
             },
             facts,
         ))
@@ -382,8 +452,8 @@ impl KernScheduler {
             // last, which is the first decode step's input.
             let n_pre = if self.prefill_emits { prompt } else { prompt - 1 };
             let first = self.prefill(&pages, &ids[..n_pre])?;
-            self.stat_prefill_ns += t0.elapsed().as_nanos();
-            self.stat_prefill_tokens += n_pre as u64;
+            self.stats.prefill_ns += t0.elapsed().as_nanos();
+            self.stats.prefill_tokens += n_pre as u64;
             budget_used += n_pre;
             debug!(
                 "admitted {id}: {prompt} prompt tokens, max_tokens {max_tokens}, {:?}, prefill {:?}",
@@ -414,23 +484,26 @@ impl KernScheduler {
                 None => None,
             };
             if let Some(tok) = first {
-                seq.generated += 1;
-                let reason = if !seq.ignore_eos && self.policy.stop_tokens.contains(&tok) {
-                    Some(FinishReason::Stop)
-                } else {
-                    ledger.push_tokens(id, &[tok], &[]);
-                    self.stat_tokens += 1;
-                    (seq.generated >= seq.max_tokens).then_some(FinishReason::Length)
-                };
-                if let Some(r) = reason {
-                    ledger.finish(id, r);
+                let (emitted, done) = seq.emit(&[tok], &self.policy.stop_tokens, ledger);
+                self.stats.tokens += emitted;
+                if done {
                     continue;
                 }
-                seq.next = tok;
             }
             self.running.push(seq);
         }
         Ok(())
+    }
+
+    /// Drop aborted sequences before a step so they neither pad nor compute.
+    fn drop_aborted(&mut self, ledger: &mut RequestLedger) {
+        self.running.retain(|s| {
+            let live = !ledger.is_aborted(s.id);
+            if !live {
+                ledger.retire(s.id);
+            }
+            live
+        });
     }
 
     /// Pages available to requests / held by them (the pad page excluded).
@@ -455,11 +528,11 @@ impl KernScheduler {
             let positions: Vec<i64> = (pos..pos + c).map(|p| p as i64).collect();
             let slots = pages.slots(pos..pos + c);
             let rt = &mut self.rt.0;
-            rt.write_input_at("token_ids", &le_i64(&ids[pos..pos + c]), &env)?;
-            rt.write_input_at("positions", &le_i64(&positions), &env)?;
-            rt.write_input_at("slot_mapping", &le_i64(&slots), &env)?;
-            rt.write_input_at("seq_lens", &le_i32(&[(pos + c) as i32]), &env)?;
-            rt.write_input_at("cu_seqlens_q", &le_i32(&[0, c as i32]), &env)?;
+            rt.write_input_at("token_ids", &le_bytes_i64(&ids[pos..pos + c]), &env)?;
+            rt.write_input_at("positions", &le_bytes_i64(&positions), &env)?;
+            rt.write_input_at("slot_mapping", &le_bytes_i64(&slots), &env)?;
+            rt.write_input_at("seq_lens", &le_bytes_i32(&[(pos + c) as i32]), &env)?;
+            rt.write_input_at("cu_seqlens_q", &le_bytes_i32(&[0, c as i32]), &env)?;
             stage_tables(rt, &self.page_tables, &[pages], &self.pad, 1, &env)?;
             let eager = self.policy.eager || c != chunk;
             run_program(rt, "prefill", &env, eager)?;
@@ -473,8 +546,7 @@ impl KernScheduler {
         if !self.prefill_emits || ids.is_empty() {
             return Ok(None);
         }
-        let out = self.rt.0.read_output("next_token")?;
-        Ok(Some(i64::from_le_bytes(out[..8].try_into().unwrap()) as u32))
+        Ok(Some(first_i64(&self.rt.0.read_output("next_token")?) as u32))
     }
 
     /// Stage every line table: column i names sequence i's lines, the
@@ -492,35 +564,29 @@ impl KernScheduler {
         let env = env(1, 1);
         self.stage_lines(&[&s.pages], &[])?;
         let rt = &mut self.rt.0;
-        rt.write_input_at("token_ids", &le_i64(&[s.next as i64]), &env)?;
-        rt.write_input_at("positions", &le_i64(&[s.pos as i64]), &env)?;
-        rt.write_input_at("slot_mapping", &le_i64(&[s.pages.slot(s.pos)]), &env)?;
-        rt.write_input_at("seq_lens", &le_i32(&[s.pos as i32 + 1]), &env)?;
-        rt.write_input_at("cu_seqlens_q", &le_i32(&[0, 1]), &env)?;
+        rt.write_input_at("token_ids", &le_bytes_i64(&[s.next as i64]), &env)?;
+        rt.write_input_at("positions", &le_bytes_i64(&[s.pos as i64]), &env)?;
+        rt.write_input_at("slot_mapping", &le_bytes_i64(&[s.pages.slot(s.pos)]), &env)?;
+        rt.write_input_at("seq_lens", &le_bytes_i32(&[s.pos as i32 + 1]), &env)?;
+        rt.write_input_at("cu_seqlens_q", &le_bytes_i32(&[0, 1]), &env)?;
         stage_tables(rt, &self.page_tables, &[&s.pages], &self.pad, 1, &env)?;
         run_program(rt, "decode_spec", &env, self.policy.eager)?;
         run_program(rt, "draft_precompute", &env, self.policy.eager)?;
-        let out = rt.read_output("next_token")?;
-        Ok(i64::from_le_bytes(out[..8].try_into().unwrap()) as u32)
+        Ok(first_i64(&rt.read_output("next_token")?) as u32)
     }
 
     /// One speculative round over every running sequence: draft, verify,
-    /// precompute, accept.
+    /// precompute, accept — the `round` program, or the four phased ones.
     fn spec_round(&mut self, ledger: &mut RequestLedger) -> Result<()> {
-        self.running.retain(|s| {
-            let live = !ledger.is_aborted(s.id);
-            if !live {
-                ledger.retire(s.id);
-            }
-            live
-        });
+        self.drop_aborted(ledger);
         let n = self.running.len();
         if n == 0 {
             return Ok(());
         }
         let b = self.bucket(n);
         let plan = self.spec.as_ref().unwrap();
-        let (nd, dr, vr, mask, advance) = (plan.n_drafts, plan.draft_rows, plan.verify_rows, plan.mask_token, plan.advance);
+        let (nd, dr, vr, mask, advance, fused) =
+            (plan.n_drafts, plan.draft_rows, plan.verify_rows, plan.mask_token, plan.advance, plan.fused);
         let t0 = Instant::now();
 
         // A batch of row-groups: `rows` per sequence, padding sequences
@@ -544,28 +610,26 @@ impl KernScheduler {
                     pad,
                 }
             }
-            fn push(&mut self, ids: &[i64], pos: usize, pages: &Lease) -> Result<()> {
+            fn push(&mut self, ids: &[i64], pos: usize, pages: &Lease) {
                 let rows = ids.len();
                 self.ids.extend_from_slice(ids);
                 self.positions.extend((pos..pos + rows).map(|p| p as i64));
                 self.slots.extend(pages.slots(pos..pos + rows));
                 self.seq_lens.push((pos + rows) as i32);
                 self.cu.push(self.cu.last().unwrap() + rows as i32);
-                Ok(())
             }
-            fn pad_to(&mut self, b: usize, rows: usize) -> Result<()> {
+            fn pad_to(&mut self, b: usize, rows: usize) {
                 let pad = self.pad;
                 while self.seq_lens.len() < b {
-                    self.push(&vec![0; rows], 0, pad)?;
+                    self.push(&vec![0; rows], 0, pad);
                 }
-                Ok(())
             }
             fn stage(&self, rt: &mut Runtime, env: &BTreeMap<String, u64>) -> Result<()> {
-                rt.write_input_at("token_ids", &le_i64(&self.ids), env)?;
-                rt.write_input_at("positions", &le_i64(&self.positions), env)?;
-                rt.write_input_at("slot_mapping", &le_i64(&self.slots), env)?;
-                rt.write_input_at("seq_lens", &le_i32(&self.seq_lens), env)?;
-                rt.write_input_at("cu_seqlens_q", &le_i32(&self.cu), env)?;
+                rt.write_input_at("token_ids", &le_bytes_i64(&self.ids), env)?;
+                rt.write_input_at("positions", &le_bytes_i64(&self.positions), env)?;
+                rt.write_input_at("slot_mapping", &le_bytes_i64(&self.slots), env)?;
+                rt.write_input_at("seq_lens", &le_bytes_i32(&self.seq_lens), env)?;
+                rt.write_input_at("cu_seqlens_q", &le_bytes_i32(&self.cu), env)?;
                 Ok(())
             }
         }
@@ -576,10 +640,10 @@ impl KernScheduler {
         let mut ids = vec![mask; dr];
         for s in &self.running {
             ids[0] = s.next as i64;
-            g.push(&ids, s.pos, &s.pages)?;
+            g.push(&ids, s.pos, &s.pages);
             anchors.push(s.next as i64);
         }
-        g.pad_to(b, dr)?;
+        g.pad_to(b, dr);
         anchors.resize(b, 0);
         let env_d = env(b * dr, b);
         let eager = self.policy.eager;
@@ -590,32 +654,42 @@ impl KernScheduler {
         let rt = &mut self.rt.0;
         stage_tables(rt, &self.page_tables, &leases, &self.pad, b, &env_d)?;
         g.stage(rt, &env_d)?;
-        rt.write_input_at("anchor_token", &le_i64(&anchors), &env_d)?;
-        run_program(rt, "draft", &env_d, eager)?;
-        let drafts = i64s(&rt.read_output("draft_tokens")?);
+        rt.write_input_at("anchor_token", &le_bytes_i64(&anchors), &env_d)?;
+        let (drafts, vt) = if fused {
+            // Verify resumes from the committed state; the round's accept
+            // writes advance's own `num_accepted` and line table.
+            if advance {
+                rt.write_input_at("num_accepted_tokens", &le_bytes_i32(&vec![1; b]), &env_d)?;
+            }
+            run_program(rt, "round", &env_d, eager)?;
+            (i64_from_le(&rt.read_output("draft_tokens")?), i64_from_le(&rt.read_output("verify_tokens")?))
+        } else {
+            run_program(rt, "draft", &env_d, eager)?;
+            let drafts = i64_from_le(&rt.read_output("draft_tokens")?);
 
-        // Verify: [anchor, d0..] per sequence at pos.., causal; row i of a
-        // group answers "what follows position pos+i".
-        let mut g = Group::new(b * vr, &self.pad);
-        let mut ids = vec![0i64; vr];
-        for (i, s) in self.running.iter().enumerate() {
-            ids[0] = s.next as i64;
-            ids[1..].copy_from_slice(&drafts[i * nd..i * nd + nd]);
-            g.push(&ids, s.pos, &s.pages)?;
-        }
-        g.pad_to(b, vr)?;
-        let env_v = env(b * vr, b);
-        let rt = &mut self.rt.0;
-        g.stage(rt, &env_v)?;
-        if advance {
-            rt.write_input_at("num_accepted_tokens", &le_i32(&vec![1; b]), &env_v)?;
-        }
-        run_program(rt, "verify", &env_v, eager)?;
-        let vt = i64s(&rt.read_output("verify_tokens")?);
-        // Every row's tap into the draft KV (positions/slot_mapping are
-        // still verify's): rejected rows land past the sequence's new
-        // position and the next round overwrites them.
-        run_program(rt, "draft_precompute", &env_v, eager)?;
+            // Verify: [anchor, d0..] per sequence at pos.., causal; row i of
+            // a group answers "what follows position pos+i".
+            let mut g = Group::new(b * vr, &self.pad);
+            let mut ids = vec![0i64; vr];
+            for (i, s) in self.running.iter().enumerate() {
+                ids[0] = s.next as i64;
+                ids[1..].copy_from_slice(&drafts[i * nd..i * nd + nd]);
+                g.push(&ids, s.pos, &s.pages);
+            }
+            g.pad_to(b, vr);
+            let env_v = env(b * vr, b);
+            g.stage(rt, &env_v)?;
+            if advance {
+                rt.write_input_at("num_accepted_tokens", &le_bytes_i32(&vec![1; b]), &env_v)?;
+            }
+            run_program(rt, "verify", &env_v, eager)?;
+            let vt = i64_from_le(&rt.read_output("verify_tokens")?);
+            // Every row's tap into the draft KV (positions/slot_mapping are
+            // still verify's): rejected rows land past the sequence's new
+            // position and the next round overwrites them.
+            run_program(rt, "draft_precompute", &env_v, eager)?;
+            (drafts, vt)
+        };
 
         // Accept the longest matching prefix; vt[a] is the correction (or
         // the bonus token when everything matched).
@@ -626,7 +700,7 @@ impl KernScheduler {
                 d.iter().zip(v).take_while(|(x, y)| x == y).count()
             })
             .collect();
-        if advance {
+        if advance && !fused {
             // Commit the accepted rows into the recurrent state: the
             // target re-runs verify's rows from the state after the anchor
             // and stores after the last accepted one — the line moves to
@@ -635,11 +709,12 @@ impl KernScheduler {
             nacc.resize(b, 1);
             stage_lines(&mut self.rt.0, &self.line_tables, self.seqs_max, &self.pad, &leases, &accepted)?;
             let rt = &mut self.rt.0;
-            rt.write_input_at("num_accepted_tokens", &le_i32(&nacc), &env_v)?;
+            let env_v = env(b * vr, b);
+            rt.write_input_at("num_accepted_tokens", &le_bytes_i32(&nacc), &env_v)?;
             run_program(rt, "advance", &env_v, eager)?;
         }
-        self.stat_decode_ns += t0.elapsed().as_nanos();
-        self.stat_steps += 1;
+        self.stats.step_ns += t0.elapsed().as_nanos();
+        self.stats.steps += 1;
 
         let plan = self.spec.as_mut().unwrap();
         let stop = &self.policy.stop_tokens;
@@ -656,56 +731,18 @@ impl KernScheduler {
             plan.counters.num_draft_tokens += nd as u64;
             plan.counters.num_accepted_tokens += a as u64;
             s.pos += a + 1;
-            let mut out = Vec::with_capacity(a + 1);
-            let mut reason = None;
-            for &tok in &v[..=a] {
-                let tok = tok as u32;
-                s.generated += 1;
-                // The stop token itself is not emitted (pegainfer
-                // convention); it still counts against max_tokens.
-                if !s.ignore_eos && stop.contains(&tok) {
-                    reason = Some(FinishReason::Stop);
-                    break;
-                }
-                out.push(tok);
-                if s.generated >= s.max_tokens {
-                    reason = Some(FinishReason::Length);
-                    break;
-                }
-            }
-            if !out.is_empty() {
-                ledger.push_tokens(s.id, &out, &[]);
-                emitted += out.len() as u64;
-            }
-            match reason {
-                Some(r) => {
-                    debug!(
-                        "finished {}: {r:?}, {} prompt + {} generated in {:?}",
-                        s.id, s.prompt_len, s.generated, s.admitted.elapsed()
-                    );
-                    ledger.finish(s.id, r);
-                    false
-                }
-                None => {
-                    s.next = v[a] as u32;
-                    true
-                }
-            }
+            let toks: Vec<u32> = v[..=a].iter().map(|&t| t as u32).collect();
+            let (n, done) = s.emit(&toks, stop, ledger);
+            emitted += n;
+            !done
         });
-        self.stat_tokens += emitted;
+        self.stats.tokens += emitted;
         Ok(())
     }
 
     /// One decode step over every running sequence.
     fn decode(&mut self, ledger: &mut RequestLedger) -> Result<()> {
-        // Drop aborted sequences first so they neither pad nor compute.
-        self.running.retain(|s| {
-            let live = !ledger.is_aborted(s.id);
-            if !live {
-                ledger.retire(s.id);
-            }
-            live
-        });
+        self.drop_aborted(ledger);
         let n = self.running.len();
         if n == 0 {
             return Ok(());
@@ -736,53 +773,35 @@ impl KernScheduler {
         stage_lines(&mut self.rt.0, &self.line_tables, self.seqs_max, &self.pad, &leases, &[])?;
         let rt = &mut self.rt.0;
         stage_tables(rt, &self.page_tables, &leases, &self.pad, b, &env)?;
-        rt.write_input_at("token_ids", &le_i64(&token_ids), &env)?;
-        rt.write_input_at("positions", &le_i64(&positions), &env)?;
-        rt.write_input_at("slot_mapping", &le_i64(&slots), &env)?;
-        rt.write_input_at("seq_lens", &le_i32(&seq_lens), &env)?;
-        rt.write_input_at("cu_seqlens_q", &le_i32(&cu), &env)?;
+        rt.write_input_at("token_ids", &le_bytes_i64(&token_ids), &env)?;
+        rt.write_input_at("positions", &le_bytes_i64(&positions), &env)?;
+        rt.write_input_at("slot_mapping", &le_bytes_i64(&slots), &env)?;
+        rt.write_input_at("seq_lens", &le_bytes_i32(&seq_lens), &env)?;
+        rt.write_input_at("cu_seqlens_q", &le_bytes_i32(&cu), &env)?;
         run_program(rt, program, &env, self.policy.eager)?;
-        let out = rt.read_output("next_token")?;
-        self.stat_decode_ns += t0.elapsed().as_nanos();
-        self.stat_steps += 1;
-        self.stat_tokens += n as u64;
+        let out = i64_from_le(&rt.read_output("next_token")?);
+        self.stats.step_ns += t0.elapsed().as_nanos();
+        self.stats.steps += 1;
 
         let mut i = 0;
         let stop = &self.policy.stop_tokens;
+        let mut emitted = 0u64;
         self.running.retain_mut(|s| {
-            let tok = i64::from_le_bytes(out[i * 8..i * 8 + 8].try_into().unwrap()) as u32;
+            let tok = out[i] as u32;
             i += 1;
             s.pos += 1;
-            s.generated += 1;
-            // The stop token itself is not emitted (pegainfer convention);
-            // it still counts against max_tokens like vLLM's.
-            let reason = if !s.ignore_eos && stop.contains(&tok) {
-                Some(FinishReason::Stop)
-            } else {
-                ledger.push_tokens(s.id, &[tok], &[]);
-                (s.generated >= s.max_tokens).then_some(FinishReason::Length)
-            };
-            match reason {
-                Some(r) => {
-                    debug!(
-                        "finished {}: {r:?}, {} prompt + {} generated in {:?}",
-                        s.id, s.prompt_len, s.generated, s.admitted.elapsed()
-                    );
-                    ledger.finish(s.id, r);
-                    false
-                }
-                None => {
-                    s.next = tok;
-                    true
-                }
-            }
+            let (n, done) = s.emit(&[tok], stop, ledger);
+            emitted += n;
+            !done
         });
+        self.stats.tokens += emitted;
         Ok(())
     }
 
     fn log_stats(&mut self) {
-        let dt = self.stat_since.elapsed();
-        if dt.as_secs() < 5 || self.stat_steps == 0 && self.stat_prefill_tokens == 0 {
+        let st = &self.stats;
+        let dt = st.since.elapsed();
+        if dt.as_secs() < 5 || st.steps == 0 && st.prefill_tokens == 0 {
             return;
         }
         let spec = match &self.spec {
@@ -803,19 +822,14 @@ impl KernScheduler {
             self.kv_used(),
             self.kv_total(),
             if self.spec.is_some() { "spec" } else { "decode" },
-            self.stat_steps,
+            st.steps,
             if self.spec.is_some() { "rounds" } else { "steps" },
-            self.stat_decode_ns as f64 / 1e6 / self.stat_steps.max(1) as f64,
-            self.stat_tokens as f64 / dt.as_secs_f64(),
-            self.stat_prefill_tokens,
-            self.stat_prefill_tokens as f64 / (self.stat_prefill_ns as f64 / 1e9).max(1e-9),
+            st.step_ns as f64 / 1e6 / st.steps.max(1) as f64,
+            st.tokens as f64 / dt.as_secs_f64(),
+            st.prefill_tokens,
+            st.prefill_tokens as f64 / (st.prefill_ns as f64 / 1e9).max(1e-9),
         );
-        self.stat_since = Instant::now();
-        self.stat_steps = 0;
-        self.stat_tokens = 0;
-        self.stat_decode_ns = 0;
-        self.stat_prefill_tokens = 0;
-        self.stat_prefill_ns = 0;
+        self.stats = Stats::new();
     }
 }
 
@@ -887,7 +901,7 @@ fn stage_lines(
                 t[(r * seqs_max + i) * w + col] = line;
             }
         }
-        rt.write_input(name, &le_i32(&t))?;
+        rt.write_input(name, &le_bytes_i32(&t))?;
     }
     Ok(())
 }
@@ -907,23 +921,11 @@ fn stage_tables(
         for i in 0..b {
             seqs.get(i).copied().unwrap_or(pad).extend_row(name, &mut t)?;
         }
-        rt.write_input_at(name, &le_i32(&t), env)?;
+        rt.write_input_at(name, &le_bytes_i32(&t), env)?;
     }
     Ok(())
 }
 
-fn i64s(bytes: &[u8]) -> Vec<i64> {
-    bytes.chunks_exact(8).map(|c| i64::from_le_bytes(c.try_into().unwrap())).collect()
-}
-
 fn env(tokens: usize, seqs: usize) -> BTreeMap<String, u64> {
     BTreeMap::from([("tokens".to_string(), tokens as u64), ("seqs".to_string(), seqs as u64)])
-}
-
-fn le_i64(v: &[i64]) -> Vec<u8> {
-    v.iter().flat_map(|x| x.to_le_bytes()).collect()
-}
-
-fn le_i32(v: &[i32]) -> Vec<u8> {
-    v.iter().flat_map(|x| x.to_le_bytes()).collect()
 }

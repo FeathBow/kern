@@ -83,6 +83,15 @@ manifest 得带 `draft` / `verify` / `draft_precompute` / `decode_spec`
   行上跑（被拒行落在各序列新 pos 之后，下一轮覆写，和 target KV 的免费
   回滚是一回事，所以不用按接受数 compact）→ host 逐序列前缀匹配，emit
   `a+1` 个 token。三段各按 bucket 捕成图；pad 序列的行写 pad 页。
+- manifest 带 `round` 时（`qwen3.8-27b-dflash2`），整轮是**一个 program、
+  一张图、一次 sync**：draft → `splice_verify`（device 上把 anchor +
+  `draft_tokens` 拼成 verify 的 ids，`verify_ids` carry）→ verify →
+  precompute → `spec_accept`（device 上前缀匹配，写 advance 自己的
+  `nacc_adv` / `line_adv` carry——kernel 不能写 Input，所以是替身）→
+  advance。host 只 stage 一次 8 行组（draft/verify 每序列行数相同，
+  positions/slot_mapping 共用），轮末读 `draft_tokens` / `verify_tokens`
+  照旧前缀匹配，emit 与分段路径一字不差。分段的 `draft`/`verify`/`advance`
+  仍在 manifest 里，`kern run --spec --probe-dir` 逐轮 dump 靠它们。
 - greedy only；`--spec` 是能力开关，不按 bs 自动切换——每轮 verify 是
   8·b 行的 target 前向，bs 大到算力瓶颈后一轮比一步贵得多，划不划算由
   用户按模型和负载定。

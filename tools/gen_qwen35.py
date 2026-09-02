@@ -673,6 +673,13 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
             "fc_out": {"dtype": "bf16", "shape": ["tokens", HIDDEN], "kind": "carry"},
             "verify_tokens": {"dtype": "i64", "shape": ["seqs", SPEC_BLOCK], "kind": "output"},
             "draft_tokens": {"dtype": "i64", "shape": ["seqs", DRAFT_TOKENS], "kind": "output"},
+            # the fused `round`'s device-written twins of what the host stages
+            # between the phased programs: verify's ids (spliced from draft's
+            # output), advance's num_accepted and its line table (the line in
+            # entry `accepted`) — kernels may not write inputs
+            "verify_ids": {"dtype": "i64", "shape": ["tokens"], "kind": "carry"},
+            "nacc_adv": {"dtype": "i32", "shape": ["seqs"], "kind": "carry"},
+            "line_adv": {"dtype": "i32", "shape": [len(GDN_LAYERS), "seqs", SPEC_BLOCK], "kind": "carry"},
             "logits_blk": {"dtype": "bf16", "shape": [SPEC_ROWS_MAX, VOCAB], "kind": "workspace"},
             "cand_ids": {"dtype": "i64", "shape": [SPEC_ROWS_MAX, SEL_K], "kind": "workspace"},
             "cand_vals": {"dtype": "f32", "shape": [SPEC_ROWS_MAX, SEL_K], "kind": "workspace"},
@@ -983,6 +990,16 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
             "conv_shift": single("kern_conv_shift",
                                  ["in buffer<i32>", "i32", "inout state", "in buffer<i32>", "i64", "i64"],
                                  [256, 1, 1], [S, CONV_DIM * BF16 // 16 // 256, 1], **hw("gdn_advance")),
+            # the fused round's glue (tools/kernels-src/spec_round.cu): verify's
+            # ids from draft's output; accept -> num_accepted + the line table
+            # entry advance reads
+            "splice_verify": single("kern_splice_verify",
+                                    ["in buffer<i64>", "in buffer<i64>", "out buffer<i64>", "i32"],
+                                    [32, 1, 1], [S, 1, 1], **hw("spec_round")),
+            "spec_accept": single("kern_spec_accept",
+                                  ["in buffer<i64>", "in buffer<i64>", "in buffer<i32>", "out buffer<i32>",
+                                   "out buffer<i32>", "i32", "i32", "i32"],
+                                  [64, 1, 1], [S, 1, 1], **hw("spec_round")),
             # verify's attention: the 2D causal instance over SPEC_BLOCK rows
             # per sequence; q-block index space tokens//BLOCK_Q + seqs
             "attn_verify": tri("unified", ATTN_IFACE,
@@ -1151,17 +1168,18 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
         ds.append(gemm(l + "out_proj", "core_attn_out", p + "out_proj.weight", "y", T, HIDDEN, GDN_V))
         return ds
 
-    def advance_layer(i):
+    def advance_layer(i, nacc_buf="num_accepted_tokens", table="gdn.line_index"):
         """Commit GDN layer i's accepted rows after a verify (spec): a/b
         with row 0 of every sequence (the anchor, already in the state)
         masked to -inf, the recurrent kernel over verify's saved rows
         loading the after-anchor state from entry a = num_accepted-1 of the
-        cell and storing after row a, the conv history shifted down by a."""
+        cell and storing after row a, the conv history shifted down by a.
+        `nacc_buf` / `table`: host-staged inputs, or the round's twins."""
         p = f"model.layers.{i}.linear_attn."
         l = f"l{i}."
         g = GDN_LAYERS.index(i)
-        idx = buf("gdn.line_index", 4 * line_w * MAX_SEQS * g)
-        nacc = buf("num_accepted_tokens")
+        idx = buf(table, 4 * line_w * MAX_SEQS * g)
+        nacc = buf(nacc_buf)
         ks, vs_, as_, bs_ = saved(g)
         return [
             d(l + "mask_a", "mask_row0", [buf("a_c"), as_, T, i32(SPEC_BLOCK), i32(GDN_V_HEADS)]),
@@ -1213,18 +1231,19 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
             gemm(l + "o_proj", "gated", p + "o_proj.weight", "y", T, HIDDEN, Q_DIM),
         ]
 
-    def forward(decode, taps=False, nacc=None, tail=None, batch=False):
+    def forward(decode, taps=False, nacc=None, tail=None, batch=False, ids="token_ids"):
         """Target forward.  decode: recurrent GDN + split-KV attention (else
         chunked FLA + 2D attention over the `tokens` rows); batch: recurrent
         GDN + 2D attention, one row per sequence (tokens = seqs).  taps: the
         five fc GEMMs into `fc_out` at the DFlash taps (after layers
         5/19/33/47/61: residual = hidden + residual there).  tail: "prefill"
         (last row -> next_token), "decode" (row 0 -> next_token), "batch"
-        (every row -> next_token), "verify" (all rows -> verify_tokens)."""
+        (every row -> next_token), "verify" (all rows -> verify_tokens).
+        ids: the token buffer the embedding reads."""
         tail = tail or ("batch" if batch else "decode" if decode else "prefill")
         ds = [
             d("embed", "embedding",
-              [buf("token_ids"), buf("model.embed_tokens.weight"), buf("residual"), T, i32(HIDDEN)]),
+              [buf(ids), buf("model.embed_tokens.weight"), buf("residual"), T, i32(HIDDEN)]),
             # rope tables gathered by position; mrope gets num_tokens=0 so its
             # three (t/h/w) planes alias this one table — text-only positions
             d("rope_cos", "embedding", [buf("positions"), buf("rope.cos"), buf("cos_g"), T, i32(ROT_HALF)]),
@@ -1419,6 +1438,27 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
             "draft": draft(),
             "draft_precompute": draft_precompute(),
         }
+        # round = the whole speculative round as one program (one CUDA graph,
+        # one host sync): draft, verify's ids spliced on device, verify,
+        # every row's tap into the draft KV, accept on device, advance from
+        # the accept's num_accepted / line table. The caller stages the draft
+        # rows ([anchor, mask x7] per sequence), num_accepted_tokens = 1 and
+        # the line table with the line in entry 0, then reads draft_tokens /
+        # verify_tokens. Rows per sequence are the same in draft and verify,
+        # so positions / slot_mapping / seq_lens / cu_seqlens_q are shared.
+        def pre(prefix, calls):
+            return [dict(c, label=f"{prefix}.{c['label']}") for c in calls]
+        programs["round"] = (
+            pre("draft", draft())
+            + [d("splice", "splice_verify",
+                 [buf("anchor_token"), buf("draft_tokens"), buf("verify_ids"), i32(SPEC_BLOCK)])]
+            + pre("verify", forward(False, taps=True, nacc=nacc, tail="verify", ids="verify_ids"))
+            + pre("precompute", draft_precompute())
+            + [d("accept", "spec_accept",
+                 [buf("draft_tokens"), buf("verify_tokens"), buf("gdn.line_index"), buf("nacc_adv"),
+                  buf("line_adv"), i32(SPEC_BLOCK), i32(len(GDN_LAYERS)), i32(MAX_SEQS)])]
+            + pre("advance", [c for i in GDN_LAYERS for c in advance_layer(i, "nacc_adv", "line_adv")])
+        )
         states["draft_kv"] = {"bytes_per_token": D_KV_BYTES_PER_TOKEN}
         head = {"schema_version": 3, "model": "qwen3.8-27b-dflash2",
                 # caller contract: draft rows = [anchor] + [mask] * (block-1) at
@@ -1429,6 +1469,8 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
             "num_accepted_tokens": {"min": 1, "max": SPEC_BLOCK},
             "draft_block_table": {"index_into": "draft_kv", "stride": D_BLOCK},
             "anchor_token": TOKEN_DOMAIN, "verify_tokens": TOKEN_DOMAIN, "draft_tokens": TOKEN_DOMAIN,
+            "verify_ids": TOKEN_DOMAIN, "nacc_adv": {"min": 1, "max": SPEC_BLOCK},
+            "line_adv": DOMAINS["gdn.line_index"],
             "cand_ids": {"index_into": "draft.selector.successor"},
             "draft.kv_scales": {"min": 0.0},
         })

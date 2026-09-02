@@ -32,7 +32,7 @@ use std::fmt;
 use std::ops::Range;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use kern_manifest::types::{Dim, Manifest};
+use kern_manifest::types::{BufferKind, Dim, Manifest};
 
 use crate::error::{bail, Result};
 
@@ -71,11 +71,16 @@ fn lock(free: &Mutex<Vec<i32>>) -> MutexGuard<'_, Vec<i32>> {
     free.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The page tables: every input whose domain `index_into`s a paged state.
+/// The page tables: every input whose domain `index_into`s a paged state
+/// (an index a kernel writes — a carry — is the manifest's business, not
+/// the host's).
 fn tables(m: &Manifest) -> BTreeMap<String, Table> {
     m.buffers
         .iter()
         .filter_map(|(name, b)| {
+            if b.kind != BufferKind::Input {
+                return None;
+            }
             let d = b.domain.as_ref()?;
             if !m.states.get(d.index_into.as_deref()?).is_some_and(|s| !s.is_per_seq()) {
                 return None;
@@ -91,6 +96,9 @@ fn tables(m: &Manifest) -> BTreeMap<String, Table> {
 fn seq_tables(m: &Manifest) -> Result<BTreeMap<String, SeqTable>> {
     let mut out = BTreeMap::new();
     for (name, b) in &m.buffers {
+        if b.kind != BufferKind::Input {
+            continue;
+        }
         let Some(d) = b.domain.as_ref() else { continue };
         let Some(st) = d.index_into.as_deref().and_then(|s| m.states.get(s)) else { continue };
         if !st.is_per_seq() {
