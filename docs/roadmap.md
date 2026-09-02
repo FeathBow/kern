@@ -22,6 +22,7 @@ manifest，与 qwen3 同一条流水）。两条线并行，每级带门禁。
 |---|---|---|
 | K0 ✅ | state 一律走 VMM（可导出）；per-seq 定长 state（KDA 状态）已有 `bytes_per_seq` | 现有 qwen3 / dspark 门禁不变（2026-09-02 过）；K3 的 KDA state 能装载 |
 | K1 ✅ | 前缀缓存 = checkpoint 表：`Checkpoint` = (精确长度, 页链上的一个节点, 可选 state slot)，页链按引用计数还页（`Arc<Node>`，一页一节点，一条序列的所有 checkpoint 共一条链）；`Prefix` 表按页哈希链索引，序列自带滚动 `Chain`。纯 KV 模型每整页留一个、零拷贝；带循环状态的模型只在请求结束 `retire`（slot 易主，不拷），中途分叉不命中 | AgentX trace 回放（`crates/kern-run/examples/agentx_replay.rs`，393 session / 98 827 请求，2026-09-02）：纯 KV 页 64 命中 98.6%（缓存 7M token 时 98.1%），extend p50 640 / p90 5056 / p99 40704；带状态页 64 + 1024 slot 96.6%，页 784 + 130 slot（qwen3.8-27b 实机形状）91.0%。GPU 门禁在 `serve.md`：qwen3-4b / qwen3.8-27b 命中后 warm 与 cold 的 64 个 greedy token 一致 |
+| K1b | 带状态模型的 checkpoint 容量与位置：state slot 池按要保温的 session 数配（不是 `seqs.max + 2`），`Busy` 分清页忙还是 slot 忙，slot 忙只淘汰带 state 的 entry；请求可显式标断点（system prompt 末尾），prefill 把 chunk 末尾裁到断点后 `checkpoint`。不做 vLLM 式"每个块边界都存一份 state"（它靠 TP 把 state 切小才付得起，且块边界与公域前缀的边界对不上；K3 EP-only 一份 605 MB）；"每 N 页自动存一份"留作旋钮，等有需要它的流量再加 | 回放：页 784 形状的命中率从 91.0% 回到 ≥ 96%（slot 数成为参数）；共享 system prompt 的两个不同 session 第二个命中到断点 |
 | K2 | fork = 引用计数 +1 + 状态快照拷贝；子序列从父 checkpoint 起步，最后半页 CoW | 子 agent 从父 checkpoint 分叉，输出与重算一致（每 rank B>1 已由 E2b 提供，4 卡） |
 | K3 | session 睡/醒到本 tray DRAM（C2C，与 HBM 不干扰） | 6 GB 唤醒 < 60 ms，并发 decode 步时抖动 ≤ 6% |
 | K4 | DCP：ship q / 回 (O, LSE) 的 partial+merge op，w 按 span 定，flag-in-payload | 真 FlashMLA 复现 B2/B3：decode 税 ≤ 8%，extend W=4 ≥ 2× |

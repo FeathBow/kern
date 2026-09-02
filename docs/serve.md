@@ -132,6 +132,12 @@ qwen3.8 重发同一 prompt 不命中（唯一的 checkpoint 比它长），输�
 近平局，与 `decode` / `decode_batch` 之间的分叉同类。
 host 侧回放见 roadmap K1 行（`crates/kern-run/examples/agentx_replay.rs`）。
 
+带状态模型的部分命中在算力上没有意义：state 快照之后的 token 必须整段重跑 forward
+才能把状态推过去，attention 层的投影和注意力都省不掉，所以有效命中 = 最深的带
+state 的 checkpoint，KV 页只是顺带共享（vLLM v1 也是这样：hit 取各层组最小值，
+attention 的命中被截到 mamba 块边界）。快照放哪由调用方定——请求结束（agent 多轮）
+和显式断点（roadmap K1b），不在每个块边界都存。
+
 ## 没做（按需要加）
 
 混批（chunked prefill 进 decode 步）、抢占 / 动态页分配、
