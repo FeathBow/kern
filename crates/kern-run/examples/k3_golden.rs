@@ -5,6 +5,13 @@
 //!       --manifest examples/k3-4l-ep4.json --weights /data/susun/kern-k3/4l \
 //!       --fixture <pegainfer>/pegainfer-k3/tests/fixtures/k3_4l_greedy.json \
 //!       --gpus 0,1,2,3 [--graph] [--iters 50] [--margin-abs 0.125]
+//!       [--world 8 --rank-base 4 --rendezvous tray04:7400]
+//!
+//! One process per tray: `--world` is the EP size, `--rank-base` the global
+//! rank of this process's first GPU, and `--rendezvous` the rank-0 process's
+//! address, where fabric handles are swapped over TCP (the rank-0 process
+//! listens; every process, itself included, connects and sends its ranks'
+//! handles, then receives the whole world's).
 //!
 //! The fixture feeds `prompt + greedy continuation` one token at a time from
 //! position 0 (pure decode, no prefill) and records the reference's argmax
@@ -14,6 +21,8 @@
 //! (tests/golden_decode.rs). Every rank runs the same sequence, so an EP
 //! world must also agree with itself token for token.
 use std::collections::BTreeMap;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier, Mutex};
 
@@ -38,16 +47,33 @@ struct Golden {
 impl Golden {
     fn load(path: &Path) -> Golden {
         let j: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(path).expect("fixture")).expect("fixture json");
+            serde_json::from_str(&std::fs::read_to_string(path).expect("fixture"))
+                .expect("fixture json");
         let steps = j["steps"].as_array().expect("steps");
-        let ints = |v: &serde_json::Value| v.as_array().unwrap().iter().map(|x| x.as_i64().unwrap()).collect::<Vec<_>>();
+        let ints = |v: &serde_json::Value| {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x.as_i64().unwrap())
+                .collect::<Vec<_>>()
+        };
         Golden {
             feed: steps.iter().map(|s| s["feed"].as_i64().unwrap()).collect(),
-            argmax: steps.iter().map(|s| s["argmax"].as_i64().unwrap()).collect(),
+            argmax: steps
+                .iter()
+                .map(|s| s["argmax"].as_i64().unwrap())
+                .collect(),
             top5: steps.iter().map(|s| ints(&s["top5_ids"])).collect(),
             top5_logits: steps
                 .iter()
-                .map(|s| s["top5_logits"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap() as f32).collect())
+                .map(|s| {
+                    s["top5_logits"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|x| x.as_f64().unwrap() as f32)
+                        .collect()
+                })
                 .collect(),
             num_layers: j["num_layers"].as_u64().expect("num_layers") as usize,
             noise_abs: None,
@@ -110,6 +136,96 @@ struct Outcome {
     step_ms: Option<f64>,
 }
 
+type Handles = BTreeMap<String, PeerHandle>;
+
+fn write_handles(w: &mut impl Write, ranks: &[(u64, Handles)]) -> std::io::Result<()> {
+    w.write_all(&(ranks.len() as u32).to_le_bytes())?;
+    for (rank, map) in ranks {
+        w.write_all(&rank.to_le_bytes())?;
+        w.write_all(&(map.len() as u32).to_le_bytes())?;
+        for (name, h) in map {
+            w.write_all(&(name.len() as u16).to_le_bytes())?;
+            w.write_all(name.as_bytes())?;
+            w.write_all(&h.to_bytes())?;
+        }
+    }
+    w.flush()
+}
+
+fn read_handles(r: &mut impl Read) -> std::io::Result<Vec<(u64, Handles)>> {
+    fn u32_of(r: &mut impl Read) -> std::io::Result<u32> {
+        let mut b = [0u8; 4];
+        r.read_exact(&mut b)?;
+        Ok(u32::from_le_bytes(b))
+    }
+    let n = u32_of(r)?;
+    let mut out = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        let mut b = [0u8; 8];
+        r.read_exact(&mut b)?;
+        let rank = u64::from_le_bytes(b);
+        let entries = u32_of(r)?;
+        let mut map = BTreeMap::new();
+        for _ in 0..entries {
+            let mut l = [0u8; 2];
+            r.read_exact(&mut l)?;
+            let mut name = vec![0u8; u16::from_le_bytes(l) as usize];
+            r.read_exact(&mut name)?;
+            let mut h = [0u8; PeerHandle::BYTES];
+            r.read_exact(&mut h)?;
+            map.insert(
+                String::from_utf8(name).unwrap(),
+                PeerHandle::from_bytes(&h).unwrap(),
+            );
+        }
+        out.push((rank, map));
+    }
+    Ok(out)
+}
+
+/// The rank-0 process: collect every rank's handles from `world` ranks'
+/// worth of connections, then send the whole table back on each.
+fn serve_rendezvous(listener: TcpListener, world: usize) -> std::io::Result<()> {
+    let mut streams = Vec::new();
+    let mut table: Vec<(u64, Handles)> = Vec::new();
+    while table.len() < world {
+        let (mut s, _) = listener.accept()?;
+        table.extend(read_handles(&mut s)?);
+        streams.push(s);
+    }
+    table.sort_by_key(|(r, _)| *r);
+    for s in &mut streams {
+        write_handles(s, &table)?;
+    }
+    Ok(())
+}
+
+fn exchange(addr: &str, mine: &[(u64, Handles)], world: usize) -> anyhow::Result<Vec<Handles>> {
+    let mut s = None;
+    for _ in 0..600 {
+        match TcpStream::connect(addr) {
+            Ok(c) => {
+                s = Some(c);
+                break;
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(500)),
+        }
+    }
+    let mut s =
+        s.ok_or_else(|| anyhow::anyhow!("rendezvous {addr}: no listener after 5 minutes"))?;
+    write_handles(&mut s, mine)?;
+    let table = read_handles(&mut s)?;
+    anyhow::ensure!(
+        table.len() == world,
+        "rendezvous returned {} ranks, world is {world}",
+        table.len()
+    );
+    for (i, (r, _)) in table.iter().enumerate() {
+        anyhow::ensure!(*r == i as u64, "rendezvous table has rank {r} at index {i}");
+    }
+    Ok(table.into_iter().map(|(_, m)| m).collect())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_rank(
     json: &str,
@@ -132,7 +248,8 @@ fn run_rank(
     let maps: Vec<memmap2::Mmap> = files
         .iter()
         .map(|f| {
-            let file = std::fs::File::open(f).map_err(|e| anyhow::anyhow!("{}: {e}", f.display()))?;
+            let file =
+                std::fs::File::open(f).map_err(|e| anyhow::anyhow!("{}: {e}", f.display()))?;
             Ok(unsafe { memmap2::Mmap::map(&file)? })
         })
         .collect::<anyhow::Result<_>>()?;
@@ -141,7 +258,13 @@ fn run_rank(
     rendezvous(&mut rt)?;
     let mut caller = Caller::new(rt)?;
 
-    let mut out = Outcome { tokens: Vec::new(), exact: 0, excused: 0, failures: Vec::new(), step_ms: None };
+    let mut out = Outcome {
+        tokens: Vec::new(),
+        exact: 0,
+        excused: 0,
+        failures: Vec::new(),
+        step_ms: None,
+    };
     let mut captured = false;
     let mut env = BTreeMap::new();
     for (step, &tok) in golden.feed.iter().enumerate() {
@@ -192,6 +315,9 @@ fn main() {
     let mut graph = false;
     let mut iters = 0usize;
     let mut margin_abs: Option<f32> = None;
+    let mut world: Option<usize> = None;
+    let mut rank_base = 0usize;
+    let mut rendezvous_addr: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut v = || args.next().expect("value");
@@ -204,6 +330,9 @@ fn main() {
             "--graph" => graph = true,
             "--iters" => iters = v().parse().unwrap(),
             "--margin-abs" => margin_abs = Some(v().parse().unwrap()),
+            "--world" => world = Some(v().parse().unwrap()),
+            "--rank-base" => rank_base = v().parse().unwrap(),
+            "--rendezvous" => rendezvous_addr = Some(v()),
             _ => panic!("unknown arg {a}"),
         }
     }
@@ -212,44 +341,93 @@ fn main() {
     golden.noise_abs = margin_abs;
     let golden = Arc::new(golden);
     let n = gpus.len();
+    let world = world.unwrap_or(n);
+    assert!(
+        rank_base + n <= world,
+        "ranks {rank_base}..{} exceed world {world}",
+        rank_base + n
+    );
     let kernels = std::env::temp_dir().join(format!("kern-k3-golden-{}", std::process::id()));
     stage_cubins(&cubins, &kernels);
     println!(
-        "{}: {} layers, EP{n} on gpus {gpus:?}, {} fixture steps, {}",
+        "{}: {} layers, EP{world} ranks {rank_base}..{} on gpus {gpus:?}, {} fixture steps, {}",
         manifest.display(),
         golden.num_layers,
+        rank_base + n,
         golden.feed.len(),
         if graph { "graph replay" } else { "eager" }
     );
+    if world > n {
+        let addr = rendezvous_addr
+            .clone()
+            .expect("--rendezvous is required when the world spans processes");
+        if rank_base == 0 {
+            let port = addr.rsplit(':').next().unwrap().to_string();
+            let listener =
+                TcpListener::bind(format!("0.0.0.0:{port}")).expect("bind rendezvous port");
+            std::thread::spawn(move || {
+                serve_rendezvous(listener, world).expect("rendezvous server")
+            });
+        }
+    }
 
-    let posted: Arc<Mutex<Vec<Option<BTreeMap<String, PeerHandle>>>>> = Arc::new(Mutex::new(vec![None; n]));
+    let posted: Arc<Mutex<Vec<Option<Handles>>>> = Arc::new(Mutex::new(vec![None; n]));
+    let table: Arc<Mutex<Option<Vec<Handles>>>> = Arc::new(Mutex::new(None));
     let gate = Arc::new(Barrier::new(n));
-    let results: Arc<Mutex<Vec<Option<Result<Outcome, String>>>>> = Arc::new(Mutex::new((0..n).map(|_| None).collect()));
+    let results: Arc<Mutex<Vec<Option<Result<Outcome, String>>>>> =
+        Arc::new(Mutex::new((0..n).map(|_| None).collect()));
     let mut threads = Vec::new();
-    for (rank, &gpu) in gpus.iter().enumerate() {
-        let (json, kernels, posted, gate, results, golden, weights) =
-            (json.clone(), kernels.clone(), posted.clone(), gate.clone(), results.clone(), golden.clone(), weights.clone());
+    for (local, &gpu) in gpus.iter().enumerate() {
+        let rank = rank_base + local;
+        let (json, kernels, posted, table, gate, results, golden, weights, addr) = (
+            json.clone(),
+            kernels.clone(),
+            posted.clone(),
+            table.clone(),
+            gate.clone(),
+            results.clone(),
+            golden.clone(),
+            weights.clone(),
+            rendezvous_addr.clone(),
+        );
         threads.push(std::thread::spawn(move || {
-            let files = weight_files(&weights, golden.num_layers, n, rank);
+            let files = weight_files(&weights, golden.num_layers, world, rank);
             let rendezvous = |rt: &mut Runtime| -> kern_runtime::Result<()> {
                 let mine = rt.export_handles()?;
-                posted.lock().unwrap()[rank] = Some(mine);
+                posted.lock().unwrap()[local] = Some(mine);
                 gate.wait();
-                let members: Vec<_> = posted.lock().unwrap().iter().map(|m| m.clone().unwrap()).collect();
+                if local == 0 {
+                    let ours: Vec<(u64, Handles)> = posted
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .enumerate()
+                        .map(|(i, m)| ((rank_base + i) as u64, m.clone().unwrap()))
+                        .collect();
+                    let members = if world > n {
+                        exchange(addr.as_deref().unwrap(), &ours, world)
+                            .map_err(|e| kern_runtime::Error::Api(format!("{e:#}")))?
+                    } else {
+                        ours.into_iter().map(|(_, m)| m).collect()
+                    };
+                    *table.lock().unwrap() = Some(members);
+                }
+                gate.wait();
+                let members = table.lock().unwrap().clone().unwrap();
                 rt.import_peers("ep", &members)
             };
             let r = run_rank(
                 &json,
                 &kernels,
                 gpu,
-                &Topology::one("ep", rank as u64, n as u64),
+                &Topology::one("ep", rank as u64, world as u64),
                 &files,
                 &golden,
                 graph,
                 iters,
                 &rendezvous,
             );
-            results.lock().unwrap()[rank] = Some(r.map_err(|e| format!("{e:#}")));
+            results.lock().unwrap()[local] = Some(r.map_err(|e| format!("{e:#}")));
         }));
     }
     for th in threads {
@@ -258,13 +436,14 @@ fn main() {
     let results = results.lock().unwrap();
     let mut ok = true;
     let mut first: Option<Vec<i64>> = None;
-    for (rank, r) in results.iter().enumerate() {
+    for (local, r) in results.iter().enumerate() {
+        let rank = rank_base + local;
         match r {
             Some(Ok(o)) => {
                 let steps = golden.feed.len();
                 println!(
                     "rank {rank} gpu {}: {}/{steps} exact, {} excused inside the noise floor, {} wrong{}",
-                    gpus[rank],
+                    gpus[local],
                     o.exact,
                     o.excused,
                     o.failures.len(),
@@ -277,14 +456,16 @@ fn main() {
                 match &first {
                     None => first = Some(o.tokens.clone()),
                     Some(t) if *t != o.tokens => {
-                        println!("  rank {rank} disagrees with rank 0 on the sampled tokens");
+                        println!(
+                            "  rank {rank} disagrees with rank {rank_base} on the sampled tokens"
+                        );
                         ok = false;
                     }
                     _ => {}
                 }
             }
             Some(Err(e)) => {
-                println!("rank {rank} gpu {}: FAILED: {e}", gpus[rank]);
+                println!("rank {rank} gpu {}: FAILED: {e}", gpus[local]);
                 ok = false;
             }
             None => unreachable!(),

@@ -51,6 +51,8 @@ int main(int argc, char** argv) {
   const int experts = atoi(argv[1]), ranks = atoi(argv[2]);
   if (experts == 224 && ranks == 1) dump<224, 1>();
   else if (experts == 224 && ranks == 4) dump<224, 4>();
+  else if (experts == 224 && ranks == 8) dump<224, 8>();
+  else if (experts == 224 && ranks == 16) dump<224, 16>();
   else {
     fprintf(stderr, "world %dx%d is not instantiated (see kern_k3_mega_moe.cu)\n", experts, ranks);
     return 1;

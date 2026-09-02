@@ -1,6 +1,6 @@
 {
  "schema_version": 3,
- "model": "kimi-k3-pruned-75pct/4l/ep1",
+ "model": "kimi-k3-pruned-75pct/4l/ep8",
  "vars": {
   "tokens": {
    "max": 1
@@ -11,7 +11,7 @@
  },
  "topology": {
   "groups": {
-   "ep": 1
+   "ep": 8
   }
  },
  "states": {
@@ -90,7 +90,7 @@
   "slab": {
    "dtype": "u8",
    "shape": [
-    3345848192
+    11196265056
    ],
    "kind": "carry",
    "export": true
@@ -98,7 +98,7 @@
   "slab_peers": {
    "dtype": "u64",
    "shape": [
-    1
+    8
    ],
    "kind": "peer",
    "of": "slab",
@@ -107,7 +107,7 @@
   "stats": {
    "dtype": "i32",
    "shape": [
-    224
+    28
    ],
    "kind": "workspace"
   },
@@ -841,28 +841,28 @@
   "layers.1.l1_weights": {
    "dtype": "u8",
    "shape": [
-    2466250752
+    308281344
    ],
    "kind": "weight"
   },
   "layers.1.l1_weights_sf": {
    "dtype": "i32",
    "shape": [
-    38535168
+    4816896
    ],
    "kind": "weight"
   },
   "layers.1.l2_weights": {
    "dtype": "u8",
    "shape": [
-    1233125376
+    154140672
    ],
    "kind": "weight"
   },
   "layers.1.l2_weights_sf": {
    "dtype": "i32",
    "shape": [
-    19267584
+    2408448
    ],
    "kind": "weight"
   },
@@ -1035,28 +1035,28 @@
   "layers.2.l1_weights": {
    "dtype": "u8",
    "shape": [
-    2466250752
+    308281344
    ],
    "kind": "weight"
   },
   "layers.2.l1_weights_sf": {
    "dtype": "i32",
    "shape": [
-    38535168
+    4816896
    ],
    "kind": "weight"
   },
   "layers.2.l2_weights": {
    "dtype": "u8",
    "shape": [
-    1233125376
+    154140672
    ],
    "kind": "weight"
   },
   "layers.2.l2_weights_sf": {
    "dtype": "i32",
    "shape": [
-    19267584
+    2408448
    ],
    "kind": "weight"
   },
@@ -1205,28 +1205,28 @@
   "layers.3.l1_weights": {
    "dtype": "u8",
    "shape": [
-    2466250752
+    308281344
    ],
    "kind": "weight"
   },
   "layers.3.l1_weights_sf": {
    "dtype": "i32",
    "shape": [
-    38535168
+    4816896
    ],
    "kind": "weight"
   },
   "layers.3.l2_weights": {
    "dtype": "u8",
    "shape": [
-    1233125376
+    154140672
    ],
    "kind": "weight"
   },
   "layers.3.l2_weights_sf": {
    "dtype": "i32",
    "shape": [
-    19267584
+    2408448
    ],
    "kind": "weight"
   }
@@ -1748,7 +1748,7 @@
     "launches": [
      {
       "module": "k3_mega_moe",
-      "entry": "kern_k3_mega_moe_e224_r1_situ",
+      "entry": "kern_k3_mega_moe_e224_r8_situ",
       "params": [
        "out buffer<bf16>",
        "out buffer<i32>",
@@ -1812,7 +1812,7 @@
          "dtype": "u8",
          "dims": [
           3584,
-          132480
+          905472
          ],
          "strides": [
           3584
@@ -1830,11 +1830,11 @@
          "param": 6,
          "dtype": "i32",
          "dims": [
-          2119680,
+          14487552,
           28
          ],
          "strides": [
-          8478720
+          57950208
          ],
          "box": [
           256,
@@ -1849,7 +1849,7 @@
          "dtype": "u4",
          "dims": [
           3584,
-          1376256
+          172032
          ],
          "strides": [
           1792
@@ -1868,7 +1868,7 @@
          "dtype": "i32",
          "dims": [
           6144,
-          6272
+          784
          ],
          "strides": [
           24576
@@ -1886,7 +1886,7 @@
          "dtype": "u8",
          "dims": [
           3072,
-          132480
+          905472
          ],
          "strides": [
           3072
@@ -1905,7 +1905,7 @@
          "dtype": "u8",
          "dims": [
           3072,
-          132480
+          905472
          ],
          "strides": [
           3072
@@ -1923,11 +1923,11 @@
          "param": 10,
          "dtype": "i32",
          "dims": [
-          2119680,
+          14487552,
           24
          ],
          "strides": [
-          8478720
+          57950208
          ],
          "box": [
           256,
@@ -1942,7 +1942,7 @@
          "dtype": "u4",
          "dims": [
           3072,
-          802816
+          100352
          ],
          "strides": [
           1536
@@ -1961,7 +1961,7 @@
          "dtype": "i32",
          "dims": [
           3584,
-          5376
+          672
          ],
          "strides": [
           14336
@@ -1979,7 +1979,7 @@
          "dtype": "u8",
          "dims": [
           3584,
-          132480
+          905472
          ],
          "strides": [
           3584
@@ -1997,11 +1997,11 @@
          "param": 6,
          "dtype": "i32",
          "dims": [
-          2119680,
+          14487552,
           28
          ],
          "strides": [
-          8478720
+          57950208
          ],
          "box": [
           256,
@@ -2016,7 +2016,7 @@
          "dtype": "u4",
          "dims": [
           3584,
-          1376256
+          172032
          ],
          "strides": [
           1792
@@ -2035,7 +2035,7 @@
          "dtype": "i32",
          "dims": [
           6144,
-          6272
+          784
          ],
          "strides": [
           24576
@@ -2053,7 +2053,7 @@
          "dtype": "u8",
          "dims": [
           3072,
-          132480
+          905472
          ],
          "strides": [
           3072
@@ -2072,7 +2072,7 @@
          "dtype": "u8",
          "dims": [
           3072,
-          132480
+          905472
          ],
          "strides": [
           3072
@@ -2090,11 +2090,11 @@
          "param": 10,
          "dtype": "i32",
          "dims": [
-          2119680,
+          14487552,
           24
          ],
          "strides": [
-          8478720
+          57950208
          ],
          "box": [
           256,
@@ -2109,7 +2109,7 @@
          "dtype": "u4",
          "dims": [
           3072,
-          802816
+          100352
          ],
          "strides": [
           1536
@@ -2128,7 +2128,7 @@
          "dtype": "i32",
          "dims": [
           3584,
-          5376
+          672
          ],
          "strides": [
           14336
@@ -4160,11 +4160,11 @@
      },
      {
       "buf": "slab",
-      "offset": 19177856
+      "offset": 148950624
      },
      {
       "buf": "slab",
-      "offset": 79733120
+      "offset": 209505888
      },
      {
       "var": "tokens"
@@ -4183,11 +4183,11 @@
      },
      {
       "buf": "slab",
-      "offset": 81625472
+      "offset": 211398240
      },
      {
       "buf": "slab",
-      "offset": 83788160
+      "offset": 213560928
      },
      {
       "expr": {
@@ -4220,11 +4220,11 @@
      },
      {
       "buf": "slab",
-      "offset": 84869504
+      "offset": 214642272
      },
      {
       "buf": "slab",
-      "offset": 559677824
+      "offset": 3459853920
      },
      {
       "buf": "layers.1.l1_weights"
@@ -4234,11 +4234,11 @@
      },
      {
       "buf": "slab",
-      "offset": 797611904
+      "offset": 5086081632
      },
      {
       "buf": "slab",
-      "offset": 1204590464
+      "offset": 7867691616
      },
      {
       "buf": "layers.1.l2_weights"
@@ -5039,11 +5039,11 @@
      },
      {
       "buf": "slab",
-      "offset": 19177856
+      "offset": 148950624
      },
      {
       "buf": "slab",
-      "offset": 79733120
+      "offset": 209505888
      },
      {
       "var": "tokens"
@@ -5062,11 +5062,11 @@
      },
      {
       "buf": "slab",
-      "offset": 81625472
+      "offset": 211398240
      },
      {
       "buf": "slab",
-      "offset": 83788160
+      "offset": 213560928
      },
      {
       "expr": {
@@ -5099,11 +5099,11 @@
      },
      {
       "buf": "slab",
-      "offset": 84869504
+      "offset": 214642272
      },
      {
       "buf": "slab",
-      "offset": 559677824
+      "offset": 3459853920
      },
      {
       "buf": "layers.2.l1_weights"
@@ -5113,11 +5113,11 @@
      },
      {
       "buf": "slab",
-      "offset": 797611904
+      "offset": 5086081632
      },
      {
       "buf": "slab",
-      "offset": 1204590464
+      "offset": 7867691616
      },
      {
       "buf": "layers.2.l2_weights"
@@ -5816,11 +5816,11 @@
      },
      {
       "buf": "slab",
-      "offset": 19177856
+      "offset": 148950624
      },
      {
       "buf": "slab",
-      "offset": 79733120
+      "offset": 209505888
      },
      {
       "var": "tokens"
@@ -5839,11 +5839,11 @@
      },
      {
       "buf": "slab",
-      "offset": 81625472
+      "offset": 211398240
      },
      {
       "buf": "slab",
-      "offset": 83788160
+      "offset": 213560928
      },
      {
       "expr": {
@@ -5876,11 +5876,11 @@
      },
      {
       "buf": "slab",
-      "offset": 84869504
+      "offset": 214642272
      },
      {
       "buf": "slab",
-      "offset": 559677824
+      "offset": 3459853920
      },
      {
       "buf": "layers.3.l1_weights"
@@ -5890,11 +5890,11 @@
      },
      {
       "buf": "slab",
-      "offset": 797611904
+      "offset": 5086081632
      },
      {
       "buf": "slab",
-      "offset": 1204590464
+      "offset": 7867691616
      },
      {
       "buf": "layers.3.l2_weights"

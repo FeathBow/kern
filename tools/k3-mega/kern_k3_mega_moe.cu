@@ -78,3 +78,5 @@ struct World {
 
 K3_MEGA_WORLD(kern_k3_mega_moe_e224_r1_situ, 224, 1, true)
 K3_MEGA_WORLD(kern_k3_mega_moe_e224_r4_situ, 224, 4, true)
+K3_MEGA_WORLD(kern_k3_mega_moe_e224_r8_situ, 224, 8, true)
+K3_MEGA_WORLD(kern_k3_mega_moe_e224_r16_situ, 224, 16, true)
