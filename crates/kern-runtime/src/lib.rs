@@ -40,7 +40,7 @@ use cudarc::driver::{sys, CudaContext, CudaStream, PinnedHostSlice};
 use kern_manifest::types::{BufferKind, Manifest, State};
 
 use compile::{CompiledProgram, Launch, LaunchKind, RVal, Slot, TmaBlob};
-use device::{alloc, alloc_vmm, gemm_bf16_tn, DeviceBuf, Share};
+use device::{alloc, alloc_vmm, gemm_bf16_tn, gemm_bf16_tn_f32, Blas, DeviceBuf, Share};
 use error::{bail, cuda_check};
 pub use device::PeerHandle;
 pub use error::{Error, Result};
@@ -77,6 +77,8 @@ pub struct Runtime {
     ctx: Arc<CudaContext>,
     stream: Arc<CudaStream>,
     blt: CudaBlasLT,
+    /// cuBLAS handle (with its own workspace) for the f32-result GEMM built-in.
+    blas: Blas,
     /// Token capacity every state was provisioned for (`index_into` a
     /// state resolves against it).
     capacity: u64,
@@ -206,6 +208,7 @@ impl Runtime {
         // into a CUDA graph.
         let stream = ctx.new_stream()?;
         let blt = CudaBlasLT::new(stream.clone())?;
+        let blas = Blas::new(&stream)?;
         ctx.bind_to_thread()?;
 
         let remote = cubin::fetch_registry_cubins(&manifest)?;
@@ -312,6 +315,7 @@ impl Runtime {
             ctx,
             stream,
             blt,
+            blas,
             capacity: state_capacity_tokens,
             pool,
             buffers,
@@ -968,6 +972,7 @@ impl Runtime {
         }
         match &l.kind {
             LaunchKind::Gemm { beta } => gemm_bf16_tn(&self.blt, &self.stream, &vals, *beta),
+            LaunchKind::GemmF32 => gemm_bf16_tn_f32(&self.blas, &vals),
             LaunchKind::Cubin { func, block, grid, shared_mem, cluster } => {
                 let grid = [grid[0].eval(env)? as u32, grid[1].eval(env)? as u32, grid[2].eval(env)? as u32];
                 let smem = match shared_mem {

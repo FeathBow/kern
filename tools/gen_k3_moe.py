@@ -45,7 +45,11 @@ def tmap(param, dtype, dims, strides, box, swizzle=0, l2=256):
     return {"tensormap": t}
 
 
-def build(ranks, tokens_max):
+def mega_pieces(ranks, tokens_max, wprefix=""):
+    """The MegaMoE program pieces for one EP<ranks> world: the symmetric slab
+    buffers, the routed-expert weight shapes (`wprefix` + name), the three ops,
+    and `steps(x, topk_idx, topk_weight, y, label)` — the program steps that
+    run one layer's routed experts from latent `x` into `y`."""
     cub = mega_build()
     lay = json.loads(subprocess.check_output([str(cub / "k3_mega_layout_dump"), str(EXPERTS), str(ranks)]))
     mega = {"cubin": "k3_mega_moe.cubin",
@@ -61,21 +65,18 @@ def build(ranks, tokens_max):
     load_m = lay["block_m"] // 2
 
     buffers = {
-        "x": {"dtype": "bf16", "shape": ["tokens", H], "kind": "input"},
-        "topk_idx": {"dtype": "i32", "shape": ["tokens", K], "kind": "input",
-                     "domain": {"min": 0, "max": EXPERTS - 1}},
-        "topk_weight": {"dtype": "f32", "shape": ["tokens", K], "kind": "input"},
         # The symmetric slab: workspace counters (self-restoring, start at
         # zero), this rank's staged inputs, the dispatch/L1/L2 rings that
         # peers write into over the fabric.
         "slab": {"dtype": "u8", "shape": [lay["slab_bytes"]], "kind": "carry", "export": True},
         "slab_peers": {"dtype": "u64", "shape": [ranks], "kind": "peer", "of": "slab", "group": "ep"},
+        "stats": {"dtype": "i32", "shape": [epr], "kind": "workspace"},
+    }
+    weights = {
         "l1_weights": {"dtype": "u8", "shape": [epr * 2 * I * (H // 2)], "kind": "weight"},
         "l1_weights_sf": {"dtype": "i32", "shape": [epr * (H // 128) * 2 * I], "kind": "weight"},
         "l2_weights": {"dtype": "u8", "shape": [epr * H * (I // 2)], "kind": "weight"},
         "l2_weights_sf": {"dtype": "i32", "shape": [epr * (I // 128) * H], "kind": "weight"},
-        "stats": {"dtype": "i32", "shape": [epr], "kind": "workspace"},
-        "y": {"dtype": "bf16", "shape": ["tokens", H], "kind": "output"},
     }
 
     slab = lambda name: {"buf": "slab", "offset": off[name]}
@@ -121,24 +122,45 @@ def build(ranks, tokens_max):
             "args": [{"param": i} for i in range(5)] + maps + maps,
         }]},
     }
-    program = [
-        {"label": "quant_x", "op": "quant_x", "args": [
-            {"buf": "x"}, slab("x"), slab("x_sf"), {"var": "tokens"}, {"i32": H}, {"i32": H}, {"i32": H // 128}]},
-        {"label": "routing", "op": "write_routing", "args": [
-            {"buf": "topk_idx"}, {"buf": "topk_weight"}, slab("topk_idx"), slab("topk_weights"),
-            {"expr": {"mul": ["tokens", K]}}]},
-        {"label": "mega_moe", "op": "mega_moe", "args": [
-            {"buf": "y"}, {"buf": "stats"}, {"var": "tokens"}, {"buf": "slab_peers"}, {"rank": "ep"},
-            slab("l1_acts"), slab("l1_acts_sf"), {"buf": "l1_weights"}, {"buf": "l1_weights_sf"},
-            slab("l2_acts"), slab("l2_acts_sf"), {"buf": "l2_weights"}, {"buf": "l2_weights_sf"}]},
-    ]
+    ops = {"quant_x": quant, "write_routing": routing, "mega_moe": mega_op}
+
+    def steps(x, topk_idx, topk_weight, y, label=""):
+        w = lambda n: {"buf": wprefix + n}
+        return [
+            {"label": label + "quant_x", "op": "quant_x", "args": [
+                x, slab("x"), slab("x_sf"), {"var": "tokens"}, {"i32": H}, {"i32": H}, {"i32": H // 128}]},
+            {"label": label + "routing", "op": "write_routing", "args": [
+                topk_idx, topk_weight, slab("topk_idx"), slab("topk_weights"),
+                {"expr": {"mul": ["tokens", K]}}]},
+            {"label": label + "mega_moe", "op": "mega_moe", "args": [
+                y, {"buf": "stats"}, {"var": "tokens"}, {"buf": "slab_peers"}, {"rank": "ep"},
+                slab("l1_acts"), slab("l1_acts_sf"), w("l1_weights"), w("l1_weights_sf"),
+                slab("l2_acts"), slab("l2_acts_sf"), w("l2_weights"), w("l2_weights_sf")]},
+        ]
+
+    return {"buffers": buffers, "weights": weights, "ops": ops, "steps": steps, "layout": lay}
+
+
+def build(ranks, tokens_max):
+    mp = mega_pieces(ranks, tokens_max)
+    H, K = mp["layout"]["hidden"], mp["layout"]["topk"]
+    buffers = {
+        "x": {"dtype": "bf16", "shape": ["tokens", H], "kind": "input"},
+        "topk_idx": {"dtype": "i32", "shape": ["tokens", K], "kind": "input",
+                     "domain": {"min": 0, "max": EXPERTS - 1}},
+        "topk_weight": {"dtype": "f32", "shape": ["tokens", K], "kind": "input"},
+        **mp["buffers"],
+        **mp["weights"],
+        "y": {"dtype": "bf16", "shape": ["tokens", H], "kind": "output"},
+    }
+    program = mp["steps"]({"buf": "x"}, {"buf": "topk_idx"}, {"buf": "topk_weight"}, {"buf": "y"})
     m = {
         "schema_version": kern_manifest.SCHEMA_VERSION,
         "model": f"kimi-k3-pruned-75pct/moe-l1/ep{ranks}",
         "vars": {"tokens": {"max": tokens_max}},
         "topology": {"groups": {"ep": ranks}},
         "buffers": buffers,
-        "ops": {"quant_x": quant, "write_routing": routing, "mega_moe": mega_op},
+        "ops": mp["ops"],
         "programs": {"moe": program},
     }
     return kern_manifest.normalize(m)

@@ -41,6 +41,11 @@ kern run / kern test 仍默认 4096（test 的 workload 抽样以 capacity 为�
 `extern:cublaslt_bf16_tn_acc` 是同一条路径 β=1（`C += A@W^T`，c 参
 `inout`），投机解码的 fc 分块累加与 markov 偏置都靠它，省掉 concat
 缓冲和拷贝核。
+`extern:cublas_bf16_tn_f32` 同一映射但结果落 **f32**（cublasGemmEx，
+`CUBLAS_COMPUTE_32F` / `DEFAULT_TENSOR_OP`，独立 cuBLAS handle + 32 MiB
+workspace，可捕获）：K3 的每条稠密投影都是 f32 partial 再由认证的 `k3_land`
+核落成 bf16，所以 landing 的舍入链与 pegainfer 一致；权重行带 / 输出列带
+用 arg 的字节 `offset` 加第 7 参 `ldc` 表达。
 
 **多卡（E0/K0）**：state 一律 VMM 分配（`cuMemCreate` + `cuMemAddressReserve`
 + `cuMemMap` + `cuMemSetAccess`），设备报 `HANDLE_TYPE_FABRIC_SUPPORTED`

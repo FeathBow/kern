@@ -159,10 +159,16 @@ impl Caller {
         let positions: Vec<i64> = (self.pos..self.pos + c as i64).collect();
         let e = env(c as u64);
         self.rt.write_input_at("token_ids", &le_bytes_i64(ids), &e)?;
-        self.rt.write_input_at("positions", &le_bytes_i64(&positions), &e)?;
         self.rt.write_input_at("slot_mapping", &le_bytes_i64(&self.lease.slots(pos..pos + c)), &e)?;
         self.rt.write_input_at("seq_lens", &le_bytes_i32(&[(pos + c) as i32]), &e)?;
-        self.rt.write_input_at("cu_seqlens_q", &le_bytes_i32(&[0, c as i32]), &e)?;
+        // Optional: a NoPE model has no positions, a decode-only manifest no
+        // query offsets.
+        if self.rt.manifest.buffers.contains_key("positions") {
+            self.rt.write_input_at("positions", &le_bytes_i64(&positions), &e)?;
+        }
+        if self.rt.manifest.buffers.contains_key("cu_seqlens_q") {
+            self.rt.write_input_at("cu_seqlens_q", &le_bytes_i32(&[0, c as i32]), &e)?;
+        }
         Ok(e)
     }
 

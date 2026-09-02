@@ -13,6 +13,24 @@
 | 5 | `extract_kernels.sh` | manifest + dump 目录 → `kernels/`：`modules` 表里每个 module 按 sha256 在 dump（递归）/ `target/cubins` 里找到文件，落地为 `<module>-<sha12>.cubin`；只增不减，同一目录可放每个版本，A/B 两份 manifest 共用（runtime 只装载各自点名的） |
 | 6 | `export_weights.py` | HF checkpoint（+ draft checkpoint）→ `weights/`：qkv/gate_up 合并、rope cos_sin_cache 预计算、kv_scales 全 1、tied lm_head clone + tokenizer 文件；draft 侧另做 fc 按列切 5 块、融合 KV 权重 cat、markov 头原样 → `qwen3-4b-dspark.safetensors` |
 
+## K3（多卡线，E1/E2）
+
+kern 的 Kimi-K3 pruned decode 不是从 vLLM 挖的：vLLM 的 K3 路径是 fused
+KDA / trtllm-gen MLA / DeepGEMM MegaMoE 的 struct ABI 与 torch.compile 混合，
+不可 rebind。核来自 pegainfer 的认证 K3 核集，program 逐行照 pegainfer 的
+`k3_step` 发射，oracle 是 pegainfer 的 golden fixture（`crates/kern-run/
+examples/k3_golden.rs`）。
+
+| 工具 | 输入 → 输出 |
+|------|-------------|
+| `k3-tilelang/` | pegainfer `pegainfer-k3/kernels/generate.py` 的 AOT TileLang 核源码（vendored，每族一个文件含全部 batch bucket） |
+| `build_k3_kernels.sh` | `k3-tilelang/*.cu` → `target/cubins/k3_tl_<族>.cubin`（在 kernel-lab 里 nvcc，pegainfer 的 flag）；state 核经 `k3_line_shim.py` 生成 line 寻址的 `extern "C"` 包装（`kern_k3_kda_core_b1_..._line` / `kern_k3_conv_silu_b1_..._line`：body 原样内联为 `__device__`，包装算 `Base + Line[0]*stride + Off` 并**原地**读写）→ `k3_tl_<族>_line.cubin` |
+| `k3-mega/` + `build_k3_mega.sh` | DeepGEMM MegaMoE fork（SymBuffer 在设备上读 peer 表）→ `k3_mega_moe.cubin` + `k3_mega_layout_dump`（E1） |
+| `kernels-src/k3_mla_paged_attn.cu`、`k3_kv_append.cu`、`k3_mega_stage.cu` | pegainfer 的 absorbed paged-MLA decode 核原样（加 `extern "C"`）；latent 追加（token slot → 页/行）；MegaMoE 输入 staging |
+| `export_k3.py` | HF checkpoint → `dense/bookends + dense/l<i>`（所有 rank 共用）+ `experts/ep<R>-r<r>-l<i>`（按 rank 分片，MegaMoE 布局，复用 `export_k3_moe.py` 的变换）；slot 布局照 pegainfer `model/plan.rs`。权重放数据盘（tray04 `/data/susun/kern-k3/`），跑在 vllm 镜像的 CPU 容器里 |
+| `gen_k3_decode.py` | `--layers N --ranks R` → `examples/k3-<N>l-ep<R>.json` / `k3-ep4.json`：整条 decode program（3792 步 @93 层），几何与参数从 TileLang 源码解析，MoE 三步来自 `gen_k3_moe.mega_pieces` |
+| `k3_oracle_dump.py` | 任一 OpenAI 兼容服务（vLLM / pegainfer）→ fixture（teacher-forced greedy，top-5 logprob），给 `k3_golden --margin-abs` 做全深度门禁 |
+
 支撑件：
 
 - `kernel-capture/`：CUPTI 注入库（vendored from pegainfer PR #982 + `t_ns` patch），`CUDA_INJECTION64_PATH` 挂进目标进程。

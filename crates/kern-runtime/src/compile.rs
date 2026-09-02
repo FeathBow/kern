@@ -79,6 +79,8 @@ pub(crate) enum LaunchKind {
     /// `extern:cublaslt_bf16_tn` / `..._acc` (beta 0.0 / 1.0); 6 args, or
     /// 7 with C's row stride.
     Gemm { beta: f32 },
+    /// `extern:cublas_bf16_tn_f32`: same operands, f32 result (cublasGemmEx).
+    GemmF32,
 }
 
 pub(crate) struct Launch {
@@ -99,6 +101,8 @@ pub(crate) struct CompiledProgram {
 enum LaunchImpl {
     Cubin { func: sys::CUfunction, module: String, path: PathBuf, entry: String },
     GemmBf16Tn { beta: f32 },
+    /// cublasGemmEx with an f32 result (`extern:cublas_bf16_tn_f32`).
+    GemmBf16TnF32,
 }
 
 /// An op implementation, resolved: one entry per launch, plus the private
@@ -117,6 +121,7 @@ impl ResolvedOp {
             .map(|s| match s {
                 LaunchImpl::Cubin { module, .. } => module.clone(),
                 LaunchImpl::GemmBf16Tn { .. } => "runtime built-in (cublasLt)".into(),
+                LaunchImpl::GemmBf16TnF32 => "runtime built-in (cublasGemmEx, f32 out)".into(),
             })
             .collect()
     }
@@ -166,6 +171,7 @@ pub(crate) fn resolve_ops(
                     match ext {
                         "cublaslt_bf16_tn" => launches.push(LaunchImpl::GemmBf16Tn { beta: 0.0 }),
                         "cublaslt_bf16_tn_acc" => launches.push(LaunchImpl::GemmBf16Tn { beta: 1.0 }),
+                        "cublas_bf16_tn_f32" => launches.push(LaunchImpl::GemmBf16TnF32),
                         _ => bail!(Manifest, "op `{name}` launch #{li}: unsupported extern `{ext}`"),
                     }
                     continue;
@@ -383,14 +389,17 @@ fn compile_call(
             });
         }
         let kind = match imp {
-            LaunchImpl::GemmBf16Tn { beta } => {
+            LaunchImpl::GemmBf16Tn { .. } | LaunchImpl::GemmBf16TnF32 => {
                 if touches_peer {
                     bail!(Manifest, "launch #{li}: a peer buffer reaches the extern gemm; runtime built-ins never receive peer memory");
                 }
                 if slots.len() != 6 && slots.len() != 7 {
                     bail!(Manifest, "launch #{li}: extern gemm takes 6 args (a, w, c, m, n, k) or 7 (+ ldc), got {}", slots.len());
                 }
-                LaunchKind::Gemm { beta: *beta }
+                match imp {
+                    LaunchImpl::GemmBf16Tn { beta } => LaunchKind::Gemm { beta: *beta },
+                    _ => LaunchKind::GemmF32,
+                }
             }
             LaunchImpl::Cubin { func, path, entry, .. } => {
                 let Some(k) = l.kernel() else {
