@@ -1,0 +1,4 @@
+harness
+run_all.log
+naive/*.cubin
+baseline/*.cubin

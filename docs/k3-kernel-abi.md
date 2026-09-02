@@ -126,9 +126,9 @@ extern "C" __global__ void kern_k3_land_add_attnres_rms(
     bf16*       normed,      // [B, H]
     int nb, int snapshot, int B);
 
-// [K1c] hidden = bf16( prefix2 + bf16(p1[b,:H]) + (p2 ? bf16(p2[b,:H]) : 0) )   （p2 可为 nullptr：dense 层）
+// [K1c] hidden = bf16( prefix2 + bf16(p1[b,:H]) + (two ? bf16(p2[b,:H]) : 0) )   （two == 0：dense 层，p2 不读，但传的是合法指针）
 extern "C" __global__ void kern_k3_land_add2(
-    const f32* p1, const f32* p2, const bf16* prefix2, bf16* hidden, int B);
+    const f32* p1, const f32* p2, const bf16* prefix2, bf16* hidden, int two, int B);
 // grid (B, 1, 1)，block 1024
 ```
 
@@ -148,7 +148,7 @@ extern "C" __global__ void kern_k3_conv_silu(
     void*       kda_base, const int* line_index, long long line_bytes,   // 窗口：line + REC_BYTES + s*73728
     bf16*       conv_q, bf16* conv_k, bf16* conv_v,   // [B, INNER] 各一
     int B);
-// grid (B, 3, INNER / 256)（y = 流，z = 列段），block 256；或你自己的切分，写在头注释里
+// 交付：grid (B, 3, 24)（y = 流，z = 512 列一段），block 128，每线程 4 列，smem 0
 ```
 
 ### K3 `k3_kda_core`：delta rule，f_b 投影与 gate 的 landing 都在核内
@@ -204,7 +204,7 @@ extern "C" __global__ void kern_k3_mla_prep(
     bf16*       q_norm,        // [B, Q_LORA]
     bf16*       mla_gate,      // [B, INNER]
     int B);
-// grid (B, 1, 1) 或 (B, 段数, 1)，block 由你定
+// 交付：grid (B, 4, 1)（y=0 做两个 norm + 追加，y=1..3 各落 1/3 的 gate），block 512，smem 12800（静态）
 ```
 
 ### K5 `k3_mla_paged_attn`：absorbed MLA decode，多头共享 KV 读，gate 在 epilogue

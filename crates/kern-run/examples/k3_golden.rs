@@ -365,6 +365,7 @@ fn run_rank(
     iters: usize,
     seqs: usize,
     mixed: bool,
+    distinct: bool,
     seed: u64,
     rendezvous: &dyn Fn(&mut Runtime) -> kern_runtime::Result<()>,
 ) -> anyhow::Result<Outcome> {
@@ -396,17 +397,28 @@ fn run_rank(
     };
     let mut out = Outcome { tokens: Vec::new(), exact: 0, excused: 0, failures: Vec::new(), step_ms: None };
 
-    // Mixed: the random rows' solo run first, so the batch can be held to it.
-    let random = random_feed(steps, vocab, seed);
-    let solo = if mixed && seqs > 1 {
-        let (t, _) = run_batch(&mut rt, &[random.clone()], per_row, graph, 0)?;
-        Some(t.into_iter().next().unwrap())
-    } else {
-        None
-    };
-
-    let feeds: Vec<Vec<i64>> =
-        (0..seqs).map(|r| if mixed && r > 0 { random.clone() } else { golden.feed.clone() }).collect();
+    // Every distinct feed first runs as a batch of `seqs` copies of itself,
+    // so the mixed batch can be held to it row by row at the same batch
+    // size (cuBLAS picks its kernels by m, so B = 1 and B = 8 legitimately
+    // differ at near-ties; what must not differ is a row's result with other
+    // rows' content around it). `--mixed` gives rows 1.. a random prompt
+    // (`--distinct`: a different one per row); plain mode feeds the fixture
+    // everywhere and only checks row agreement.
+    let feeds: Vec<Vec<i64>> = (0..seqs)
+        .map(|r| if mixed && r > 0 { random_feed(steps, vocab, if distinct { seed + r as u64 } else { seed }) } else { golden.feed.clone() })
+        .collect();
+    let mut solo: Vec<Option<Vec<i64>>> = vec![None; seqs];
+    if mixed && seqs > 1 {
+        for r in 0..seqs {
+            if let Some(same) = (0..r).find(|&q| feeds[q] == feeds[r]) {
+                solo[r] = solo[same].clone();
+                continue;
+            }
+            let copies = vec![feeds[r].clone(); seqs];
+            let (t, _) = run_batch(&mut rt, &copies, per_row, graph, 0)?;
+            solo[r] = Some(t.into_iter().next().unwrap());
+        }
+    }
     let (tokens, ms) = run_batch(&mut rt, &feeds, per_row, graph, iters)?;
     out.step_ms = ms;
     out.tokens = tokens[0].clone();
@@ -425,18 +437,13 @@ fn run_rank(
             ));
         }
     }
-    for r in 1..seqs {
-        let want = match &solo {
-            Some(s) => s,
-            None => &tokens[0],
-        };
+    for r in 0..seqs {
+        let Some(want) = &solo[r] else { continue };
         if &tokens[r] != want {
             let first = (0..steps).find(|&i| tokens[r][i] != want[i]).unwrap();
             out.failures.push(format!(
-                "row {r} diverges from {} at step {first}: got {}, expected {}",
-                if solo.is_some() { "its solo run" } else { "row 0" },
-                tokens[r][first],
-                want[first]
+                "row {r} diverges from a batch of its own copies at step {first}: got {}, expected {}",
+                tokens[r][first], want[first]
             ));
         }
     }
@@ -457,6 +464,7 @@ fn main() {
     let mut rendezvous_addr: Option<String> = None;
     let mut seqs = 1usize;
     let mut mixed = false;
+    let mut distinct = false;
     let mut seed = 1u64;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -475,6 +483,7 @@ fn main() {
             "--rendezvous" => rendezvous_addr = Some(v()),
             "--seqs" => seqs = v().parse().unwrap(),
             "--mixed" => mixed = true,
+            "--distinct" => distinct = true,
             "--seed" => seed = v().parse().unwrap(),
             _ => panic!("unknown arg {a}"),
         }
@@ -571,6 +580,7 @@ fn main() {
                 iters,
                 seqs,
                 mixed,
+                distinct,
                 seed,
                 &rendezvous,
             );
