@@ -56,6 +56,8 @@ use pegainfer_frontend::engine::{
 };
 use tracing::{debug, info, warn};
 
+use crate::logline;
+
 /// `Runtime` holds raw CUDA handles (graph execs, functions) and is used
 /// from the scheduler thread only; every entry point rebinds the context
 /// to the calling thread, so moving it there once is sound.
@@ -156,8 +158,12 @@ impl Seq {
         let done = match reason {
             Some(r) => {
                 debug!(
-                    "finished {}: {r:?}, {} prompt + {} generated in {:?}",
-                    self.id, self.prompt_len, self.generated, self.admitted.elapsed()
+                    request = %self.id,
+                    reason = ?r,
+                    prompt = self.prompt_len,
+                    generated = self.generated,
+                    elapsed_s = logline::secs(self.admitted.elapsed()),
+                    "finished"
                 );
                 ledger.finish(self.id, r);
                 true
@@ -205,11 +211,18 @@ struct Stats {
     tokens: u64,
     prefill_tokens: u64,
     prefill_ns: u128,
+    /// The speculative counters at the window's start, so the window's
+    /// acceptance is reported rather than the process's.
+    spec_at: (u64, u64, u64),
 }
 
 impl Stats {
-    fn new() -> Stats {
-        Stats { since: Instant::now(), steps: 0, step_ns: 0, tokens: 0, prefill_tokens: 0, prefill_ns: 0 }
+    fn new(spec: &Option<SpecPlan>) -> Stats {
+        let spec_at = spec.as_ref().map_or((0, 0, 0), |p| {
+            let c = &p.counters;
+            (c.num_drafts, c.num_draft_tokens, c.num_accepted_tokens)
+        });
+        Stats { since: Instant::now(), steps: 0, step_ns: 0, tokens: 0, prefill_tokens: 0, prefill_ns: 0, spec_at }
     }
 }
 
@@ -351,25 +364,25 @@ impl KernScheduler {
             block_size: rt.page() as usize,
             max_request_tokens: rt.max_seq_tokens() - headroom,
         };
+        // Pages: what requests can lease (one more holds the padding rows).
+        // Graphs are captured per bucket on first use unless `eager`.
         info!(
-            "scheduler: {} pages × {} tokens (+1 pad page){}, ≤{} sequences, ≤{} tokens/sequence, chunk {}, buckets {:?}{}{}{}",
-            facts.total_blocks,
-            facts.block_size,
-            if rt.seq_slots() > 0 { format!(", {} sequence slots", rt.seq_slots()) } else { String::new() },
-            policy.max_seqs,
-            facts.max_request_tokens,
-            policy.chunk,
-            BUCKETS.iter().filter(|&&b| b <= policy.max_seqs).collect::<Vec<_>>(),
-            if policy.eager { ", eager" } else { ", graphs captured per bucket on first use" },
-            if prefill_emits { ", prefill emits next_token" } else { "" },
-            match &spec {
-                Some(s) => format!(
-                    ", speculative: {} drafts/round ({} draft + {} verify rows per sequence{})",
-                    s.n_drafts, s.draft_rows, s.verify_rows, if s.fused { ", fused `round`" } else { "" }
-                ),
-                None => String::new(),
-            }
+            pages = facts.total_blocks,
+            page = facts.block_size,
+            seq_slots = (rt.seq_slots() > 0).then(|| rt.seq_slots()),
+            max_seqs = policy.max_seqs,
+            max_request_tokens = facts.max_request_tokens,
+            chunk = policy.chunk,
+            buckets = ?BUCKETS.iter().filter(|&&b| b <= policy.max_seqs).collect::<Vec<_>>(),
+            eager = policy.eager,
+            prefill_emits,
+            drafts = spec.as_ref().map(|s| s.n_drafts),
+            draft_rows = spec.as_ref().map(|s| s.draft_rows),
+            verify_rows = spec.as_ref().map(|s| s.verify_rows),
+            fused_round = spec.as_ref().map(|s| s.fused),
+            "scheduler ready"
         );
+        let stats = Stats::new(&spec);
         Ok((
             KernScheduler {
                 rt: Rt(rt),
@@ -383,7 +396,7 @@ impl KernScheduler {
                 waiting: VecDeque::new(),
                 running: Vec::new(),
                 warned_sampling: false,
-                stats: Stats::new(),
+                stats,
             },
             facts,
         ))
@@ -439,8 +452,11 @@ impl KernScheduler {
             let q = self.waiting.pop_front().unwrap();
             if !q.request.params.is_greedy() && !self.warned_sampling {
                 warn!(
-                    "request {id}: non-greedy sampling params (temperature {}, top_p {}, top_k {}) — this engine samples greedily (argmax in the manifest); further requests are not warned about",
-                    q.request.params.temperature, q.request.params.top_p, q.request.params.top_k
+                    request = %id,
+                    temperature = q.request.params.temperature,
+                    top_p = q.request.params.top_p,
+                    top_k = q.request.params.top_k,
+                    "non-greedy sampling params; this engine samples greedily (argmax in the manifest); further requests are not warned about"
                 );
                 self.warned_sampling = true;
             }
@@ -455,11 +471,7 @@ impl KernScheduler {
             self.stats.prefill_ns += t0.elapsed().as_nanos();
             self.stats.prefill_tokens += n_pre as u64;
             budget_used += n_pre;
-            debug!(
-                "admitted {id}: {prompt} prompt tokens, max_tokens {max_tokens}, {:?}, prefill {:?}",
-                pages,
-                t0.elapsed()
-            );
+            debug!(request = %id, prompt, max_tokens, pages = ?pages, prefill_ms = logline::ms(t0.elapsed()), "admitted");
             let mut seq = Seq {
                 id,
                 pos: n_pre,
@@ -798,38 +810,37 @@ impl KernScheduler {
         Ok(())
     }
 
+    /// One line per 5 s window in which anything happened; a window that
+    /// only idled is dropped (and restarted, so the next line's rates are
+    /// over its own window). `steps` are speculative rounds under
+    /// `--spec`, and `accepted` / `accept_pct` are the window's.
     fn log_stats(&mut self) {
         let st = &self.stats;
         let dt = st.since.elapsed();
-        if dt.as_secs() < 5 || st.steps == 0 && st.prefill_tokens == 0 {
+        if dt.as_secs() < 5 {
             return;
         }
-        let spec = match &self.spec {
-            Some(p) => {
+        if st.tokens > 0 || st.prefill_tokens > 0 {
+            let round = |x: f64, d: f64| (x * d).round() / d;
+            let (drafts, draft_tokens, accepted) = self.spec.as_ref().map_or((0, 0, 0), |p| {
                 let c = &p.counters;
-                format!(
-                    " | spec {:.2} tok/round, {:.0}% drafts accepted (cumulative)",
-                    (c.num_accepted_tokens + c.num_drafts) as f64 / c.num_drafts.max(1) as f64,
-                    c.num_accepted_tokens as f64 * 100.0 / c.num_draft_tokens.max(1) as f64,
-                )
-            }
-            None => String::new(),
-        };
-        info!(
-            "{} running, {} waiting, {}/{} pages | {} {} {}, {:.2} ms each, {:.0} tok/s | prefill {} tokens, {:.0} tok/s{spec}",
-            self.running.len(),
-            self.waiting.len(),
-            self.kv_used(),
-            self.kv_total(),
-            if self.spec.is_some() { "spec" } else { "decode" },
-            st.steps,
-            if self.spec.is_some() { "rounds" } else { "steps" },
-            st.step_ns as f64 / 1e6 / st.steps.max(1) as f64,
-            st.tokens as f64 / dt.as_secs_f64(),
-            st.prefill_tokens,
-            st.prefill_tokens as f64 / (st.prefill_ns as f64 / 1e9).max(1e-9),
-        );
-        self.stats = Stats::new();
+                (c.num_drafts - st.spec_at.0, c.num_draft_tokens - st.spec_at.1, c.num_accepted_tokens - st.spec_at.2)
+            });
+            info!(
+                running = self.running.len(),
+                waiting = self.waiting.len(),
+                kv_pct = round(self.kv_used() as f64 * 100.0 / self.kv_total().max(1) as f64, 10.0),
+                steps = st.steps,
+                step_ms = round(st.step_ns as f64 / 1e6 / st.steps.max(1) as f64, 100.0),
+                tok_s = round(st.tokens as f64 / dt.as_secs_f64(), 1.0),
+                prefill_tokens = st.prefill_tokens,
+                prefill_tok_s = round(st.prefill_tokens as f64 / (st.prefill_ns as f64 / 1e9).max(1e-9), 1.0),
+                accepted = self.spec.as_ref().map(|_| round((accepted + drafts) as f64 / drafts.max(1) as f64, 100.0)),
+                accept_pct = self.spec.as_ref().map(|_| round(accepted as f64 * 100.0 / draft_tokens.max(1) as f64, 1.0)),
+                "stats"
+            );
+        }
+        self.stats = Stats::new(&self.spec);
     }
 }
 
@@ -869,7 +880,7 @@ fn run_program(rt: &mut Runtime, program: &str, env: &BTreeMap<String, u64>, eag
     if !rt.is_captured(program, env) {
         let t = Instant::now();
         rt.capture(program, env)?;
-        info!("captured `{program}` at {env:?} ({:?})", t.elapsed());
+        info!(program, seqs = env.get("seqs"), tokens = env.get("tokens"), capture_ms = logline::ms(t.elapsed()), "captured");
     }
     Ok(rt.run_captured(program, env)?)
 }

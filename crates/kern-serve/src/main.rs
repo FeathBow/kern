@@ -23,19 +23,7 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                // The upstream vLLM router logs every finished request at
-                // info ("completion finished ..."), one line per request;
-                // its warnings and errors still come through. RUST_LOG
-                // overrides the whole filter.
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,vllm_server::routes=warn")),
-        )
-        .with_writer(std::io::stderr)
-        .with_target(false)
-        .without_time()
-        .init();
+    kern_serve::logline::init();
     let cli = Cli::parse();
     let Some(c) = Config::find(cli.config.as_deref())?.filter(|c| !c.targets.is_empty()) else {
         bail!("kern-serve needs a kern.toml target (manifest, kernels, weights)");

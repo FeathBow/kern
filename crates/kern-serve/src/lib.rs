@@ -7,6 +7,7 @@
 //! `kern_runtime::Runtime` (KV pages are the runtime's leases). The crate's
 //! public surface is [`serve`] and its option structs.
 
+pub mod logline;
 mod scheduler;
 
 use std::path::{Path, PathBuf};
@@ -111,8 +112,6 @@ fn hf_stop_tokens(model_path: &Path) -> Vec<u32> {
 }
 
 pub fn serve(o: ServeOpts, art: Artifacts, d: Defaults) -> Result<()> {
-    // The frontend logs through `log`; route it into tracing.
-    let _ = tracing_log::LogTracer::init();
     let gpu = o.gpu.or(d.gpu).unwrap_or(0);
     let capacity = o.capacity.or(d.capacity);
     let chunk = o.chunk.or(d.chunk).unwrap_or(512) as usize;
@@ -121,7 +120,7 @@ pub fn serve(o: ServeOpts, art: Artifacts, d: Defaults) -> Result<()> {
     stop_tokens.sort_unstable();
     stop_tokens.dedup();
     anyhow::ensure!(!stop_tokens.is_empty(), "no stop tokens: none in {}/generation_config.json or config.json and no --stop-tokens", o.model_path.display());
-    info!("stop tokens {stop_tokens:?}");
+    info!(ids = ?stop_tokens, "stop tokens");
 
     let manifest_json = std::fs::read_to_string(&art.manifest)
         .with_context(|| format!("reading manifest {}", art.manifest.display()))?;
@@ -150,7 +149,7 @@ pub fn serve(o: ServeOpts, art: Artifacts, d: Defaults) -> Result<()> {
             let load = || -> Result<(KernScheduler, scheduler::Facts)> {
                 let t0 = Instant::now();
                 let mut rt = Runtime::load(&manifest_json, &art.kernels, gpu, capacity, None)?;
-                info!("manifest `{}` verified, {} modules loaded ({:?})", rt.manifest.model, rt.module_count(), t0.elapsed());
+                info!(model = %rt.manifest.model, modules = rt.module_count(), load_s = logline::secs(t0.elapsed()), "manifest verified");
                 let t0 = Instant::now();
                 let blobs = art
                     .weights
@@ -159,7 +158,7 @@ pub fn serve(o: ServeOpts, art: Artifacts, d: Defaults) -> Result<()> {
                     .collect::<Result<Vec<_>>>()?;
                 rt.load_weights(&blobs.iter().map(Vec::as_slice).collect::<Vec<_>>())?;
                 drop(blobs);
-                info!("weights bound ({:?})", t0.elapsed());
+                info!(load_s = logline::secs(t0.elapsed()), "weights bound");
                 KernScheduler::new(rt, policy)
             };
             match load() {
@@ -190,7 +189,7 @@ pub fn serve(o: ServeOpts, art: Artifacts, d: Defaults) -> Result<()> {
     };
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    info!("serving `{served_name}` on 0.0.0.0:{} (frontend model dir {})", o.port, o.model_path.display());
+    info!(model = %served_name, port = o.port, model_dir = %o.model_path.display(), "serving");
     rt.block_on(async move {
         // Needs the runtime: it spawns the signal listener.
         let shutdown = vllm::shutdown_token_from_ctrl_c();
