@@ -17,7 +17,7 @@ plan.rs), so the engine that gates this export and the kernels that consume
 it agree on every stacking and transform:
   KDA   wbig [4*12288, 7168] = q|k|v|g_proj; wsm [256, 7168] = b_proj(96) |
         f_a_proj(128) | zero pad; w_f_b [12288, 128]; cw_q/k/v f32 [4, 12288]
-        (conv1d weight [12288, 1, 4] transposed); dt_bias f32 [12288]; a_log
+        (conv1d weight [12288, 1, 4] transposed) and cw = the three stacked [3, 4, 12288]; dt_bias f32 [12288]; a_log
         f32 [96] (the checkpoint pads it to 128 lanes); gamma_o f32 [128];
         w_o [7168, 12288]
   MLA   wfu [14400, 7168] = q_a_proj(1536) | kv_a_proj_with_mqa(576) |
@@ -122,6 +122,8 @@ def dense_layer(ck, i):
             w = ck.get(a + f"{s}_conv1d.weight").float()
             assert w.shape == (INNER, 1, 4)
             out[f"cw_{s}"] = w.reshape(INNER, 4).t().contiguous()
+        # kern's own conv_silu takes the three streams' taps as one [3][4][INNER] block
+        out["cw"] = torch.stack([out[f"cw_{s}"] for s in "qkv"]).contiguous()
         out["dt_bias"] = f32(ck.get(a + "dt_bias"))
         out["a_log"] = f32(ck.get(a + "A_log")[:HEADS])
         out["gamma_o"] = f32(ck.get(a + "o_norm.weight"))

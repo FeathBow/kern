@@ -5,7 +5,7 @@
 //!       --manifest examples/k3-4l-ep4.json --weights /data/susun/kern-k3/4l \
 //!       --fixture <pegainfer>/pegainfer-k3/tests/fixtures/k3_4l_greedy.json \
 //!       --gpus 0,1,2,3 [--graph] [--iters 50] [--margin-abs 0.125]
-//!       [--world 8 --rank-base 4 --rendezvous tray04:7400]
+//!       [--world 8 --rank-base 4 --rendezvous tray04:7400] [--seqs 2 [--mixed --seed 1]]
 //!
 //! One process per tray: `--world` is the EP size, `--rank-base` the global
 //! rank of this process's first GPU, and `--rendezvous` the rank-0 process's
@@ -20,6 +20,12 @@
 //! the sampled token is one of the reference's top 5 — pegainfer's own rule
 //! (tests/golden_decode.rs). Every rank runs the same sequence, so an EP
 //! world must also agree with itself token for token.
+//!
+//! `--seqs N` runs N sequences per rank as one batch (`tokens` == `seqs` ==
+//! N). Plain: every row feeds the fixture and every row must match row 0
+//! token for token. `--mixed`: row 0 feeds the fixture, rows 1.. feed a
+//! seeded random prompt that is first run alone (B = 1); the batch rows
+//! must reproduce that solo run — rows do not leak into each other.
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -27,7 +33,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier, Mutex};
 
 use kern_manifest::types::Dim;
-use kern_run::Caller;
+use kern_runtime::Lease;
 use kern_runtime::{PeerHandle, Runtime, Topology};
 
 const NOISE_FLOOR_ULP: f32 = 2.0;
@@ -226,6 +232,127 @@ fn exchange(addr: &str, mine: &[(u64, Handles)], world: usize) -> anyhow::Result
     Ok(table.into_iter().map(|(_, m)| m).collect())
 }
 
+/// The per-rank batch: one lease per row, staged as `[seqs]`-shaped inputs.
+struct Batch {
+    leases: Vec<Lease>,
+    seqs_max: usize,
+    pos: usize,
+}
+
+impl Batch {
+    fn new(rt: &mut Runtime, rows: usize, tokens_per_row: usize) -> anyhow::Result<Batch> {
+        let seqs_max = rt.manifest.vars["seqs"].max as usize;
+        anyhow::ensure!(rows <= seqs_max, "{rows} rows, manifest seqs bound is {seqs_max}");
+        let leases = (0..rows).map(|_| rt.lease(tokens_per_row)).collect::<Result<Vec<_>, _>>()?;
+        let b = Batch { leases, seqs_max, pos: 0 };
+        b.stage_tables(rt)?;
+        Ok(b)
+    }
+
+    /// Page-table rows and line-table columns: row/column i = lease i, the
+    /// rest (never dereferenced, but domain-checked) repeat lease 0.
+    fn stage_tables(&self, rt: &mut Runtime) -> anyhow::Result<()> {
+        let tables: Vec<String> = rt.page_tables().map(str::to_string).collect();
+        for name in tables {
+            let mut table = Vec::new();
+            for i in 0..self.seqs_max {
+                self.leases[i.min(self.leases.len() - 1)].extend_row(&name, &mut table)?;
+            }
+            rt.write_input(&name, &le_bytes_i32(&table))?;
+        }
+        let lines: Vec<String> = rt.seq_tables().map(str::to_string).collect();
+        for name in lines {
+            let l0 = &self.leases[0];
+            let w = l0.seq_width(&name)?;
+            anyhow::ensure!(w == 1, "`{name}`: wide line tables are not staged here");
+            let mut table = Vec::new();
+            for r in 0..l0.seq_lines(&name)? {
+                for i in 0..self.seqs_max {
+                    table.push(if i < self.leases.len() { self.leases[i].seq_line(&name, r)? } else { 0 });
+                }
+            }
+            rt.write_input(&name, &le_bytes_i32(&table))?;
+        }
+        Ok(())
+    }
+
+    fn stage(&self, rt: &mut Runtime, toks: &[i64]) -> anyhow::Result<BTreeMap<String, u64>> {
+        let b = self.leases.len();
+        assert_eq!(toks.len(), b);
+        let e = BTreeMap::from([("tokens".to_string(), b as u64), ("seqs".to_string(), b as u64)]);
+        rt.write_input_at("token_ids", &le_bytes_i64(toks), &e)?;
+        let slots: Vec<i64> = self.leases.iter().map(|l| l.slot(self.pos)).collect();
+        rt.write_input_at("slot_mapping", &le_bytes_i64(&slots), &e)?;
+        rt.write_input_at("seq_lens", &le_bytes_i32(&vec![(self.pos + 1) as i32; b]), &e)?;
+        Ok(e)
+    }
+}
+
+fn le_bytes_i64(v: &[i64]) -> Vec<u8> {
+    v.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
+fn le_bytes_i32(v: &[i32]) -> Vec<u8> {
+    v.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
+/// Run `feeds` (one token list per row, all the same length) as a batch;
+/// returns each row's sampled tokens and, with `iters > 0`, the replay time.
+fn run_batch(
+    rt: &mut Runtime,
+    feeds: &[Vec<i64>],
+    tokens_per_row: usize,
+    graph: bool,
+    iters: usize,
+) -> anyhow::Result<(Vec<Vec<i64>>, Option<f64>)> {
+    let rows = feeds.len();
+    let steps = feeds[0].len();
+    let mut batch = Batch::new(rt, rows, tokens_per_row)?;
+    let mut out = vec![Vec::with_capacity(steps); rows];
+    let mut captured = false;
+    let mut env = BTreeMap::new();
+    for step in 0..steps {
+        let toks: Vec<i64> = feeds.iter().map(|f| f[step]).collect();
+        env = batch.stage(rt, &toks)?;
+        if graph {
+            if !captured {
+                rt.capture("decode", &env)?;
+                captured = true;
+            }
+            rt.run_captured("decode", &env)?;
+        } else {
+            rt.run("decode", &env)?;
+        }
+        batch.pos += 1;
+        let bytes = rt.read_output("next_token")?;
+        for (r, o) in out.iter_mut().enumerate() {
+            o.push(i64::from_le_bytes(bytes[r * 8..r * 8 + 8].try_into().unwrap()));
+        }
+    }
+    let ms = if iters > 0 {
+        if !captured {
+            rt.capture("decode", &env)?;
+        }
+        Some(rt.time_captured("decode", &env, iters)? as f64)
+    } else {
+        None
+    };
+    Ok((out, ms))
+}
+
+/// A seeded random prompt in the fixture's vocabulary, `len` tokens.
+fn random_feed(len: usize, vocab: i64, seed: u64) -> Vec<i64> {
+    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    (0..len)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            ((x >> 11) % vocab as u64) as i64
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_rank(
     json: &str,
@@ -236,52 +363,54 @@ fn run_rank(
     golden: &Golden,
     graph: bool,
     iters: usize,
+    seqs: usize,
+    mixed: bool,
+    seed: u64,
     rendezvous: &dyn Fn(&mut Runtime) -> kern_runtime::Result<()>,
 ) -> anyhow::Result<Outcome> {
     let manifest = kern_manifest::types::Manifest::from_json(json)?;
     let table = &manifest.buffers["block_table"];
-    let capacity = match table.shape.as_slice() {
+    let per_row = match table.shape.as_slice() {
         [_, Dim::Const(pages)] => pages * table.domain.as_ref().map(|d| d.stride).unwrap_or(1),
         s => anyhow::bail!("unexpected block_table shape {s:?}"),
     };
+    let per_row = per_row as usize;
+    let capacity = (per_row * seqs.max(1)) as u64;
     let mut rt = Runtime::load(json, kernels, gpu, Some(capacity), Some(topo))?;
     let maps: Vec<memmap2::Mmap> = files
         .iter()
         .map(|f| {
-            let file =
-                std::fs::File::open(f).map_err(|e| anyhow::anyhow!("{}: {e}", f.display()))?;
+            let file = std::fs::File::open(f).map_err(|e| anyhow::anyhow!("{}: {e}", f.display()))?;
             Ok(unsafe { memmap2::Mmap::map(&file)? })
         })
         .collect::<anyhow::Result<_>>()?;
     let blobs: Vec<&[u8]> = maps.iter().map(|m| &m[..]).collect();
     rt.load_weights(&blobs)?;
     rendezvous(&mut rt)?;
-    let mut caller = Caller::new(rt)?;
 
-    let mut out = Outcome {
-        tokens: Vec::new(),
-        exact: 0,
-        excused: 0,
-        failures: Vec::new(),
-        step_ms: None,
+    let steps = golden.feed.len();
+    let vocab = manifest.buffers["embed"].shape[0].clone();
+    let vocab = match vocab {
+        Dim::Const(v) => v as i64,
+        _ => 163840,
     };
-    let mut captured = false;
-    let mut env = BTreeMap::new();
-    for (step, &tok) in golden.feed.iter().enumerate() {
-        env = caller.stage_decode(tok)?;
-        if graph {
-            if !captured {
-                caller.rt.capture("decode", &env)?;
-                captured = true;
-            }
-            caller.rt.run_captured("decode", &env)?;
-        } else {
-            caller.rt.run("decode", &env)?;
-        }
-        caller.advance(1);
-        let bytes = caller.rt.read_output("next_token")?;
-        let got = i64::from_le_bytes(bytes[..8].try_into().unwrap());
-        out.tokens.push(got);
+    let mut out = Outcome { tokens: Vec::new(), exact: 0, excused: 0, failures: Vec::new(), step_ms: None };
+
+    // Mixed: the random rows' solo run first, so the batch can be held to it.
+    let random = random_feed(steps, vocab, seed);
+    let solo = if mixed && seqs > 1 {
+        let (t, _) = run_batch(&mut rt, &[random.clone()], per_row, graph, 0)?;
+        Some(t.into_iter().next().unwrap())
+    } else {
+        None
+    };
+
+    let feeds: Vec<Vec<i64>> =
+        (0..seqs).map(|r| if mixed && r > 0 { random.clone() } else { golden.feed.clone() }).collect();
+    let (tokens, ms) = run_batch(&mut rt, &feeds, per_row, graph, iters)?;
+    out.step_ms = ms;
+    out.tokens = tokens[0].clone();
+    for (step, &got) in tokens[0].iter().enumerate() {
         let (exact, excused) = golden.accept(step, got);
         if exact {
             out.exact += 1;
@@ -296,12 +425,20 @@ fn run_rank(
             ));
         }
     }
-    if iters > 0 {
-        if !captured {
-            caller.rt.capture("decode", &env)?;
+    for r in 1..seqs {
+        let want = match &solo {
+            Some(s) => s,
+            None => &tokens[0],
+        };
+        if &tokens[r] != want {
+            let first = (0..steps).find(|&i| tokens[r][i] != want[i]).unwrap();
+            out.failures.push(format!(
+                "row {r} diverges from {} at step {first}: got {}, expected {}",
+                if solo.is_some() { "its solo run" } else { "row 0" },
+                tokens[r][first],
+                want[first]
+            ));
         }
-        // Median ms per replay.
-        out.step_ms = Some(caller.rt.time_captured("decode", &env, iters)? as f64);
     }
     Ok(out)
 }
@@ -318,6 +455,9 @@ fn main() {
     let mut world: Option<usize> = None;
     let mut rank_base = 0usize;
     let mut rendezvous_addr: Option<String> = None;
+    let mut seqs = 1usize;
+    let mut mixed = false;
+    let mut seed = 1u64;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut v = || args.next().expect("value");
@@ -333,6 +473,9 @@ fn main() {
             "--world" => world = Some(v().parse().unwrap()),
             "--rank-base" => rank_base = v().parse().unwrap(),
             "--rendezvous" => rendezvous_addr = Some(v()),
+            "--seqs" => seqs = v().parse().unwrap(),
+            "--mixed" => mixed = true,
+            "--seed" => seed = v().parse().unwrap(),
             _ => panic!("unknown arg {a}"),
         }
     }
@@ -350,12 +493,13 @@ fn main() {
     let kernels = std::env::temp_dir().join(format!("kern-k3-golden-{}", std::process::id()));
     stage_cubins(&cubins, &kernels);
     println!(
-        "{}: {} layers, EP{world} ranks {rank_base}..{} on gpus {gpus:?}, {} fixture steps, {}",
+        "{}: {} layers, EP{world} ranks {rank_base}..{} on gpus {gpus:?}, {} fixture steps, {}{}",
         manifest.display(),
         golden.num_layers,
         rank_base + n,
         golden.feed.len(),
-        if graph { "graph replay" } else { "eager" }
+        if graph { "graph replay" } else { "eager" },
+        if seqs > 1 { format!(", {seqs} rows/rank{}", if mixed { " (row 0 fixture, rest random)" } else { "" }) } else { String::new() }
     );
     if world > n {
         let addr = rendezvous_addr
@@ -425,6 +569,9 @@ fn main() {
                 &golden,
                 graph,
                 iters,
+                seqs,
+                mixed,
+                seed,
                 &rendezvous,
             );
             results.lock().unwrap()[local] = Some(r.map_err(|e| format!("{e:#}")));
