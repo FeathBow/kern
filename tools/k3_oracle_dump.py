@@ -5,7 +5,7 @@ crates/kern-run/examples/k3_golden.rs.
 
     python3 tools/k3_oracle_dump.py --url http://host:8100 --steps 40 \
         --seed-fixture <pegainfer>/pegainfer-k3/tests/fixtures/k3_4l_greedy.json \
-        --out /data/susun/kern-k3/oracle-vllm-93l.json
+        --out /data/kern-k3/oracle-vllm-93l.json
 
 Teacher-forced: step i sends `feed[:i+1]` as token ids with max_tokens=1,
 temperature 0 and top-5 logprobs, records the argmax and top-5 at that

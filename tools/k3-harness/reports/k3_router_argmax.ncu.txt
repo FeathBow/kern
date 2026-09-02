@@ -4,7 +4,7 @@
 #       see tools/k3-harness/notes/k3_router_argmax.md for the graph-replay times.
 
 ==WARNING== Note: Running with unmodified GPU clocks. If not controlled otherwise, profiling results may be inconsistent.
-==PROF== Connected to process 651798 (/mnt/shared/home/susun/kern-1/tools/k3-scratch/k6/prof_k6)
+==PROF== Connected to process 651798 (<repo>/tools/k3-scratch/k6/prof_k6)
 ==PROF== Profiling "kern_k3_router_topk": 0%....50%....100% - 42 passes
 ok
 ==PROF== Disconnected from process 651798
@@ -274,7 +274,7 @@ ok
     ------------------------- ----------- ------------
 
 ==WARNING== Note: Running with unmodified GPU clocks. If not controlled otherwise, profiling results may be inconsistent.
-==PROF== Connected to process 651897 (/mnt/shared/home/susun/kern-1/tools/k3-scratch/k6/prof_k6)
+==PROF== Connected to process 651897 (<repo>/tools/k3-scratch/k6/prof_k6)
 ==PROF== Profiling "kern_k3_argmax_f32_partial": 0%....50%....100% - 42 passes
 ok
 ==PROF== Disconnected from process 651897
@@ -521,7 +521,7 @@ ok
           information on reducing uncoalesced device memory accesses.                                                   
 
 ==WARNING== Note: Running with unmodified GPU clocks. If not controlled otherwise, profiling results may be inconsistent.
-==PROF== Connected to process 652316 (/mnt/shared/home/susun/kern-1/tools/k3-scratch/k6/prof_k6)
+==PROF== Connected to process 652316 (<repo>/tools/k3-scratch/k6/prof_k6)
 ==PROF== Profiling "kern_k3_argmax_f32_final": 0%....50%....100% - 42 passes
 ok
 ==PROF== Disconnected from process 652316

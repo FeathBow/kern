@@ -12,7 +12,7 @@ set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 out="${1:-$repo/target/cubins}"
 arch="${KERN_SM:-sm_103a}"
-dg="${DEEPGEMM_ROOT:-$HOME/agent_code/pegainfer/pegainfer-kernels/third_party/DeepGEMM}"
+dg="${DEEPGEMM_ROOT:-$HOME/pegainfer/pegainfer-kernels/third_party/DeepGEMM}"
 src="$repo/tools/k3-mega"
 mkdir -p "$out"
 inc=(-I "$src/include" -I "$dg/deep_gemm/include" -I "$dg/third-party/cutlass/include" -I "$dg/third-party/fmt/include")

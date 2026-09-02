@@ -2,7 +2,7 @@
 //! `decode` program, one sequence per rank, and compare every step's argmax.
 //!
 //!   cargo run --release -p kern-run --example k3_golden -- \
-//!       --manifest examples/k3-4l-ep4.json --weights /data/susun/kern-k3/4l \
+//!       --manifest examples/k3-4l-ep4.json --weights /data/kern-k3/4l \
 //!       --fixture <pegainfer>/pegainfer-k3/tests/fixtures/k3_4l_greedy.json \
 //!       --gpus 0,1,2,3 [--graph] [--iters 50] [--margin-abs 0.125]
 //!       [--world 8 --rank-base 4 --rendezvous tray04:7400] [--seqs 2 [--mixed --seed 1]]
@@ -458,7 +458,7 @@ fn run_rank(
 
 fn main() {
     let mut manifest = PathBuf::from("examples/k3-4l-ep1.json");
-    let mut weights = PathBuf::from("/data/susun/kern-k3/4l");
+    let mut weights = PathBuf::from("/data/kern-k3/4l");
     let mut fixture = PathBuf::from("tests/fixtures/k3_4l_greedy.json");
     let mut cubins = PathBuf::from("target/cubins");
     let mut gpus: Vec<usize> = vec![0];

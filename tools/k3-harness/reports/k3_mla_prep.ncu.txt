@@ -1,6 +1,6 @@
-==PROF== Connected to process 676135 (/mnt/shared/home/susun/kern-1/tools/k3-scratch/k4/harness)
+==PROF== Connected to process 676135 (<repo>/tools/k3-scratch/k4/harness)
 ==PROF== Profiling "kern_k3_mla_prep": 0%....50%....100% - 42 passes
-== mla_prep  B=64  cubin=/mnt/shared/home/susun/kern-1/target/cubins/k3_mla_prep.cubin  device=NVIDIA GB300  seed=1234
+== mla_prep  B=64  cubin=<repo>/target/cubins/k3_mla_prep.cubin  device=NVIDIA GB300  seed=1234
   launch       grid(64,4,1) block(512,1,1) smem=0
   q_norm       n=98304       max|err|=0.000e+00  maxULP=  0.00  relRMS=0.000e+00  PASS
   mla_gate     n=786432      max|err|=0.000e+00  maxULP=  0.00  relRMS=0.000e+00  PASS

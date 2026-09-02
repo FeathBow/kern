@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Export the pruned Kimi-K3 checkpoint into kern's K3 decode weight blobs.
 
-    python3 tools/export_k3.py --out /data/susun/kern-k3/4l --layers 4 --ranks 1,4
+    python3 tools/export_k3.py --out /data/kern-k3/4l --layers 4 --ranks 1,4
 
 Writes, resumably (existing files are kept):
   dense/bookends.safetensors   embed, gamma_final, sw_out, w_lm

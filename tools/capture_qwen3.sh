@@ -4,7 +4,7 @@
 # module's cubin and every launch's full call ABI into dumped-kernels/.
 #
 # Run on a tray with a free GPU:
-#   ssh pod4-gb300-3-tray05-f3 'CUDA_VISIBLE_DEVICES=0 /mnt/shared/home/susun/kern/tools/capture_qwen3.sh'
+#   ssh <tray> 'CUDA_VISIBLE_DEVICES=0 $HOME/kern/tools/capture_qwen3.sh'
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

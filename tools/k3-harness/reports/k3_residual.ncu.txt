@@ -1,9 +1,9 @@
 ### k3_residual.cu -- ncu --set full, tray07 GPU 0 (idle), B=64
 
 === [1/3] kern_k3_attnres_rms  --B 64 --nb 8 --snapshot 0 ===
-==PROF== Connected to process 676705 (/mnt/shared/home/susun/kern-1/tools/k3-harness/harness)
+==PROF== Connected to process 676705 (<repo>/tools/k3-harness/harness)
 ==PROF== Profiling "kern_k3_attnres_rms": 0%....50%....100% - 42 passes
-== attnres_rms  B=64  cubin=/mnt/shared/home/susun/kern-1/tools/k3-scratch/k1/k3_residual.cubin  device=NVIDIA GB300  seed=1234
+== attnres_rms  B=64  cubin=<repo>/tools/k3-scratch/k1/k3_residual.cubin  device=NVIDIA GB300  seed=1234
   launch       grid(64,1,1) block(1024,1,1) smem=0
   normed       n=458752      max|err|=1.562e-02  maxULP= 19.00  relRMS=3.574e-05  PASS
   blocks(state) n=3670016     max|err|=0.000e+00  maxULP=  0.00  relRMS=0.000e+00  PASS
@@ -271,9 +271,9 @@ RESULT	attnres_rms	B=64	ctx=2048	nb=8	snap=0	two=1	PASS	57.31 us	160.8 GB/s
 
 
 === [2/3] kern_k3_land_add_attnres_rms  --B 64 --nb 8 --snapshot 0 ===
-==PROF== Connected to process 676872 (/mnt/shared/home/susun/kern-1/tools/k3-harness/harness)
+==PROF== Connected to process 676872 (<repo>/tools/k3-harness/harness)
 ==PROF== Profiling "kern_k3_land_add_attnres_rms": 0%....50%....100% - 42 passes
-== land_add_attnres_rms  B=64  cubin=/mnt/shared/home/susun/kern-1/tools/k3-scratch/k1/k3_residual.cubin  device=NVIDIA GB300  seed=1234
+== land_add_attnres_rms  B=64  cubin=<repo>/tools/k3-scratch/k1/k3_residual.cubin  device=NVIDIA GB300  seed=1234
   launch       grid(64,1,1) block(1024,1,1) smem=0
   prefix2      n=458752      max|err|=0.000e+00  maxULP=  0.00  relRMS=0.000e+00  PASS
   normed       n=458752      max|err|=1.562e-02  maxULP=  7.00  relRMS=7.256e-05  PASS
@@ -542,9 +542,9 @@ RESULT	land_add_attnres_rms	B=64	ctx=2048	nb=8	snap=0	two=1	PASS	55.33 us	216.4 
 
 
 === [3/3] kern_k3_land_add2  --B 64 --two 1 ===
-==PROF== Connected to process 677621 (/mnt/shared/home/susun/kern-1/tools/k3-harness/harness)
+==PROF== Connected to process 677621 (<repo>/tools/k3-harness/harness)
 ==PROF== Profiling "kern_k3_land_add2": 0%....50%....100% - 42 passes
-== land_add2  B=64  cubin=/mnt/shared/home/susun/kern-1/tools/k3-scratch/k1/k3_residual.cubin  device=NVIDIA GB300  seed=1234
+== land_add2  B=64  cubin=<repo>/tools/k3-scratch/k1/k3_residual.cubin  device=NVIDIA GB300  seed=1234
   launch       grid(64,1,1) block(1024,1,1) smem=0
   hidden       n=458752      max|err|=0.000e+00  maxULP=  0.00  relRMS=0.000e+00  PASS
   TIME         median      57.15 us   (min 53.63)  roofline 5.51 MB   implied 96.3 GB/s

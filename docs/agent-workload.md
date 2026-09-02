@@ -3,7 +3,7 @@
 状态：2026-09-01。数据 = InferenceX（SemiAnalysis）AgentX 回放集，真实 Claude Code
 会话的匿名 trace（prompt/代码/工具载荷剥离，保留每请求 token 数、64-token 块链哈希、
 子 agent 分支、时间戳）。本地副本与分析脚本：
-`~/bench-results/2026-09-01-agentx-traces/`（`analyze.py`、`analysis-full.txt`、
+本地存档 `bench-results/2026-09-01-agentx-traces/`（不在仓库）（`analyze.py`、`analysis-full.txt`、
 `analysis-256k.txt`）。来源：
 [inferencex.semianalysis.com/datasets](https://inferencex.semianalysis.com/datasets)、
 HF `semianalysisai/cc-traces-weka-062126`（full，≤1M ctx）/ `-256k`。

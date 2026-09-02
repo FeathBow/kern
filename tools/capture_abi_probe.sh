@@ -2,7 +2,7 @@
 # 快速 ABI 探针：换 attention backend 抓一次短 capture，只为看 kernel 参数形态。
 set -euo pipefail
 backend="$1"
-repo=/mnt/shared/home/susun/kern
+repo="${KERN_REPO:-$HOME/kern}"
 export PATH="$repo/.venv/bin:${CUDA_HOME:-/usr/local/cuda}/bin:$PATH"
 export CUDA_INJECTION64_PATH="$repo/tools/kernel-capture/libkernelcapture.so"
 export KERNEL_CAPTURE_DIR="$repo/dumped-kernels/abi-$backend"

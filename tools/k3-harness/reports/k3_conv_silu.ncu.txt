@@ -5,9 +5,9 @@
 # driver: tools/k3-scratch/k2/test_conv_silu (scratch driver; the official
 #   harness syncs per launch, which would add ~5 us to the profiled region)
 
-==PROF== Connected to process 655021 (/mnt/shared/home/susun/kern-1/tools/k3-scratch/k2/test_conv_silu)
+==PROF== Connected to process 655021 (<repo>/tools/k3-scratch/k2/test_conv_silu)
 ==PROF== Profiling "kern_k3_conv_silu": 0%....50%....100% - 42 passes
-cubin=/mnt/shared/home/susun/kern-1/tools/k3-scratch/k2/cubins/k3_conv_silu.cubin  max_threads_per_block=128
+cubin=<repo>/tools/k3-scratch/k2/cubins/k3_conv_silu.cubin  max_threads_per_block=128
 B=64   out_bad=0  win_bad=0  max|err|=0  relRMS=0  PASS
        block=128 VEC=4 grid=(64,3,24)  53.86 us  799 GB/s (10.0% of 8 TB/s)
        cold: 13.02 us   read 23.06 MB -> 1857 GB/s (23.2%)   r+w 41.06 MB -> 3307 GB/s (41.3%)

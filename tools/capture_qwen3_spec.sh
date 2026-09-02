@@ -4,7 +4,7 @@
 # greedy. Captures the draft backbone (non-causal unified instance), the
 # fused context-KV precompute, and the target verify passes.
 #
-#   ssh <tray> 'CUDA_VISIBLE_DEVICES=0 /mnt/shared/home/susun/kern/tools/capture_qwen3_spec.sh'
+#   ssh <tray> 'CUDA_VISIBLE_DEVICES=0 $HOME/kern/tools/capture_qwen3_spec.sh'
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

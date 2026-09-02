@@ -11,7 +11,7 @@ import hashlib, os, sys
 
 REVIEWED_SHA = "e74a82f9c931ddf7"
 root = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser(
-    "~/agent_code/pegainfer/pegainfer-kernels/third_party/DeepGEMM")
+    "~/pegainfer/pegainfer-kernels/third_party/DeepGEMM")
 src = os.path.join(root, "deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh")
 s = open(src).read()
 sha = hashlib.sha256(s.encode()).hexdigest()[:16]

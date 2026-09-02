@@ -3,9 +3,9 @@
 # tray08 GPU 0 (idle tray), CUDA 13.1, driver 610.57.04, NVIDIA GB300 (sm_103, 152 SMs)
 # harness --kernel mla_paged_attn --cubin k5.cubin --B 1 --ctx 32768 --grid 1,48,1 --block 512,1,1
 ################################################################
-==PROF== Connected to process 698603 (/mnt/shared/home/susun/kern-1/tools/k3-harness/harness)
+==PROF== Connected to process 698603 (<repo>/tools/k3-harness/harness)
 ==PROF== Profiling "kern_k3_mla_paged_attn": 0%....50%....100% - 42 passes
-== mla_paged_attn  B=1  cubin=/mnt/shared/home/susun/kern-1/tools/k3-scratch/k5/k5.cubin  device=NVIDIA GB300  seed=1234
+== mla_paged_attn  B=1  cubin=<repo>/tools/k3-scratch/k5/k5.cubin  device=NVIDIA GB300  seed=1234
   launch       grid(1,48,1) block(512,1,1) smem=0
   gated        n=12288       max|err|=2.441e-04  maxULP=1632.00  relRMS=5.986e-04  PASS
   shape        ctx=32768 max_pages=512 npages=512 seq_lens[0]=32768 kv_tokens=32768
@@ -268,9 +268,9 @@ RESULT	mla_paged_attn	B=1	ctx=32768	nb=4	snap=1	two=1	PASS	299.04 us	210.8 GB/s
 # tray08 GPU 0 (idle tray), CUDA 13.1, driver 610.57.04, NVIDIA GB300 (sm_103, 152 SMs)
 # harness --kernel mla_paged_attn --cubin k5.cubin --B 8 --ctx 32768 --grid 8,48,1 --block 512,1,1
 ################################################################
-==PROF== Connected to process 698804 (/mnt/shared/home/susun/kern-1/tools/k3-harness/harness)
+==PROF== Connected to process 698804 (<repo>/tools/k3-harness/harness)
 ==PROF== Profiling "kern_k3_mla_paged_attn": 0%....50%....100% - 42 passes
-== mla_paged_attn  B=8  cubin=/mnt/shared/home/susun/kern-1/tools/k3-scratch/k5/k5.cubin  device=NVIDIA GB300  seed=1234
+== mla_paged_attn  B=8  cubin=<repo>/tools/k3-scratch/k5/k5.cubin  device=NVIDIA GB300  seed=1234
   launch       grid(8,48,1) block(512,1,1) smem=0
   gated        n=98304       max|err|=2.441e-04  maxULP=5025.00  relRMS=4.686e-04  PASS
   shape        ctx=32768 max_pages=512 npages=4096 seq_lens[0]=32768 kv_tokens=155008

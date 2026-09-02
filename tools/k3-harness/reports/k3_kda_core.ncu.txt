@@ -1,6 +1,6 @@
-==PROF== Connected to process 668239 (/mnt/shared/home/susun/kern-1/tools/k3-harness/harness)
+==PROF== Connected to process 668239 (<repo>/tools/k3-harness/harness)
 ==PROF== Profiling "kern_k3_kda_core": 0%....50%....100% - 42 passes
-== kda_core  B=64  cubin=/mnt/shared/home/susun/kern-1/target/cubins/k3_kda_core.cubin  device=NVIDIA GB300  seed=1234
+== kda_core  B=64  cubin=<repo>/target/cubins/k3_kda_core.cubin  device=NVIDIA GB300  seed=1234
   launch       grid(64,96,1) block(128,1,1) smem=0
   out          n=786432      max|err|=3.906e-03  maxULP=136.50  relRMS=2.657e-05  PASS
   rec(state)   n=100663296   max|err|=4.967e-05  maxULP=226.84  relRMS=5.747e-07  PASS

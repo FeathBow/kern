@@ -2,7 +2,7 @@
 
 状态：设计稿，2026-09-01；09-02 按 `dcp-bench.md` 的实测与拍板修订（见文末“已决”）。实测全部在 GB300 NVL72（pod4-gb300-3，driver
 13030，CUDA 13.1）上做，bench 源码在
-`~/bench-results/2026-09-01-graph-launch/`（`bench.cu` 图提交、`fabric.cu`
+本地存档 `bench-results/2026-09-01-graph-launch/`（不在仓库）（`bench.cu` 图提交、`fabric.cu`
 跨 tray P2P、`a2a.cu` dispatch 模拟、`hostmem.cu`/`hostnuma.cu`/
 `egmverify.cu` 是 KV 分层那一半的，另见后续文档）。
 
@@ -332,7 +332,7 @@ rank 死 → 组内所有图在 flag 上永久 spin。**所有跨 rank 等待都
    （fused_kda_decode / flashinfer-trtllm MLA / DeepGEMM / torch.compile）拆不出可
    AOT 的核；kern 的 93 层 EP4 program（E2）逐行对照 pegainfer `k3_step`，正确性以
    pegainfer fixture + 三方 teacher-forced oracle 定案（见 roadmap E2 行）。导出的权重
-   放 tray 本地 `/data`（tray04 `/data/susun/kern-k3/`），不进 Ceph。
+   放 tray 本地数据盘（`/data/<user>/kern-k3/`），不进 Ceph。
 
 ## 待决
 

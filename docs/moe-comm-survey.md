@@ -77,7 +77,7 @@ decode 下没有。
 
 ## 5. peer/fabric 显存上的 async-proxy 实验（2026-09-02，tray18；tray17 作跨 tray 对端）
 
-程序 `~/bench-results/2026-09-02-peer-bulk/peerbulk.cu`，日志 `p1..p5-*.log`。发起方
+程序见本地存档 `bench-results/2026-09-02-peer-bulk/peerbulk.cu`（不在仓库），日志 `p1..p5-*.log`。发起方
 GPU 对 256 MiB 的目标区域做每项操作并逐位校验；三种映射：同 tray peer access
 （`cudaDeviceEnablePeerAccess` + `cudaMalloc`）、同进程 `cuMem` FABRIC 导入、跨 tray
 FABRIC 导入。

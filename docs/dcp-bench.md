@@ -1,7 +1,7 @@
 # DCP microbench：2×EP36 形态下 context 条带化的代价（想法 → 测法 → 结果）
 
 状态：2026-09-01 起，tray13/14。前置：`agent-workload.md`（负载）、`multi-gpu.md`
-（形态）。代码与原始输出：`~/bench-results/2026-09-01-dcp-bench/`。
+（形态）。代码与原始输出：本地存档 `bench-results/2026-09-01-dcp-bench/`（不在仓库）。
 
 ## 0. 我们相信什么（待证伪的命题）
 
