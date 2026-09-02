@@ -121,12 +121,17 @@ CONV_STATE_BYTES = CONV_DIM * 3 * BF16   # 61440
 SSM_STATE_BYTES = GDN_V_HEADS * GDN_D * GDN_D * 4   # 3145728
 GDN_LINE_BYTES = 3211264                 # conv + ssm + 4096 pad (vLLM page)
 # Serving layout: the GDN state is per sequence (`bytes_per_seq`), one line
-# per GDN layer; the runtime provisions MAX_SEQS + 2 slots (slot 0 = null
-# lines, one spare for a batched caller's padding) and the line table
-# `gdn.line_index[layer, seq]` = slot × 48 + layer.
-MAX_SEQS = 128                           # `seqs` bound: decode_batch rows, GDN slots
+# per GDN layer; the line table `gdn.line_index[layer, seq]` = slot × 48 +
+# layer. How many slots exist is the runtime's business: it starts with
+# MAX_SEQS + 2 (slot 0 = null lines, one spare for a batched caller's
+# padding) and grows them out of its state budget, so nothing here may
+# bound a slot number. The conv kernels take vLLM's `num_cache_lines` only
+# to mask a line index past its cache; they get the largest i32 and the
+# mask never bites (a manifest that baked MAX_SEQS + 2 in here silently
+# dropped the conv state of every slot past 129).
+MAX_SEQS = 128                           # `seqs` bound: decode_batch rows
 GDN_SEQ_BYTES = len(GDN_LAYERS) * GDN_LINE_BYTES
-GDN_TOTAL_LINES = (MAX_SEQS + 2) * len(GDN_LAYERS)   # num_cache_lines the conv kernels see
+GDN_LINES_BOUND = 2**31 - 1              # num_cache_lines the conv kernels see
 
 # --- DFlash2 speculative decoding (examples/qwen3.8-27b-dflash2.json, --spec)
 SPEC_BLOCK = 8                           # draft block: anchor + 7 masks = verify rows
@@ -579,7 +584,7 @@ def build(pre, dec, pins, eps, attn_scale, gdn_scale, silu_sym, spec=None):
         page_bytes, ssm_off, seq_bytes = SPEC_PAGE_BYTES, SPEC_SSM_OFF, SPEC_SEQ_BYTES
     else:
         page_bytes, ssm_off, seq_bytes = GDN_LINE_BYTES, CONV_STATE_BYTES, GDN_SEQ_BYTES
-    n_pages = GDN_TOTAL_LINES
+    n_pages = GDN_LINES_BOUND
     # entries per (layer, sequence) cell of the line table: the spec
     # kernels take an 8-entry list per sequence
     line_w = SPEC_BLOCK if spec else 1
