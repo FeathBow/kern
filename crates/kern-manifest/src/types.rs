@@ -156,7 +156,7 @@ pub struct State {
     /// Fixed byte count independent of capacity and sequences, e.g. `4096`.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub bytes: u64,
-    /// Bytes per sequence slot, one slot per live sequence — a recurrent conv/SSM state, e.g. `154140672`. The runtime provisions `seqs.max + 2` slots: slot 0 (never leased; kernels may read line index 0 as null), one per sequence, one for a batched caller's padding.
+    /// Bytes per sequence slot, one slot per live sequence — a recurrent conv/SSM state, e.g. `154140672`. The runtime starts with `seqs.max + 2` slots — slot 0 (never leased; kernels may read line index 0 as null), one per sequence, one for a batched caller's padding — and grows them out of the state budget as checkpoints keep the states of sleeping sequences.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub bytes_per_seq: u64,
 }
@@ -265,14 +265,9 @@ impl ResolvedDomain {
 }
 
 impl Domain {
-    /// Row count of `index_into`'s target at `env`, or its token capacity for
-    /// a state; `None` when the name resolves to nothing.
-    fn target_rows(
-        &self,
-        m: &Manifest,
-        env: &BTreeMap<String, u64>,
-        state_capacity_tokens: u64,
-    ) -> Result<Option<u64>, EvalError> {
+    /// Row count of `index_into`'s target at `env`, or what the runtime
+    /// provisioned for a state; `None` when the name resolves to nothing.
+    fn target_rows(&self, m: &Manifest, env: &BTreeMap<String, u64>, p: &Provision) -> Result<Option<u64>, EvalError> {
         let Some(t) = &self.index_into else { return Ok(None) };
         if let Some(b) = m.buffers.get(t) {
             return Ok(Some(match b.shape.first() {
@@ -285,7 +280,7 @@ impl Domain {
             // A per-sequence state is addressed in lines of `stride` bytes,
             // `seq_slots` slots of them; `resolve` divides by the stride
             // again, so hand back the byte count.
-            return Ok(Some(if st.is_per_seq() { m.seq_slots() * st.bytes_per_seq } else { state_capacity_tokens }));
+            return Ok(Some(if st.is_per_seq() { p.seq_slots * st.bytes_per_seq } else { p.tokens }));
         }
         Ok(None)
     }
@@ -296,10 +291,10 @@ impl Domain {
         &self,
         m: &Manifest,
         env: &BTreeMap<String, u64>,
-        state_capacity_tokens: u64,
+        p: &Provision,
     ) -> Result<ResolvedDomain, EvalError> {
         if self.index_into.is_some() {
-            let rows = self.target_rows(m, env, state_capacity_tokens)?;
+            let rows = self.target_rows(m, env, p)?;
             let hi = rows.map(|r| (r / self.stride.max(1)).saturating_sub(1) as f64);
             return Ok(ResolvedDomain { lo: Some(0.0), hi, monotone: self.monotone });
         }
@@ -309,6 +304,15 @@ impl Domain {
             monotone: self.monotone,
         })
     }
+}
+
+/// What the runtime provisioned the states for: the token slots every
+/// paged state can address and the sequence slots every per-sequence one
+/// can, the bounds an `index_into` domain resolves against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Provision {
+    pub tokens: u64,
+    pub seq_slots: u64,
 }
 
 /// One shape extent: a constant or a var name, e.g. `2560` or `"tokens"`.

@@ -788,7 +788,7 @@
           "type": "integer"
         },
         "bytes_per_seq": {
-          "description": "Bytes per sequence slot, one slot per live sequence — a recurrent conv/SSM state, e.g. `154140672`. The runtime provisions `seqs.max + 2` slots: slot 0 (never leased; kernels may read line index 0 as null), one per sequence, one for a batched caller's padding.",
+          "description": "Bytes per sequence slot, one slot per live sequence — a recurrent conv/SSM state, e.g. `154140672`. The runtime starts with `seqs.max + 2` slots — slot 0 (never leased; kernels may read line index 0 as null), one per sequence, one for a batched caller's padding — and grows them out of the state budget as checkpoints keep the states of sleeping sequences.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"

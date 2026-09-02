@@ -4,9 +4,9 @@
 # 独立 workspace（serving 栈不进 runtime 的依赖图和 CI）；binary 在 crates/kern-serve/target/
 cd crates/kern-serve && cargo build --release
 target/release/kern-serve --model-path /mnt/shared/weights/Qwen3-4B --gpu 3 --port 8000
-# KV 池默认按显存自动定：权重/激活/scratch 分完后，剩余显存减 1 GiB 全给 state，
-# 上限 seqs.max × 单序列行上限（再多也租不出去）。`--capacity <tokens>` 或 kern.toml 的
-# `capacity` 显式给则照旧。
+# state 池默认按显存自动定：权重/激活/scratch 分完后，剩余显存减 1 GiB 全给 state，
+# KV 页与 state slot 共用这份预算、按需互换（runtime.md）。`--capacity <tokens>` 或
+# kern.toml 的 `capacity` 显式给则照旧。
 # /v1/completions、/v1/chat/completions（流式 + chat template）、/v1/models、/metrics
 ```
 
@@ -114,8 +114,10 @@ near-tie）。吞吐：conc 1 / 8 / 32 ≈ 600 / 2560 / 5850 tok/s，普通模�
 - 带循环状态（qwen3.8-27b，页 784 token，GDN state 154 MB/序列）：只在请求结束时
   `Runtime::retire`——结束序列的 state slot 原样成为 checkpoint 的，不拷；因此只有
   "续着上一轮整段上下文"的 prompt 命中，同一 prompt 重发不命中（checkpoint 比它长）。
-  slot 数 = manifest 的 `seqs.max + 2`，checkpoint 与活跃序列共用，租约 `Busy` 时按
-  最久未命中淘汰。
+  slot 从 manifest 的 `seqs.max + 2` 个起，与 KV 页共用一份显存预算按需互换（K1b）：
+  睡着的 session 的 checkpoint 拿着 slot，活跃请求再要 slot 就从空闲页拆，页不够
+  再从空闲 slot 拆回来；租约 `Busy` 时按最久未命中淘汰，`Remapping` 时等它落地
+  （stats 行的 `slots_used`/`slots`/`remaps`）。
 
 门禁（本机 GB300，warm 服务与 cold 服务各一，greedy，`max_tokens 64`，prompt 为 46 KB
 工程日志）：
@@ -130,7 +132,17 @@ qwen3.8 重发同一 prompt 不命中（唯一的 checkpoint 比它长），输�
 分叉不是缓存的：同一 prompt 在 cold 服务上用 `--chunk 144`（末块同样是 15 个 token）
 全量 prefill，得到第三种续写——三种切块三种 attention 归约顺序，这个位置是 bf16
 近平局，与 `decode` / `decode_batch` 之间的分叉同类。
-host 侧回放见 roadmap K1 行（`crates/kern-run/examples/agentx_replay.rs`）。
+host 侧回放见 roadmap K1 / K1b 行（`crates/kern-run/examples/agentx_replay.rs`）。
+
+K1b（页与 slot 共用预算）后的门禁（2026-09-02）：上表两行的输出逐字不变；qwen3.8-27b 单卡
+预算 223.9 GiB = 9551 块 × 24 MiB，起步 4287 页 + 130 slot；200 个不同的短请求依次结束后
+slot 长到 191（每个 checkpoint 拿一个，活跃请求再要就从空闲页拆，61 次 remap），此后重发
+早先的 prompt 与首次输出一致、46 KB prompt 的 64 个 greedy token 与 cold 服务一致。
+这条门禁第一次跑就抓到一个 manifest 的 bug：`gen_qwen35.py` 把 `(seqs.max + 2) × 48 = 6240`
+当 vLLM conv kernel 的 `num_cache_lines` 写成字面量，kernel 用它做越界掩码，slot ≥ 130 的
+conv state 静默丢掉（短 prompt 单块 prefill 从零态起步看不出来，14k 的 prompt 第二块起就错）。
+按 slot 编号二分定位：页编号高没事、`kern run` 单序列没事，只有 kern-serve 里 slot ≥ 130
+的多块 prefill 出错。manifest 里不许再出现 slot 数：conv kernel 现在拿 i32 最大值，掩码永不生效。
 
 带状态模型的部分命中在算力上没有意义：state 快照之后的 token 必须整段重跑 forward
 才能把状态推过去，attention 层的投影和注意力都省不掉，所以有效命中 = 最深的带

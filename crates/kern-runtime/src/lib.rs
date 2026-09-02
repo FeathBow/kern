@@ -24,6 +24,7 @@
 //! hands them out, [`Runtime::import_peers`] maps the other ranks' and fills
 //! the `peer` address arrays. Nothing runs until every peer array is filled.
 
+mod chunks;
 mod compile;
 mod cubin;
 mod device;
@@ -34,18 +35,24 @@ pub mod values;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::raw::c_void;
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
+use std::thread::JoinHandle;
 
 use cudarc::cublaslt::CudaBlasLT;
 use cudarc::driver::{sys, CudaContext, CudaStream, PinnedHostSlice};
-use kern_manifest::types::{BufferKind, Manifest, State};
+use kern_manifest::types::{BufferKind, Manifest, Provision, State};
 
+pub use chunks::{Kind, Remap};
 use compile::{CompiledProgram, Launch, LaunchKind, RVal, Slot, TmaBlob};
 pub use device::PeerHandle;
-use device::{alloc, alloc_vmm, gemm_bf16_tn, gemm_bf16_tn_f32, Blas, DeviceBuf, Share};
+use device::{
+    alloc, alloc_vmm, chunk_granularity, gemm_bf16_tn, gemm_bf16_tn_f32, Arena, Blas, DeviceBuf, Mapper, Physical,
+    Share,
+};
 use error::{bail, cuda_check};
 pub use error::{Error, Result};
-pub use pages::{page_unit, Checkpoint, Copies, Denied, Lease, Pool};
+pub use pages::{page_unit, Checkpoint, Copies, Denied, Lease, Pool, Pooled};
 pub use prefix::{Chain, Hit, Prefix};
 
 /// This rank's place in every group the manifest's `topology` declares.
@@ -81,11 +88,14 @@ pub struct Runtime {
     blt: CudaBlasLT,
     /// cuBLAS handle (with its own workspace) for the f32-result GEMM built-in.
     blas: Blas,
-    /// Token capacity every state was provisioned for (`index_into` a
-    /// state resolves against it).
-    capacity: u64,
+    /// What every `index_into` domain resolves against: the token slots a
+    /// paged state's arena spans, the sequence slots a per-sequence one's.
+    provision: Provision,
     /// Owner of the states' token slots: hands them out as leases.
     pool: Arc<pages::Pool>,
+    /// The remap thread: runs the pool's plans off the serving thread.
+    remaps: Remaps,
+    remap_count: u64,
     /// Name-keyed because names are the caller API (`write_input`,
     /// `read_output`, weight binding); execution never looks these up —
     /// their device pointers are baked into `programs`.
@@ -126,7 +136,51 @@ impl Drop for Runtime {
         for exec in self.graphs.values() {
             unsafe { sys::cuGraphExecDestroy(*exec) };
         }
+        // The thread owns the arenas: nothing on the stream may still
+        // touch them when it unmaps.
+        let _ = self.stream.synchronize();
+        let _ = self.remaps.jobs.send(Job::Stop);
+        if let Some(t) = self.remaps.thread.take() {
+            let _ = t.join();
+        }
     }
+}
+
+/// What the remap thread is told: a plan to run once the stream has
+/// passed `after` (a recorded event, destroyed by the thread), or to stop.
+enum Job {
+    Run { plan: Remap, after: u64 },
+    Stop,
+}
+
+/// The remap thread and the channels to it.
+struct Remaps {
+    jobs: Sender<Job>,
+    done: Receiver<Result<Remap>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+/// Runs plans until told to stop, then lets the arenas and chunks go.
+fn remap_thread(ctx: Arc<CudaContext>, mut mapper: Mapper, jobs: Receiver<Job>, done: Sender<Result<Remap>>) {
+    if let Err(e) = ctx.bind_to_thread() {
+        let _ = done.send(Err(e.into()));
+        return;
+    }
+    while let Ok(job) = jobs.recv() {
+        match job {
+            Job::Run { plan, after } => {
+                let ev = after as sys::CUevent;
+                let r = cuda_check(unsafe { sys::cuEventSynchronize(ev) }, "cuEventSynchronize")
+                    .and_then(|()| mapper.run(&plan));
+                unsafe { sys::cuEventDestroy_v2(ev) };
+                if done.send(r.map(|()| plan)).is_err() {
+                    break;
+                }
+            }
+            Job::Stop => break,
+        }
+    }
+    drop(mapper);
 }
 
 /// A pool of timing events (attestation only).
@@ -264,8 +318,18 @@ impl Runtime {
 
         // Everything but the states is on the device now: what is left is
         // the states' to take (weights are bound into buffers already
-        // sized, so binding later costs nothing more).
-        let state_capacity_tokens = match state_capacity_tokens {
+        // sized, so binding later costs nothing more). A fixed state is
+        // allocated as declared; the paged and per-sequence states share
+        // one budget of physical chunks, pages and sequence slots made out
+        // of it as the pool decides.
+        let token_bytes: u64 = manifest.states.values().map(|s| s.bytes_per_token).sum();
+        let paged_bytes = token_bytes * page;
+        let slot_bytes: u64 = manifest.states.values().map(|s| s.bytes_per_seq).sum();
+        let fixed_bytes: u64 =
+            manifest.states.values().filter(|s| s.bytes_per_token == 0 && s.bytes_per_seq == 0).map(|s| s.bytes).sum();
+        let first_slots = if slot_bytes > 0 { manifest.seq_slots() } else { 0 };
+        let chunk = chunk_size(&manifest, page, chunk_granularity(dev)? as u64);
+        let chunks = match state_capacity_tokens {
             Some(asked) => {
                 let aligned = asked / page * page;
                 if aligned == 0 {
@@ -276,20 +340,43 @@ impl Runtime {
                 if aligned != asked {
                     tracing::warn!("state capacity {asked} is not a multiple of the page unit {page}; using {aligned}");
                 }
-                aligned
+                (aligned * token_bytes).div_ceil(chunk) + (first_slots * slot_bytes).div_ceil(chunk)
             }
-            None => fit_capacity(&manifest, &ctx, page)?,
+            None => fit_budget(&ctx, fixed_bytes, paged_bytes, slot_bytes * first_slots)? / chunk,
         };
+        let chunks =
+            u32::try_from(chunks).map_err(|_| Error::Manifest(format!("{chunks} chunks of state: too many")))?;
 
-        // States are always virtual-memory allocations, with a fabric
-        // handle when the device has one: a peer array may be `of` a state.
         let mut states = BTreeMap::new();
         for (name, s) in &manifest.states {
-            let bytes = state_bytes(s, state_capacity_tokens, manifest.seq_slots())
-                .ok_or_else(|| Error::Manifest(format!("state `{name}`: size overflow")))?;
-            states
-                .insert(name.clone(), alloc_vmm(&stream, dev, bytes, Share::IfSupported, &format!("state `{name}`"))?);
+            if s.bytes_per_token == 0 && s.bytes_per_seq == 0 {
+                let buf = alloc_vmm(&stream, dev, s.bytes, Share::IfSupported, &format!("state `{name}`"))?;
+                states.insert(name.clone(), buf);
+            }
         }
+        let (pool, initial) = Pool::new(&manifest, chunk, chunks, first_slots as usize)?;
+        let physical = Physical::create(dev, chunk as usize, chunks as usize)?;
+        let mut arenas = Vec::with_capacity(pool.pooled().len());
+        for a in pool.pooled() {
+            let arena = Arena::reserve(dev, chunk as usize, a.positions)?;
+            let objects = match a.kind {
+                Kind::Page => pool.total(),
+                Kind::Slot => pool.slots(),
+            } as u64;
+            let buf = DeviceBuf::reserved(&stream, arena.ptr(), objects * a.object, a.positions as u64 * chunk);
+            states.insert(a.state.clone(), buf);
+            arenas.push(arena);
+        }
+        let mut mapper = Mapper::new(arenas, physical);
+        mapper.run(&initial)?;
+        let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
+        tracing::info!(
+            "state budget {:.1} GiB in {chunks} chunks of {} MiB: {} pages of {page} tokens, {} sequence slots",
+            gib(chunks as u64 * chunk),
+            chunk >> 20,
+            pool.total(),
+            pool.slots(),
+        );
         for p in peers.values() {
             if let Some(st) = states.get(&p.of) {
                 if !st.is_shareable() {
@@ -303,15 +390,26 @@ impl Runtime {
         let programs = compile::compile_programs(&manifest, &resolved, &buffers, &states, &rank_env)?;
         let scratch = resolved.into_values().flat_map(|rk| rk.scratch.into_values()).collect();
 
-        let pool = Arc::new(Pool::new(&manifest, state_capacity_tokens)?);
-        Ok(Runtime {
+        let provision = Provision { tokens: pool.pages_max() as u64 * page, seq_slots: pool.slots_max() as u64 };
+        let (jobs, job_rx) = mpsc::channel();
+        let (done_tx, done) = mpsc::channel();
+        let thread = std::thread::Builder::new()
+            .name("kern-remap".into())
+            .spawn({
+                let ctx = Arc::clone(&ctx);
+                move || remap_thread(ctx, mapper, job_rx, done_tx)
+            })
+            .map_err(|e| Error::Cuda(format!("spawning the remap thread: {e}")))?;
+        let mut rt = Runtime {
             manifest,
             ctx,
             stream,
             blt,
             blas,
-            capacity: state_capacity_tokens,
-            pool,
+            provision,
+            pool: Arc::new(pool),
+            remaps: Remaps { jobs, done, thread: Some(thread) },
+            remap_count: 0,
             buffers,
             states,
             staging,
@@ -324,7 +422,10 @@ impl Runtime {
             ranks,
             peers,
             imports: Vec::new(),
-        })
+        };
+        rt.zero_fresh(&initial)?;
+        rt.stream.synchronize()?;
+        Ok(rt)
     }
 
     pub fn module_count(&self) -> usize {
@@ -496,7 +597,7 @@ impl Runtime {
         };
         let Some(d) = &b.domain else { return Ok(()) };
         let r = d
-            .resolve(&self.manifest, env, self.capacity)
+            .resolve(&self.manifest, env, &self.provision)
             .map_err(|e| Error::Domain(format!("buffer `{name}`: {e}")))?;
         let vals = values::to_f64(b.dtype, data);
         let fmt_bound = |v: Option<f64>| v.map_or("∞".to_string(), |x| format!("{x}"));
@@ -560,7 +661,11 @@ impl Runtime {
     /// sequence; the slot is zeroed on the stream (a fresh sequence's
     /// recurrent state), and everything returns when the lease drops.
     pub fn lease(&mut self, tokens: usize) -> Result<Lease> {
-        let lease = self.pool.lease(tokens)?;
+        self.poll()?;
+        let lease = match self.pool.lease(tokens) {
+            Ok(l) => l,
+            Err(d) => return self.denied(d),
+        };
         for (name, st) in &self.manifest.states {
             let Some(range) = lease.seq_bytes(st.bytes_per_seq).filter(|_| st.is_per_seq()) else { continue };
             let s = self.states.get_mut(name).unwrap();
@@ -574,7 +679,11 @@ impl Runtime {
     /// sequence keeps running past: pages shared, the per-sequence state
     /// copied into a fresh slot ([`Error::Denied`] when none is free).
     pub fn checkpoint(&mut self, lease: &mut Lease, len: usize) -> Result<Checkpoint> {
-        let (cp, copies) = self.pool.checkpoint(lease, len)?;
+        self.poll()?;
+        let (cp, copies) = match self.pool.checkpoint(lease, len) {
+            Ok(x) => x,
+            Err(d) => return self.denied(d),
+        };
         self.copy(&copies)?;
         Ok(cp)
     }
@@ -590,7 +699,11 @@ impl Runtime {
     /// its state into a fresh slot, and hands out a lease that names
     /// positions from `cp.len()` on. [`Error::Denied`] as for [`Runtime::lease`].
     pub fn lease_from(&mut self, cp: &Checkpoint, tokens: usize) -> Result<Lease> {
-        let (lease, copies) = self.pool.restore(cp, tokens)?;
+        self.poll()?;
+        let (lease, copies) = match self.pool.restore(cp, tokens) {
+            Ok(x) => x,
+            Err(d) => return self.denied(d),
+        };
         self.copy(&copies)?;
         Ok(lease)
     }
@@ -617,9 +730,81 @@ impl Runtime {
         Ok(())
     }
 
-    /// Sequence slots every per-sequence state holds (0 without one).
+    /// A denial, after handing the remap it may have planned to the thread.
+    fn denied<T>(&mut self, d: Denied) -> Result<T> {
+        self.poll()?;
+        Err(d.into())
+    }
+
+    /// Land the remaps the thread has run — their fresh chunks zeroed on
+    /// the stream, so a page or a slot comes out of the pool as it did at
+    /// load — and hand the thread the plan the pool has pending: it runs
+    /// once the stream has passed everything enqueued so far.
+    fn poll(&mut self) -> Result<()> {
+        loop {
+            match self.remaps.done.try_recv() {
+                Ok(Ok(plan)) => {
+                    self.zero_fresh(&plan)?;
+                    self.pool.complete(plan);
+                }
+                Ok(Err(e)) => return Err(e),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => bail!(Cuda, "the remap thread is gone"),
+            }
+        }
+        if let Some(plan) = self.pool.take_pending() {
+            let mut ev: sys::CUevent = std::ptr::null_mut();
+            cuda_check(unsafe { sys::cuEventCreate(&mut ev, 0) }, "cuEventCreate")?;
+            cuda_check(unsafe { sys::cuEventRecord(ev, self.stream.cu_stream()) }, "cuEventRecord")?;
+            self.remap_count += 1;
+            tracing::debug!(unmap = plan.unmap.len(), map = plan.map.len(), "remap");
+            if self.remaps.jobs.send(Job::Run { plan, after: ev as u64 }).is_err() {
+                bail!(Cuda, "the remap thread is gone");
+            }
+        }
+        Ok(())
+    }
+
+    /// Zero every chunk `plan` mapped.
+    fn zero_fresh(&mut self, plan: &Remap) -> Result<()> {
+        let chunk = self.pool.chunk() as usize;
+        for &(a, p, _) in &plan.map {
+            let s = &self.states[&self.pool.pooled()[a].state];
+            let mut v = s.view(p * chunk..(p + 1) * chunk)?;
+            self.stream.memset_zeros(&mut v)?;
+        }
+        Ok(())
+    }
+
+    /// Remaps planned so far.
+    pub fn remaps(&self) -> u64 {
+        self.remap_count
+    }
+
+    /// Whether the manifest has per-sequence states (sequence slots at all).
+    pub fn has_seq_state(&self) -> bool {
+        self.pool.has_slots()
+    }
+
+    /// Sequence slots that exist now in every per-sequence state, slot 0
+    /// among them (0 without one).
     pub fn seq_slots(&self) -> usize {
         self.pool.slots()
+    }
+
+    /// Sequence slots held by a lease or a checkpoint.
+    pub fn seq_slots_used(&self) -> usize {
+        self.pool.slots_used()
+    }
+
+    /// Whole-state access is for the layout the runtime loaded with; once
+    /// a remap has moved chunks, a pooled state has holes.
+    fn whole_state(&self, name: &str) -> Result<()> {
+        let pooled = self.pool.pooled().iter().any(|a| a.state == name);
+        if pooled && self.pool.remapped() {
+            bail!(Api, "state `{name}` has been remapped since load; whole-state access is for the initial layout");
+        }
+        Ok(())
     }
 
     /// The line-table inputs (`index_into` a per-sequence state, shaped
@@ -653,8 +838,14 @@ impl Runtime {
     // ---- attestation surface: whole-buffer access, partial replay, timing.
     // Nothing here is on the serving path; every call synchronizes.
 
+    /// Token slots the paged states hold now (whole pages).
     pub fn capacity(&self) -> u64 {
-        self.capacity
+        self.pool.total() as u64 * self.pool.unit()
+    }
+
+    /// The bounds `index_into` domains resolve against.
+    pub fn provision(&self) -> Provision {
+        self.provision
     }
 
     /// Page unit in tokens (1 if no state is paged).
@@ -708,6 +899,7 @@ impl Runtime {
     /// (synchronous). States are opaque to the runtime; this is how a
     /// harness puts a state back to a snapshot before replaying a cut.
     pub fn write_state_at(&mut self, name: &str, offset: usize, data: &[u8]) -> Result<()> {
+        self.whole_state(name)?;
         let Some(s) = self.states.get_mut(name) else {
             bail!(Api, "no state `{name}`");
         };
@@ -724,8 +916,12 @@ impl Runtime {
     /// Zero every state (synchronous): a fresh sequence from position 0,
     /// the way the runtime was loaded.
     pub fn zero_states(&mut self) -> Result<()> {
+        for name in self.manifest.states.keys() {
+            self.whole_state(name)?;
+        }
         for s in self.states.values_mut() {
-            self.stream.memset_zeros(s)?;
+            let mut v = s.view(0..s.bytes as usize)?;
+            self.stream.memset_zeros(&mut v)?;
         }
         self.stream.synchronize()?;
         Ok(())
@@ -733,10 +929,11 @@ impl Runtime {
 
     /// Whole allocation of a state.
     pub fn read_state(&self, name: &str) -> Result<Vec<u8>> {
+        self.whole_state(name)?;
         let Some(s) = self.states.get(name) else {
             bail!(Api, "no state `{name}`");
         };
-        Ok(self.stream.clone_dtoh(s)?)
+        Ok(self.stream.clone_dtoh(&s.view(0..s.bytes as usize)?)?)
     }
 
     /// Execute calls `[lo, hi)` of a program eagerly, then synchronize.
@@ -1022,17 +1219,6 @@ fn fmt_groups(t: &kern_manifest::types::Topology) -> String {
 /// lazy-loading, cuBLASLt algorithm state) and a margin for a neighbour.
 pub const HEADROOM: u64 = 1 << 30;
 
-/// Bytes a state takes at `capacity` tokens and `slots` sequence slots.
-fn state_bytes(s: &State, capacity: u64, slots: u64) -> Option<u64> {
-    s.bytes_per_token.checked_mul(capacity)?.checked_add(s.bytes)?.checked_add(s.bytes_per_seq.checked_mul(slots)?)
-}
-
-/// State capacity that fits the device: free memory (after every buffer
-/// and scratch allocation) less [`HEADROOM`], the states' fixed bytes and
-/// their sequence slots,
-/// divided among the per-token states, in whole pages; capped at what the
-/// manifest's `seqs` bound of sequences could each hold at the page-table
-/// row limit, since no lease can reach past that.
 /// Tokens one sequence of `m` can reach — the narrowest page table's row,
 /// in whole pages — or `None` when nothing is paged per token. What a
 /// single-sequence caller wants as its state capacity.
@@ -1040,62 +1226,55 @@ pub fn seq_capacity(m: &Manifest) -> Option<u64> {
     pages::row_tokens(m, page_unit(m))
 }
 
-fn fit_capacity(m: &Manifest, ctx: &CudaContext, page: u64) -> Result<u64> {
+/// The chunk the pooled states are backed in: a multiple of the
+/// allocation granularity `g`, at most half the smallest page or slot so
+/// an object spans at least two (a chunk shared at a boundary is one of
+/// many), at most 64 MiB. Mapping costs per chunk, so bigger is cheaper.
+fn chunk_size(m: &Manifest, page: u64, g: u64) -> u64 {
+    let smallest = m
+        .states
+        .values()
+        .filter_map(|s| match (s.bytes_per_token, s.bytes_per_seq) {
+            (t, 0) if t > 0 => Some(t * page),
+            (0, q) if q > 0 => Some(q),
+            _ => None,
+        })
+        .min()
+        .unwrap_or(g);
+    (smallest / 2 / g).clamp(1, (64 << 20) / g.max(1)).max(1) * g
+}
+
+/// State budget in bytes that fits the device: free memory (after every
+/// buffer, scratch and fixed state) less [`HEADROOM`]; it must hold the
+/// first sequence slots and a page.
+fn fit_budget(ctx: &CudaContext, fixed: u64, page_bytes: u64, first_slots_bytes: u64) -> Result<u64> {
     let (free, total) = ctx.mem_get_info()?;
     let (free, total) = (free as u64, total as u64);
-    let per_token: u64 = m.states.values().map(|s| s.bytes_per_token).sum();
-    let fixed: u64 = m.states.values().map(|s| state_bytes(s, 0, m.seq_slots()).unwrap_or(u64::MAX)).sum();
-    let seqs = m.vars.get("seqs").map_or(1, |v| v.max.max(1));
-    // One page over the row cap: a batched caller pads its decode rows
-    // into a page no sequence owns.
-    let cap = pages::row_tokens(m, page).map(|row| row.saturating_mul(seqs).saturating_add(page));
-
     let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
-    if per_token == 0 {
-        // Nothing scales with tokens; the capacity only sizes the pool.
-        let c = cap.unwrap_or(page);
-        tracing::info!(
-            "state capacity {c} tokens (no per-token state); {:.1} GiB free of {:.1}",
-            gib(free),
-            gib(total)
-        );
-        return Ok(c);
-    }
     let Some(budget) = free.checked_sub(HEADROOM).and_then(|b| b.checked_sub(fixed)) else {
         return Err(Error::Cuda(format!(
-            "{:.2} GiB free of {:.1} on the device: not enough for one page of state after {:.1} GiB headroom",
+            "{:.2} GiB free of {:.1} on the device: nothing left for the states after {:.1} GiB headroom",
             gib(free),
             gib(total),
             gib(HEADROOM)
         )));
     };
-    let by_memory = budget / per_token / page * page;
-    if by_memory == 0 {
+    if budget < first_slots_bytes + page_bytes {
         return Err(Error::Cuda(format!(
-            "{:.2} GiB free of {:.1} on the device: one page of state is {:.2} GiB, headroom {:.1} GiB",
+            "{:.2} GiB free of {:.1} on the device: the first sequence slots are {:.2} GiB and a page {:.2} GiB, headroom {:.1} GiB",
             gib(free),
             gib(total),
-            gib(per_token * page),
+            gib(first_slots_bytes),
+            gib(page_bytes),
             gib(HEADROOM)
         )));
     }
-    let c = cap.map_or(by_memory, |cap| by_memory.min(cap));
-    let bound = match cap {
-        Some(cap) if c < by_memory => {
-            let row = cap - page;
-            format!(
-                "bound by the manifest: {seqs} sequences × {} tokens is all a lease can reach; memory would hold {} such sequences",
-                row / seqs,
-                by_memory / (row / seqs)
-            )
-        }
-        _ => format!("bound by memory, {:.1} GiB headroom", gib(HEADROOM)),
-    };
     tracing::info!(
-        "state capacity {c} tokens ({:.1} GiB); device {:.1} GiB free of {:.1}; {bound}",
-        gib(c * per_token + fixed),
+        "state budget {:.1} GiB; device {:.1} GiB free of {:.1}, {:.1} GiB headroom",
+        gib(budget),
         gib(free),
         gib(total),
+        gib(HEADROOM)
     );
-    Ok(c)
+    Ok(budget)
 }

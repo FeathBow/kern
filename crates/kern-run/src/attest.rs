@@ -38,7 +38,7 @@ use crate::config::{Config, Target};
 use crate::{env, Caller, DECODE_LIKE, DRIVEN, TOKENS};
 use anyhow::{bail, Context, Result};
 use clap::Args;
-use kern_manifest::types::{Arg, BufferKind, Call, DType, Dim, Dir, Manifest, ParamType};
+use kern_manifest::types::{Arg, BufferKind, Call, DType, Dim, Dir, Manifest, ParamType, Provision};
 use kern_manifest::verify;
 use kern_runtime::{values, Runtime};
 use serde_json::{json, Value};
@@ -214,14 +214,15 @@ struct Workload {
     how: &'static str,
 }
 
-fn sample_workload(o: &Opts, m: &Manifest, capacity: u64, page: u64, prompt: Option<Vec<i64>>) -> Result<Workload> {
+fn sample_workload(o: &Opts, m: &Manifest, p: Provision, page: u64, prompt: Option<Vec<i64>>) -> Result<Workload> {
+    let capacity = p.tokens;
     let mut rng = Rng(o.seed ^ 0x776f_726b_6c6f_6164);
     let tmax = m.vars[TOKENS].max.max(1);
     let vocab = m
         .buffers
         .get("token_ids")
         .and_then(|b| b.domain.as_ref())
-        .map(|d| d.resolve(m, &env(1), capacity))
+        .map(|d| d.resolve(m, &env(1), &p))
         .transpose()?
         .and_then(|r| r.hi)
         .map(|hi| hi as u64 + 1)
@@ -1323,7 +1324,7 @@ fn execute(o: Opts) -> Result<i32> {
         }
         None => None,
     };
-    let wl = sample_workload(&o, &ma, s.a.rt.capacity(), s.a.rt.page(), prompt_ids)?;
+    let wl = sample_workload(&o, &ma, s.a.rt.provision(), s.a.rt.page(), prompt_ids)?;
     let e1 = env(1);
     let cuts_of = |p: &str| -> Vec<Segment> {
         segments.get(p).map(|sg| sg.iter().filter(|s| s.kind == Kind::Changed).cloned().collect()).unwrap_or_default()
@@ -1991,7 +1992,7 @@ fn execute(o: Opts) -> Result<i32> {
                     // buffer's declared domain (A is checked too — a
                     // violation there is the reference misbehaving).
                     if let Some(d) = &mb.buffers[name].domain {
-                        let r = d.resolve(&mb, &sn.env, s.b.rt.capacity())?;
+                        let r = d.resolve(&mb, &sn.env, &s.b.rt.provision())?;
                         for (side, bytes) in [("A", &out_a[name]), ("B", b)] {
                             let v = values::to_f64(mb.buffers[name].dtype, bytes);
                             if let Some(i) = v.iter().position(|x| !r.contains(*x)) {

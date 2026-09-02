@@ -21,20 +21,39 @@ cubin 算 sha256，**只装载 manifest `modules` 表点名的哈希**（其余�
 （文件名不参与），**同一模块里同名的 Triton 多 constexpr 实例靠
 `cuFuncGetParamInfo` 参数布局与 manifest params 比对来消歧**（phase-2
 ABI 校验兼做实例选择，绕开了 capture 缺 launch→module 映射的坑）→ 按
-var max 分配全部 buffer / 按 bytes_per_token×capacity（或
-bytes_per_seq×(seqs.max+2) 个序列 slot）分配 state →
+var max 分配全部 buffer / 分配 state（分页与 per-seq 的走下面的块池）→
 safetensors 按名绑权重（scratch 按 impl 声明另行私有分配）→ 顺序重放
 call 表：接口实参解析一次，逐 launch 按 `args` 连线转发/接 scratch/
 填字面量后 raw `cuLaunchKernel`（实参 staging 成小端 u64 slot；>48KB
-动态 shmem 自动 `cuFuncSetAttribute`）。state 的 token 容量（`--capacity`）
-向下对齐到 manifest 里 `index_into` 该 state 的最大页单位（block table 的
-`stride`），不会出现半页；不给（`Runtime::load(.., None)`，kern-serve 的默认）
-则在 buffer 和 scratch 都分完之后 `cuMemGetInfo`，剩余显存减 `HEADROOM`
-（1 GiB）与定长/per-seq state 之后按 Σ bytes_per_token 折成整页，再封顶到
-`seqs.max × 行上限 + 1 页`。`Runtime::lease(tokens)` 一次租下 KV 页和每个
-per-seq state 的一个 slot（租时在 stream 上清零），`Lease::seq_line(table,
-r)` 给出 line 表的项（宽表 `[lines, seqs, w]` 的格宽由 `seq_width` 给出，
-caller 决定 line 落在哪一项）；租约 drop 时一起归还。
+动态 shmem 自动 `cuFuncSetAttribute`）。
+
+**state 内存（K1b）**：定长 state 按声明分配；分页 state（`bytes_per_token`）与
+per-seq state（`bytes_per_seq`）**共用一份物理块预算**（`chunks.rs` 记块，
+`pages.rs` 的 `Pool` 在其上记页与 slot）。每个这样的 state 保留一段虚拟地址
+（`cuMemAddressReserve`，一次保留永不搬，`DeviceBuf::Reserved`），页与 slot 各是
+地址上的一段块区间；物理块 `cuMemCreate` 一次建齐，块大小是 2 MiB 粒度的整数倍、
+不超过最小对象的一半、封顶 64 MiB（qwen3.8 24 MiB，qwen3-4b / K3 2 MiB），谁用谁
+map。块留在上次用它的地方：还回的页还是页、还回的 slot 还是 slot；只有一类用光时
+才从**另一类的空闲对象**上拆块（`Remap`：先 unmap 再 map 再 `cuMemSetAccess`；
+拆最高编号的、补最低编号的空位；跨对象边界的块按使用计数共享，最后一个用户走了
+才 unmap）。计划由 runtime 的后台线程执行：先等 stream 上记的事件（此前入队的
+kernel 都过了才 unmap），完成后主线程在下一次 `lease` / `checkpoint` /
+`lease_from` 里收下、把新 map 的块在 stream 上清零，新页 / 新 slot 才可租。同一
+时刻最多一个计划在飞。租不到时三种拒绝分工明确：`Remapping`（计划已定，落地后再
+问，别淘汰）、`Busy`（有被持有的对象挡路，淘汰点什么）、`ExceedsPool`（怎么摆都
+放不下）。`seqs.max` 只限一步 batch 的行数；slot 从 `seqs.max + 2` 个起按需长
+（session 睡着时它的 checkpoint 拿着 slot，活跃请求再要就从空闲页拆），
+`index_into` per-seq state 的域上界是运行时的 slot 上限（`Provision`）。预算：
+`--capacity` 给则 = capacity × Σbytes_per_token + (seqs.max+2) × Σbytes_per_seq，
+capacity 向下对齐到 manifest 里 `index_into` 该 state 的最大页单位（block table
+的 `stride`），不会出现半页；不给（`Runtime::load(.., None)`，kern-serve 的默认）
+则在 buffer、scratch 和定长 state 都分完之后 `cuMemGetInfo`，剩余显存减
+`HEADROOM`（1 GiB）全给。整块读写 state（`read_state` / `write_state_at` /
+`zero_states`，attest 用）只在第一次 remap 之前有效。
+`Runtime::lease(tokens)` 一次租下 KV 页和每个 per-seq state 的一个 slot
+（租时在 stream 上清零），`Lease::seq_line(table, r)` 给出 line 表的项（宽表
+`[lines, seqs, w]` 的格宽由 `seq_width` 给出，caller 决定 line 落在哪一项）；
+租约 drop 时一起归还。
 
 **checkpoint（K1）**：`Runtime::checkpoint(&mut lease, len)` 把序列前 `len` 个
 token 留成 `Checkpoint`——页进共享链（一页一个引用计数节点，一条序列每页一个

@@ -257,7 +257,7 @@ mod tests {
         }"#,
         )
         .unwrap();
-        Arc::new(Pool::new(&m, 32).unwrap())
+        Arc::new(Pool::new(&m, 4, 8, 0).unwrap().0)
     }
 
     fn toks(n: usize) -> Vec<i64> {

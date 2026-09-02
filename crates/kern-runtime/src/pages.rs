@@ -52,14 +52,30 @@
 //! claims positions, not the page's tail. The pool decides all of this on
 //! the host and returns the byte moves as [`Copies`]; the runtime is the
 //! shell that runs them on the stream.
+//!
+//! # Memory
+//!
+//! Pages and slots come out of one budget of physical chunks
+//! ([`crate::chunks`]): every pooled state is an address range reserved
+//! once, a page or a slot exists while its chunks are mapped there, and
+//! chunks stay where they were last used. When a lease finds pages (or a
+//! slot) short but free objects of the other kind are holding chunks, the
+//! pool plans a [`Remap`] that unmakes those and makes what is short, says
+//! [`Denied::Remapping`], and the caller asks again once the shell has run
+//! the plan and reported it landed ([`Pool::take_pending`],
+//! [`Pool::complete`]). One remap at a time. [`Denied::Busy`] is only for
+//! when everything is held: something has to go first. So the manifest's
+//! `seqs` bound only sizes a step's batch; how many sequences can sleep
+//! as checkpoints is the budget's business.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::ops::Range;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use kern_manifest::types::{BufferKind, Dim, Manifest};
 
+use crate::chunks::{Chunks, Kind, Remap};
 use crate::error::{bail, Result};
 
 /// A page table input: `stride` tokens per entry, `width` entries per row.
@@ -77,21 +93,65 @@ struct SeqTable {
     width: usize,
 }
 
+/// A pooled state: its arena in the chunk pool.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pooled {
+    pub state: String,
+    pub kind: Kind,
+    /// Bytes per page or per slot.
+    pub object: u64,
+    /// Pages or slots the arena is reserved for.
+    pub objects: usize,
+    /// Chunk positions reserved.
+    pub positions: usize,
+}
+
+/// Where an object stands: not backed, free, handed out, or in a remap
+/// that makes or unmakes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Status {
+    Absent,
+    Free,
+    Held,
+    Arriving,
+    Leaving,
+}
+
+impl Status {
+    /// Usable now: a caller can be handed it (free) or holds it.
+    fn exists(self) -> bool {
+        matches!(self, Status::Free | Status::Held)
+    }
+}
+
+/// The accounting behind one mutex: chunks, every page's and slot's
+/// status, and the remap not yet landed.
+struct Inner {
+    chunks: Chunks,
+    pages: Vec<Status>,
+    /// Slot 0 is `Held` for good: the null line.
+    slots: Vec<Status>,
+    free_pages: BTreeSet<i32>,
+    free_slots: BTreeSet<i32>,
+    /// Built, not yet taken by the shell.
+    pending: Option<Remap>,
+    /// Taken, not yet completed.
+    in_flight: bool,
+    remapped: bool,
+}
+
 /// Shared between the runtime and every live lease and checkpoint so a
-/// drop returns pages directly. One caller thread; the mutexes are for
+/// drop returns pages directly. One caller thread; the mutex is for
 /// `Send`, never contended.
 pub struct Pool {
     /// Tokens per page.
     unit: u64,
-    total: usize,
     /// Pages one sequence may hold: what the narrowest table row fits.
     max_pages: usize,
     tables: BTreeMap<String, Table>,
-    free: Mutex<Vec<i32>>,
-    /// Sequence slots (0 when no state is per-sequence), slot 0 reserved.
-    slots: usize,
     seq_tables: BTreeMap<String, SeqTable>,
-    free_slots: Mutex<Vec<i32>>,
+    pooled: Vec<Pooled>,
+    inner: Mutex<Inner>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -177,6 +237,42 @@ pub(crate) fn row_tokens(m: &Manifest, unit: u64) -> Option<u64> {
     tables(m).values().map(|t| t.width as u64 * t.stride / unit * unit).min()
 }
 
+/// The pooled states of `m` in manifest order, paged ones first, sized for
+/// a budget of `chunks` chunks: a state is paged, per-sequence or fixed,
+/// never a mix.
+fn pooled(m: &Manifest, unit: u64, chunk: u64, chunks: u32) -> Result<Vec<Pooled>> {
+    let mut paged = Vec::new();
+    let mut per_seq = Vec::new();
+    for (name, s) in &m.states {
+        match (s.bytes_per_token > 0, s.bytes > 0, s.bytes_per_seq > 0) {
+            (true, false, false) => paged.push((name.clone(), unit * s.bytes_per_token)),
+            (false, false, true) => per_seq.push((name.clone(), s.bytes_per_seq)),
+            (false, _, false) => {}
+            _ => bail!(
+                Manifest,
+                "state `{name}` mixes per-token, per-sequence and fixed bytes; a pooled state has one layout"
+            ),
+        }
+    }
+    let budget = chunk * chunks as u64;
+    let page_bytes: u64 = paged.iter().map(|(_, b)| b).sum();
+    let slot_bytes: u64 = per_seq.iter().map(|(_, b)| b).sum();
+    let pages = budget.checked_div(page_bytes).map_or(chunks as usize, |n| n as usize);
+    let slots = budget.checked_div(slot_bytes).map_or(0, |n| n as usize);
+    let entry = |(state, object): (String, u64), kind, objects: usize| Pooled {
+        state,
+        kind,
+        object,
+        objects,
+        positions: (object * objects as u64).div_ceil(chunk) as usize,
+    };
+    Ok(paged
+        .into_iter()
+        .map(|p| entry(p, Kind::Page, pages))
+        .chain(per_seq.into_iter().map(|p| entry(p, Kind::Slot, slots)))
+        .collect())
+}
+
 /// Device copies that realize a pool decision, in page and slot numbers:
 /// `pages` are (from, to) for every paged state, `slot` is (from, to) for
 /// every per-sequence state. Empty when nothing moves.
@@ -230,38 +326,164 @@ fn ancestor(chain: &Option<Arc<Node>>, depth: usize) -> Option<Arc<Node>> {
     cur
 }
 
+impl Inner {
+    fn count(v: &[Status], f: impl Fn(Status) -> bool) -> usize {
+        v.iter().filter(|&&s| f(s)).count()
+    }
+
+    fn anything_held(&self) -> bool {
+        self.pages.contains(&Status::Held) || self.slots.iter().skip(1).any(|&s| s == Status::Held)
+    }
+
+    /// The `n` lowest absent objects of `v` (skipping slot 0 through
+    /// `from`).
+    fn absent(v: &[Status], from: usize, n: usize) -> Vec<usize> {
+        v.iter().enumerate().skip(from).filter(|(_, &s)| s == Status::Absent).map(|(i, _)| i).take(n).collect()
+    }
+
+    /// Plan what a request for `need_p` pages and `need_s` slots is
+    /// short of, out of free chunks and, when only one kind is short,
+    /// chunks taken from the free objects of the other the request does
+    /// not need itself — the highest first, so what stays is packed low.
+    /// The plan waits in `pending`. `Busy` when what is held would have
+    /// to go first, `ExceedsPool` when even then nothing could give.
+    fn rebalance(&mut self, need_p: usize, need_s: usize) -> std::result::Result<(), Denied> {
+        let never = |me: &Inner| if me.anything_held() { Denied::Busy } else { Denied::ExceedsPool };
+        let (free_p, free_s) = (self.free_pages.len(), self.free_slots.len());
+        let (d_p, d_s) = (need_p.saturating_sub(free_p), need_s.saturating_sub(free_s));
+        let pages = Inner::absent(&self.pages, 0, d_p);
+        let slots = Inner::absent(&self.slots, 1, d_s);
+        if pages.len() < d_p || slots.len() < d_s {
+            return Err(never(self));
+        }
+        let mut sim = self.chunks.clone();
+        let mut plan = Remap::default();
+        // Costs counted per object over-count a chunk two targets share:
+        // a chunk too many taken, never too few.
+        let cost: usize = pages.iter().map(|&p| sim.cost(Kind::Page, p)).sum::<usize>()
+            + slots.iter().map(|&s| sim.cost(Kind::Slot, s)).sum::<usize>();
+        let mut sources: Vec<(Kind, i32)> = Vec::new();
+        let candidates: Vec<(Kind, i32)> = if d_s == 0 {
+            self.free_slots.iter().rev().take(free_s - need_s).map(|&s| (Kind::Slot, s)).collect()
+        } else if d_p == 0 {
+            self.free_pages.iter().rev().take(free_p - need_p).map(|&p| (Kind::Page, p)).collect()
+        } else {
+            Vec::new()
+        };
+        for (k, o) in candidates {
+            if sim.free() >= cost {
+                break;
+            }
+            sim.unmake(k, o as usize, &mut plan);
+            sources.push((k, o));
+        }
+        if sim.free() < cost {
+            return Err(never(self));
+        }
+        for &p in &pages {
+            sim.make(Kind::Page, p, &mut plan);
+        }
+        for &s in &slots {
+            sim.make(Kind::Slot, s, &mut plan);
+        }
+        self.chunks = sim;
+        for (k, o) in sources {
+            match k {
+                Kind::Page => {
+                    self.free_pages.remove(&o);
+                    self.pages[o as usize] = Status::Leaving;
+                }
+                Kind::Slot => {
+                    self.free_slots.remove(&o);
+                    self.slots[o as usize] = Status::Leaving;
+                }
+            }
+        }
+        for p in pages {
+            self.pages[p] = Status::Arriving;
+        }
+        for s in slots {
+            self.slots[s] = Status::Arriving;
+        }
+        self.pending = Some(plan);
+        self.remapped = true;
+        Ok(())
+    }
+}
+
 impl Pool {
-    /// The pool of `m` at `capacity` tokens, in whole pages of
-    /// [`page_unit`].
-    pub fn new(m: &Manifest, capacity: u64) -> Result<Pool> {
+    /// The pool of `m` over `chunks` chunks of `chunk` bytes, in whole
+    /// pages of [`page_unit`]: the first `first_slots` sequence slots
+    /// (slot 0 among them) exist from the start, then as many pages as the
+    /// chunks left hold. The [`Remap`] returned makes that initial layout;
+    /// the pool already counts it as landed.
+    pub fn new(m: &Manifest, chunk: u64, chunks: u32, first_slots: usize) -> Result<(Pool, Remap)> {
         let unit = page_unit(m);
-        let total = (capacity / unit) as usize;
         let tables = tables(m);
-        let max_pages = row_tokens(m, unit).map_or(total, |t| (t / unit) as usize);
-        let slots = if m.states.values().any(|s| s.is_per_seq()) { m.seq_slots() as usize } else { 0 };
-        Ok(Pool {
-            unit,
-            total,
-            max_pages,
-            tables,
-            free: Mutex::new((0..total as i32).collect()),
-            slots,
-            seq_tables: seq_tables(m)?,
-            free_slots: Mutex::new((1..slots as i32).collect()),
-        })
+        let pooled = pooled(m, unit, chunk, chunks)?;
+        let arenas: Vec<(Kind, u64, usize)> = pooled.iter().map(|p| (p.kind, p.object, p.objects)).collect();
+        let pages_max = pooled.iter().find(|p| p.kind == Kind::Page).map_or(chunks as usize, |p| p.objects);
+        let slots_max = pooled.iter().find(|p| p.kind == Kind::Slot).map_or(0, |p| p.objects);
+        let max_pages = row_tokens(m, unit).map_or(pages_max, |t| (t / unit) as usize).min(pages_max);
+        let mut inner = Inner {
+            chunks: Chunks::new(chunk, &arenas, chunks),
+            pages: vec![Status::Absent; pages_max],
+            slots: vec![Status::Absent; slots_max],
+            free_pages: BTreeSet::new(),
+            free_slots: BTreeSet::new(),
+            pending: None,
+            in_flight: false,
+            remapped: false,
+        };
+        let mut plan = Remap::default();
+        for s in 0..first_slots {
+            if s >= slots_max || inner.chunks.cost(Kind::Slot, s) > inner.chunks.free() {
+                bail!(Api, "{chunks} chunks of {chunk} bytes hold {s} sequence slots, not the {first_slots} asked for");
+            }
+            inner.chunks.make(Kind::Slot, s, &mut plan);
+            inner.slots[s] = if s == 0 { Status::Held } else { Status::Free };
+            if s > 0 {
+                inner.free_slots.insert(s as i32);
+            }
+        }
+        for p in 0..pages_max {
+            if inner.chunks.cost(Kind::Page, p) > inner.chunks.free() {
+                break;
+            }
+            inner.chunks.make(Kind::Page, p, &mut plan);
+            inner.pages[p] = Status::Free;
+            inner.free_pages.insert(p as i32);
+        }
+        let pool = Pool { unit, max_pages, tables, seq_tables: seq_tables(m)?, pooled, inner: Mutex::new(inner) };
+        Ok((pool, plan))
     }
 
     pub fn unit(&self) -> u64 {
         self.unit
     }
 
+    /// The pooled states, in arena order.
+    pub fn pooled(&self) -> &[Pooled] {
+        &self.pooled
+    }
+
+    pub fn chunk(&self) -> u64 {
+        lock(&self.inner).chunks.chunk()
+    }
+
+    /// Pages that exist now (free or held).
     pub fn total(&self) -> usize {
-        self.total
+        Inner::count(&lock(&self.inner).pages, Status::exists)
+    }
+
+    /// Pages the arena could hold if every chunk were a page.
+    pub fn pages_max(&self) -> usize {
+        lock(&self.inner).pages.len()
     }
 
     /// Pages held by a lease or a checkpoint.
     pub fn used(&self) -> usize {
-        self.total - lock(&self.free).len()
+        Inner::count(&lock(&self.inner).pages, |s| s == Status::Held)
     }
 
     pub fn max_seq_tokens(&self) -> usize {
@@ -272,18 +494,67 @@ impl Pool {
         self.tables.keys().map(String::as_str)
     }
 
-    /// Sequence slots provisioned (0 when no state is per-sequence).
+    /// Whether the manifest has per-sequence states (slots at all).
+    pub fn has_slots(&self) -> bool {
+        self.pooled.iter().any(|p| p.kind == Kind::Slot)
+    }
+
+    /// Sequence slots that exist now, slot 0 among them (0 without
+    /// per-sequence states).
     pub fn slots(&self) -> usize {
-        self.slots
+        Inner::count(&lock(&self.inner).slots, Status::exists)
+    }
+
+    /// Slots the arena could hold if every chunk were a slot.
+    pub fn slots_max(&self) -> usize {
+        lock(&self.inner).slots.len()
     }
 
     /// Sequence slots held by a lease or a checkpoint.
     pub fn slots_used(&self) -> usize {
-        self.slots.saturating_sub(1) - lock(&self.free_slots).len()
+        Inner::count(&lock(&self.inner).slots[1..], |s| s == Status::Held)
     }
 
     pub fn seq_tables(&self) -> impl Iterator<Item = &str> {
         self.seq_tables.keys().map(String::as_str)
+    }
+
+    /// Whether any remap was ever planned: the initial layout is gone.
+    pub fn remapped(&self) -> bool {
+        lock(&self.inner).remapped
+    }
+
+    /// The remap waiting to be executed, if any; from here until
+    /// [`Pool::complete`] one is in flight and no other is planned.
+    pub fn take_pending(&self) -> Option<Remap> {
+        let mut g = lock(&self.inner);
+        let plan = g.pending.take()?;
+        g.in_flight = true;
+        Some(plan)
+    }
+
+    /// The remap landed: what it made is free, what it unmade is gone.
+    pub fn complete(&self, plan: Remap) {
+        let mut g = lock(&self.inner);
+        for (k, o) in plan.made {
+            match k {
+                Kind::Page => {
+                    g.pages[o as usize] = Status::Free;
+                    g.free_pages.insert(o);
+                }
+                Kind::Slot => {
+                    g.slots[o as usize] = Status::Free;
+                    g.free_slots.insert(o);
+                }
+            }
+        }
+        for (k, o) in plan.unmade {
+            match k {
+                Kind::Page => g.pages[o as usize] = Status::Absent,
+                Kind::Slot => g.slots[o as usize] = Status::Absent,
+            }
+        }
+        g.in_flight = false;
     }
 
     fn pages_for(&self, tokens: usize) -> std::result::Result<usize, Denied> {
@@ -291,30 +562,45 @@ impl Pool {
         if need > self.max_pages {
             return Err(Denied::ExceedsRow { limit: self.max_seq_tokens() });
         }
-        if need > self.total {
-            return Err(Denied::ExceedsPool);
-        }
         Ok(need)
     }
 
-    /// `fresh` free pages and, when the manifest has per-sequence states,
-    /// a slot; all or nothing.
+    /// `fresh` free pages, the lowest, and, when the manifest has
+    /// per-sequence states, a slot; all or nothing. Short of either, a
+    /// remap is planned when free objects of the other kind can give the
+    /// chunks.
     fn take(&self, fresh: usize) -> std::result::Result<(Vec<i32>, Option<i32>), Denied> {
-        let mut free = lock(&self.free);
-        let mut free_slots = lock(&self.free_slots);
-        if fresh > free.len() || (self.slots > 0 && free_slots.is_empty()) {
-            return Err(Denied::Busy);
+        let want_slot = self.has_slots();
+        let mut g = lock(&self.inner);
+        if fresh <= g.free_pages.len() && (!want_slot || !g.free_slots.is_empty()) {
+            let taken: Vec<i32> = (0..fresh).map(|_| g.free_pages.pop_first().expect("counted")).collect();
+            for &p in &taken {
+                g.pages[p as usize] = Status::Held;
+            }
+            let slot = want_slot.then(|| g.free_slots.pop_first().expect("counted"));
+            if let Some(s) = slot {
+                g.slots[s as usize] = Status::Held;
+            }
+            return Ok((taken, slot));
         }
-        let at = free.len() - fresh;
-        let taken = free.split_off(at);
-        let slot = if self.slots > 0 { free_slots.pop() } else { None };
-        Ok((taken, slot))
+        if g.pending.is_some() || g.in_flight {
+            return Err(Denied::Remapping);
+        }
+        g.rebalance(fresh, want_slot as usize)?;
+        Err(Denied::Remapping)
     }
 
     fn release(&self, pages: &[i32], slot: Option<i32>) {
-        lock(&self.free).extend_from_slice(pages);
+        let mut g = lock(&self.inner);
+        for &p in pages {
+            debug_assert_eq!(g.pages[p as usize], Status::Held);
+            g.pages[p as usize] = Status::Free;
+            g.free_pages.insert(p);
+        }
         if let Some(s) = slot {
-            lock(&self.free_slots).push(s);
+            debug_assert_eq!(g.slots[s as usize], Status::Held);
+            g.slots[s as usize] = Status::Free;
+            g.free_slots.insert(s);
         }
     }
 
@@ -381,14 +667,17 @@ pub enum Denied {
     ExceedsPool,
     /// Fits, but not right now: pages or sequence slots all held.
     Busy,
+    /// Fits once the remap in flight lands; ask again, evict nothing.
+    Remapping,
 }
 
 impl fmt::Display for Denied {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Denied::ExceedsRow { limit } => write!(f, "longer than a page-table row ({limit} tokens)"),
-            Denied::ExceedsPool => write!(f, "more pages than the state capacity holds"),
+            Denied::ExceedsPool => write!(f, "no layout of the state budget holds it"),
             Denied::Busy => write!(f, "pages or sequence slots busy"),
+            Denied::Remapping => write!(f, "pages or sequence slots being remapped"),
         }
     }
 }
@@ -582,7 +871,8 @@ mod tests {
     use super::*;
 
     /// kv paged in 16-token entries (row of 3), a draft state paged in
-    /// 4-token entries (row of 16): page unit 16, 4 pages on 64 tokens.
+    /// 4-token entries (row of 16): page unit 16, one byte per token per
+    /// state, so a page is 16 bytes in each of two arenas.
     fn manifest() -> Manifest {
         Manifest::from_json(
             r#"{
@@ -599,8 +889,8 @@ mod tests {
         .unwrap()
     }
 
-    /// The same, plus a recurrent state of 3 lines of 8 bytes per
-    /// sequence and its line table.
+    /// One paged state of 16 bytes a page, plus a recurrent state of 3
+    /// lines of 8 bytes per sequence and its line table.
     fn hybrid() -> Manifest {
         Manifest::from_json(
             r#"{
@@ -616,21 +906,46 @@ mod tests {
         .unwrap()
     }
 
+    /// 8-byte chunks: a page is 2 chunks per arena (4 for the two-state
+    /// manifest), a slot 3. 16 chunks: 4 pages.
     fn pool() -> Arc<Pool> {
-        Arc::new(Pool::new(&manifest(), 64).unwrap())
+        Arc::new(Pool::new(&manifest(), 8, 16, 0).unwrap().0)
+    }
+
+    /// 20 chunks: 4 slots (slot 0 among them) and 4 pages, no chunk spare.
+    fn hybrid_pool() -> Arc<Pool> {
+        Arc::new(Pool::new(&hybrid(), 8, 20, 4).unwrap().0)
+    }
+
+    /// Land the remap the pool has planned.
+    fn land(p: &Pool) {
+        p.complete(p.take_pending().expect("a remap planned"));
     }
 
     #[test]
     fn geometry() {
         let p = pool();
-        assert_eq!((p.total(), p.unit(), p.max_seq_tokens()), (4, 16, 48));
+        assert_eq!((p.total(), p.unit(), p.max_seq_tokens(), p.chunk()), (4, 16, 48, 8));
         assert_eq!(p.tables().collect::<Vec<_>>(), ["block_table", "draft_block_table"]);
         // The draft table's 16 entries × 4 tokens hold 4 pages; kv's 3 × 16 hold 3.
         assert_eq!(p.max_pages, 3);
-        assert_eq!(p.slots(), 0);
+        assert_eq!((p.has_slots(), p.slots()), (false, 0));
         assert_eq!(p.lease(1).unwrap().seq_slot(), None);
-        // Capacity rounds down to whole pages.
-        assert_eq!(Pool::new(&manifest(), 70).unwrap().total(), 4);
+        // Two chunks over what four pages take are spare, not a torn page.
+        let (p2, plan) = Pool::new(&manifest(), 8, 18, 0).unwrap();
+        assert_eq!((p2.total(), p2.pages_max(), plan.map.len(), plan.unmap.len()), (4, 4, 16, 0));
+        assert_eq!(plan.made, [(Kind::Page, 0), (Kind::Page, 1), (Kind::Page, 2), (Kind::Page, 3)]);
+        let names: Vec<(&str, Kind, u64, usize, usize)> =
+            p2.pooled().iter().map(|a| (a.state.as_str(), a.kind, a.object, a.objects, a.positions)).collect();
+        assert_eq!(names, [("draft_kv", Kind::Page, 16, 4, 8), ("kv", Kind::Page, 16, 4, 8)]);
+    }
+
+    #[test]
+    fn a_state_has_one_layout() {
+        let mut m = hybrid();
+        m.states.get_mut("gdn").unwrap().bytes = 8;
+        let Err(e) = Pool::new(&m, 8, 20, 4) else { panic!("mixed state accepted") };
+        assert!(e.to_string().contains("one layout"), "{e}");
     }
 
     #[test]
@@ -656,14 +971,15 @@ mod tests {
         let p = pool();
         assert_eq!(p.lease(49).unwrap_err(), Denied::ExceedsRow { limit: 48 });
         let a = p.lease(48).unwrap();
+        // One page free, no other kind to take chunks from: busy.
         assert_eq!(p.lease(17).unwrap_err(), Denied::Busy);
         let _b = p.lease(16).unwrap();
         assert_eq!(p.lease(1).unwrap_err(), Denied::Busy);
         drop(a);
         assert!(p.lease(33).is_ok());
-        // Two pages of capacity can never hold a three-page sequence.
-        let small = Arc::new(Pool::new(&manifest(), 32).unwrap());
-        assert_eq!(small.lease(48).unwrap_err(), Denied::ExceedsPool);
+        // Two pages of budget cap the row at two pages.
+        let small = Arc::new(Pool::new(&manifest(), 8, 8, 0).unwrap().0);
+        assert_eq!((small.pages_max(), small.lease(48).unwrap_err()), (2, Denied::ExceedsRow { limit: 32 }));
     }
 
     #[test]
@@ -699,10 +1015,10 @@ mod tests {
     #[test]
     fn seq_slots_and_lines() {
         let m = hybrid();
-        // seqs 2 + pad + null: slots 0..4, three of them leasable.
+        // seqs 2 + pad + null: the manifest's first slots are 0..4, three of them leasable.
         assert_eq!(m.seq_slots(), 4);
-        let p = Arc::new(Pool::new(&m, 64).unwrap());
-        assert_eq!((p.slots(), p.seq_tables().collect::<Vec<_>>()), (4, vec!["line_index"]));
+        let p = hybrid_pool();
+        assert_eq!((p.has_slots(), p.slots(), p.seq_tables().collect::<Vec<_>>()), (true, 4, vec!["line_index"]));
         let a = p.lease(16).unwrap();
         let b = p.lease(16).unwrap();
         let c = p.lease(16).unwrap();
@@ -710,7 +1026,8 @@ mod tests {
         let mut got = vec![sa, sb, sc];
         got.sort();
         assert_eq!((got, p.slots_used()), (vec![1, 2, 3], 3));
-        // A fourth page is free but no slot is: busy, not exhausted.
+        // A fourth page is free but no slot is, and one free page's two
+        // chunks are short of a slot's three: busy, not exhausted.
         assert_eq!(p.lease(16).unwrap_err(), Denied::Busy);
         // Line r of a slot: slot × 3 + r; the null line 0 belongs to no lease.
         assert_eq!(a.seq_line("line_index", 2).unwrap(), sa * 3 + 2);
@@ -728,18 +1045,99 @@ mod tests {
         let mut m = hybrid();
         let b = m.buffers.get_mut("line_index").unwrap();
         b.shape = vec![Dim::Const(4), Dim::Var("seqs".into())];
-        let Err(e) = Pool::new(&m, 64) else { panic!("4 lines of 3 accepted") };
+        let Err(e) = Pool::new(&m, 8, 20, 4) else { panic!("4 lines of 3 accepted") };
         assert!(e.to_string().contains("state holds 3"), "{e}");
         let b = m.buffers.get_mut("line_index").unwrap();
         b.shape = vec![Dim::Var("seqs".into())];
-        let Err(e) = Pool::new(&m, 64) else { panic!("[seqs] accepted") };
+        let Err(e) = Pool::new(&m, 8, 20, 4) else { panic!("[seqs] accepted") };
         assert!(e.to_string().contains("[lines, seqs, w]"), "{e}");
         let b = m.buffers.get_mut("line_index").unwrap();
         b.shape = vec![Dim::Const(3), Dim::Var("seqs".into()), Dim::Const(8)];
-        let p = Arc::new(Pool::new(&m, 64).unwrap());
+        let p = Arc::new(Pool::new(&m, 8, 20, 4).unwrap().0);
         let a = p.lease(16).unwrap();
         assert_eq!(a.seq_width("line_index").unwrap(), 8);
         assert_eq!(a.seq_lines("line_index").unwrap(), 3);
+    }
+
+    // ---- memory: pages and slots out of one budget
+
+    #[test]
+    fn the_initial_layout_is_the_first_plan() {
+        let (p, plan) = Pool::new(&hybrid(), 8, 20, 4).unwrap();
+        // Every chunk mapped, one access grant per object, nothing unmapped.
+        assert_eq!((plan.map.len(), plan.access.len(), plan.unmap.len(), plan.unmade.len()), (20, 8, 0, 0));
+        assert_eq!(plan.made.len(), 8);
+        assert_eq!((p.total(), p.slots(), p.pages_max(), p.slots_max()), (4, 4, 10, 6));
+        let arenas: Vec<(&str, Kind, usize)> =
+            p.pooled().iter().map(|a| (a.state.as_str(), a.kind, a.positions)).collect();
+        assert_eq!(arenas, [("kv", Kind::Page, 20), ("gdn", Kind::Slot, 18)]);
+        // The budget must hold the first slots.
+        let Err(e) = Pool::new(&hybrid(), 8, 5, 4) else { panic!("4 slots out of 5 chunks") };
+        assert!(e.to_string().contains("hold 1 sequence slots"), "{e}");
+    }
+
+    #[test]
+    fn pages_come_from_free_slots() {
+        let p = hybrid_pool();
+        let a = p.lease(48).unwrap(); // pages 0..3, slot 1
+        assert_eq!((p.used(), p.slots_used()), (3, 1));
+        // Two pages wanted, one free: the highest free slot's three chunks make page 4.
+        assert_eq!(p.lease(32).unwrap_err(), Denied::Remapping);
+        let plan = p.take_pending().unwrap();
+        assert_eq!(
+            (plan.unmap.len(), plan.map.len(), &plan.made[..], &plan.unmade[..]),
+            (3, 2, &[(Kind::Page, 4)][..], &[(Kind::Slot, 3)][..])
+        );
+        assert_eq!(plan.access, [(0, 8..10)]);
+        // Until it lands, a caller sees neither the page arriving nor the slot leaving.
+        assert_eq!(p.lease(32).unwrap_err(), Denied::Remapping);
+        assert!(p.take_pending().is_none());
+        assert_eq!((p.total(), p.slots()), (4, 3));
+        p.complete(plan);
+        let b = p.lease(32).unwrap();
+        assert_eq!(
+            (b.pages[..].to_vec(), b.seq_slot(), p.total(), p.slots(), p.slots_used()),
+            (vec![3, 4], Some(2), 5, 3, 2)
+        );
+        drop((a, b));
+        assert_eq!((p.used(), p.slots_used()), (0, 0));
+    }
+
+    #[test]
+    fn a_slot_comes_from_free_pages() {
+        // 24 chunks: 4 slots and 6 pages.
+        let p = Arc::new(Pool::new(&hybrid(), 8, 24, 4).unwrap().0);
+        let held: Vec<Lease> = (0..3).map(|_| p.lease(16).unwrap()).collect();
+        assert_eq!((p.total(), p.used(), p.slots_used()), (6, 3, 3));
+        // A page is free but every slot is held: two free pages give slot 4.
+        assert_eq!(p.lease(16).unwrap_err(), Denied::Remapping);
+        let plan = p.take_pending().unwrap();
+        assert_eq!(
+            (plan.unmade.clone(), plan.made.clone()),
+            (vec![(Kind::Page, 5), (Kind::Page, 4)], vec![(Kind::Slot, 4)])
+        );
+        assert_eq!((plan.unmap.len(), plan.map.len()), (4, 3));
+        p.complete(plan);
+        let d = p.lease(16).unwrap();
+        assert_eq!((d.seq_slot(), p.total(), p.slots(), p.slots_used()), (Some(4), 4, 5, 4));
+        drop(held);
+        // Chunks stay where they were: pages 4 and 5 are gone, slots 1..3 free.
+        assert_eq!((p.total(), p.slots(), p.used()), (4, 5, 1));
+    }
+
+    #[test]
+    fn nothing_free_to_give_is_busy_or_exceeds() {
+        let p = hybrid_pool();
+        let _a = p.lease(32).unwrap();
+        let _b = p.lease(16).unwrap();
+        let _c = p.lease(16).unwrap();
+        // Every page and slot held: only an eviction helps.
+        assert_eq!(p.lease(16).unwrap_err(), Denied::Busy);
+        assert!(p.take_pending().is_none());
+        // Five chunks: slot 0 and one page, room for no other slot ever.
+        let small = Arc::new(Pool::new(&hybrid(), 8, 5, 1).unwrap().0);
+        assert_eq!((small.slots_max(), small.total()), (1, 1));
+        assert_eq!(small.lease(16).unwrap_err(), Denied::ExceedsPool);
     }
 
     // ---- checkpoints
@@ -844,7 +1242,8 @@ mod tests {
 
     #[test]
     fn hybrid_checkpoint_copies_the_slot_and_retire_moves_it() {
-        let p = Arc::new(Pool::new(&hybrid(), 64).unwrap());
+        // 26 chunks: 4 slots and 7 pages.
+        let p = Arc::new(Pool::new(&hybrid(), 8, 26, 4).unwrap().0);
         let mut a = p.lease(16).unwrap();
         let sa = a.seq_slot().unwrap();
         let (cp, copies) = p.checkpoint(&mut a, 10).unwrap();
@@ -855,8 +1254,13 @@ mod tests {
         let (b, copies) = p.restore(&cp, 17).unwrap();
         let sb = b.seq_slot().unwrap();
         assert_eq!((copies.slot, b.prefix(), p.slots_used()), (Some((sc, sb)), 10, 3));
-        assert_eq!(p.restore(&cp, 17).unwrap_err(), Denied::Busy);
-        drop(b);
+        // No slot left; of the four free pages the restore needs two, the
+        // other two hold a slot's worth of chunks.
+        assert_eq!(p.restore(&cp, 17).unwrap_err(), Denied::Remapping);
+        land(&p);
+        let (c, copies) = p.restore(&cp, 17).unwrap();
+        assert_eq!((copies.slot, p.slots(), p.slots_used(), p.total()), (Some((sc, 4)), 5, 4, 5));
+        drop((b, c));
         // Retiring a moves its slot to the checkpoint: no copy; its one page is the same one cp shares.
         let a2 = p.retire(a, 10);
         assert_eq!((a2.seq_slot(), a2.pages(), p.slots_used(), p.used()), (Some(sa), 1, 2, 1));
@@ -867,7 +1271,7 @@ mod tests {
 
     #[test]
     fn checkpoint_without_a_free_slot_is_busy() {
-        let p = Arc::new(Pool::new(&hybrid(), 64).unwrap());
+        let p = hybrid_pool();
         let mut a = p.lease(16).unwrap();
         let _b = p.lease(16).unwrap();
         let _c = p.lease(16).unwrap();
@@ -898,7 +1302,7 @@ mod tests {
         }"#,
         )
         .unwrap();
-        let p = Arc::new(Pool::new(&m, 200_000).unwrap());
+        let p = Arc::new(Pool::new(&m, 1, 200_000, 0).unwrap().0);
         let mut a = p.lease(200_000).unwrap();
         let cp = p.checkpoint(&mut a, 200_000).unwrap().0;
         drop(a);
@@ -907,15 +1311,20 @@ mod tests {
         assert_eq!(p.used(), 0);
     }
 
-    /// Random leases, checkpoints, restores, retirements and drops against
-    /// a model that only asks which pages are reachable from a live
-    /// handle: those and the free list partition the pool.
+    /// Random leases, checkpoints, restores, retirements, drops and remap
+    /// landings against a model that only asks which pages and slots are
+    /// reachable from a live handle and which chunks are mapped where:
+    /// held, free and absent partition the objects; a chunk is free or at
+    /// one position; a position is mapped exactly when an object exists
+    /// over it.
     #[test]
     fn ownership_partitions_the_pool() {
         let m = hybrid();
-        let p = Arc::new(Pool::new(&m, 64).unwrap());
+        // 26 chunks: slots 0..3 (9), 8 pages (16), one spare.
+        let p = Arc::new(Pool::new(&m, 8, 26, 3).unwrap().0);
         let mut leases: Vec<Lease> = Vec::new();
         let mut cps: Vec<Checkpoint> = Vec::new();
+        let mut remaps = 0;
         let mut x = 0x2545_F491_4F6C_DD1Du64;
         let mut rand = move |n: usize| {
             x ^= x << 13;
@@ -923,9 +1332,9 @@ mod tests {
             x ^= x << 17;
             (x >> 33) as usize % n
         };
-        for _ in 0..4000 {
-            match rand(6) {
-                0 => {
+        for _ in 0..6000 {
+            match rand(8) {
+                0 | 6 => {
                     if let Ok(l) = p.lease(1 + rand(48)) {
                         leases.push(l);
                     }
@@ -962,6 +1371,12 @@ mod tests {
                 5 if !cps.is_empty() => {
                     cps.swap_remove(rand(cps.len()));
                 }
+                7 => {
+                    if let Some(plan) = p.take_pending() {
+                        remaps += 1;
+                        p.complete(plan);
+                    }
+                }
                 _ => {}
             }
             let mut held: Vec<i32> = Vec::new();
@@ -974,23 +1389,56 @@ mod tests {
             }
             held.sort();
             held.dedup();
-            let mut free = lock(&p.free).clone();
-            free.sort();
-            let mut all = held.clone();
-            all.extend(&free);
-            all.sort();
-            assert_eq!(all, (0..4).collect::<Vec<i32>>());
-            // A page is either held or free, never both; each slot has one holder.
-            assert!(held.iter().all(|pg| !free.contains(pg)));
             let mut slots: Vec<i32> = leases.iter().map(|l| l.seq_slot().unwrap()).collect();
             slots.extend(cps.iter().map(|c| c.seq_slot().unwrap()));
-            let mut sorted = slots.clone();
-            sorted.sort();
-            sorted.dedup();
-            assert_eq!(sorted.len(), slots.len());
-            let mut free_slots = lock(&p.free_slots).clone();
-            free_slots.sort();
-            assert_eq!(free_slots, (1..4).filter(|i| !slots.contains(i)).collect::<Vec<i32>>());
+            slots.sort();
+            let mut uniq = slots.clone();
+            uniq.dedup();
+            assert_eq!(uniq, slots, "a slot has one holder");
+            let g = lock(&p.inner);
+            let by = |v: &[Status], s: Status| -> Vec<i32> {
+                v.iter().enumerate().filter(|(_, &x)| x == s).map(|(i, _)| i as i32).collect()
+            };
+            assert_eq!(by(&g.pages, Status::Held), held);
+            assert_eq!(by(&g.pages, Status::Free), g.free_pages.iter().copied().collect::<Vec<_>>());
+            assert_eq!(by(&g.slots, Status::Held)[1..], slots[..]);
+            assert_eq!(by(&g.slots, Status::Free), g.free_slots.iter().copied().collect::<Vec<_>>());
+            // The pending plan's objects are on their way.
+            if let Some(plan) = &g.pending {
+                for (k, o) in &plan.made {
+                    let v = if *k == Kind::Page { &g.pages } else { &g.slots };
+                    assert_eq!(v[*o as usize], Status::Arriving);
+                }
+                for (k, o) in &plan.unmade {
+                    let v = if *k == Kind::Page { &g.pages } else { &g.slots };
+                    assert_eq!(v[*o as usize], Status::Leaving);
+                }
+            } else {
+                assert!(!g.pages.contains(&Status::Arriving) || g.in_flight);
+            }
+            // Chunks: free or at one position, all accounted for.
+            let mut ids: Vec<u32> = g.chunks.free_ids().to_vec();
+            ids.extend(g.chunks.mapped().iter().map(|&(_, _, c)| c));
+            ids.sort();
+            assert_eq!(ids, (0..26).collect::<Vec<u32>>());
+            // A position is mapped exactly when an object that exists or
+            // is arriving covers it (a leaving one has let go already).
+            for (a, ar) in p.pooled().iter().enumerate() {
+                let objects = if ar.kind == Kind::Page { &g.pages } else { &g.slots };
+                let mut cover = vec![0u16; ar.positions];
+                for (o, s) in objects.iter().enumerate() {
+                    if s.exists() || *s == Status::Arriving {
+                        for q in g.chunks.interval(a, o) {
+                            cover[q] += 1;
+                        }
+                    }
+                }
+                assert_eq!(g.chunks.users(a), &cover[..], "arena {a}");
+                let mapped: Vec<usize> = g.chunks.mapped().iter().filter(|m| m.0 == a).map(|m| m.1).collect();
+                let covered: Vec<usize> = cover.iter().enumerate().filter(|(_, &u)| u > 0).map(|(q, _)| q).collect();
+                assert_eq!(mapped, covered, "arena {a}");
+            }
         }
+        assert!(remaps > 20, "{remaps} remaps landed");
     }
 }

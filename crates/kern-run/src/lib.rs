@@ -228,7 +228,7 @@ impl Caller {
         m.buffers["token_ids"]
             .domain
             .as_ref()
-            .and_then(|d| d.resolve(m, &env(1), self.rt.capacity()).ok())
+            .and_then(|d| d.resolve(m, &env(1), &self.rt.provision()).ok())
             .and_then(|r| r.hi)
             .map_or(1000, |hi| hi as u64 + 1)
     }

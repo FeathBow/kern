@@ -2,7 +2,8 @@
 //! page numbers only, no GPU, no model. The roadmap's K1 gate.
 //!
 //!     agentx_replay --traces <cc-traces-weka-062126>/traces.jsonl   # HF semianalysisai/cc-traces-weka-062126 \
-//!         [--unit 64] [--state] [--capacity <tokens>] [--slots 128] [--concurrency 32] [--sessions N]
+//!         [--unit 64] [--kv-bytes 65536] [--state <bytes per slot>] [--budget-gib 250 | --capacity <tokens>]
+//!         [--slots 130] [--concurrency 32] [--sessions N]
 //!
 //! Every request of a session is a sequence: leased at its timestamp for
 //! `in + out` tokens, prefilled from the longest checkpoint holding a
@@ -17,9 +18,14 @@
 //! shares. Sessions start `--concurrency` at a time, in file order, each
 //! when the one that many before it ends. A `Busy` lease evicts
 //! checkpoints until it fits, or waits for the next sequence to finish.
+//! Pages and slots come out of one chunk budget (`--budget-gib`, or
+//! `--capacity` tokens of pages plus `--slots` slots) as the runtime's
+//! do: `--slots` is only what the pool starts with, a `Remapping` denial
+//! is landed on the spot and the lease asked for again.
 //!
 //! Reported: hit rate (prefix tokens found / input tokens), extend
-//! percentiles, checkpoints kept, evictions, requests that had to wait.
+//! percentiles, checkpoints kept, evictions, requests that had to wait,
+//! remaps and the most slots the pool grew to.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{BufRead, BufReader};
@@ -125,9 +131,9 @@ fn tokens(reqs: &[Req], i: usize) -> Vec<i64> {
     out
 }
 
-fn manifest(unit: usize, state: bool, slots: usize, row: usize) -> Manifest {
-    let state_json = if state { r#", "rec": {"bytes_per_seq": 1}"# } else { "" };
-    let line_json = if state {
+fn manifest(unit: usize, kv_bytes: u64, state: u64, slots: usize, row: usize) -> Manifest {
+    let state_json = if state > 0 { format!(r#", "rec": {{"bytes_per_seq": {state}}}"#) } else { String::new() };
+    let line_json = if state > 0 {
         r#", "line_index": {"kind": "input", "dtype": "i32", "shape": [1, "seqs"], "domain": {"index_into": "rec", "stride": 1}}"#
     } else {
         ""
@@ -135,7 +141,7 @@ fn manifest(unit: usize, state: bool, slots: usize, row: usize) -> Manifest {
     Manifest::from_json(&format!(
         r#"{{
         "schema_version": 3, "model": "replay", "vars": {{"tokens": {{"max": 1}}, "seqs": {{"max": {seqs}}}}},
-        "states": {{"kv": {{"bytes_per_token": 1}}{state_json}}},
+        "states": {{"kv": {{"bytes_per_token": {kv_bytes}}}{state_json}}},
         "buffers": {{
             "block_table": {{"kind": "input", "dtype": "i32", "shape": ["seqs", {row}], "domain": {{"index_into": "kv", "stride": {unit}}}}}{line_json}
         }},
@@ -173,14 +179,26 @@ struct Tally {
     waited: u64,
     rejected: u64,
     max_live: usize,
+    remaps: u64,
+    max_slots: usize,
+}
+
+/// The runtime's chunk rule: 2 MiB granularity, half the smallest object,
+/// at most 64 MiB.
+fn chunk_size(page_bytes: u64, state: u64) -> u64 {
+    let g = 2u64 << 20;
+    let smallest = if state > 0 { page_bytes.min(state) } else { page_bytes };
+    (smallest / 2 / g).clamp(1, 32) * g
 }
 
 fn main() {
     let mut traces = PathBuf::new();
     let mut unit = 64usize;
-    let mut state = false;
-    let mut capacity: u64 = 1 << 30;
-    let mut slots = 128usize;
+    let mut kv_bytes = 65536u64;
+    let mut state = 0u64;
+    let mut capacity: Option<u64> = None;
+    let mut budget_gib = 250u64;
+    let mut slots = 130usize;
     let mut concurrency = 32usize;
     let mut sessions_cap = usize::MAX;
     let mut args = std::env::args().skip(1);
@@ -189,8 +207,10 @@ fn main() {
         match a.as_str() {
             "--traces" => traces = PathBuf::from(v()),
             "--unit" => unit = v().parse().unwrap(),
-            "--state" => state = true,
-            "--capacity" => capacity = v().parse().unwrap(),
+            "--kv-bytes" => kv_bytes = v().parse().unwrap(),
+            "--state" => state = v().parse().unwrap(),
+            "--capacity" => capacity = Some(v().parse().unwrap()),
+            "--budget-gib" => budget_gib = v().parse().unwrap(),
             "--slots" => slots = v().parse().unwrap(),
             "--concurrency" => concurrency = v().parse().unwrap(),
             "--sessions" => sessions_cap = v().parse().unwrap(),
@@ -220,8 +240,15 @@ fn main() {
         }
     }
     let row = (1usize << 20) / unit + 64;
-    let m = manifest(unit, state, slots, row);
-    let pool = Arc::new(Pool::new(&m, capacity).unwrap());
+    let m = manifest(unit, kv_bytes, state, slots, row);
+    let page_bytes = kv_bytes * unit as u64;
+    let chunk = chunk_size(page_bytes, state);
+    let chunks = match capacity {
+        Some(tokens) => (tokens / unit as u64 * page_bytes).div_ceil(chunk) + (slots as u64 * state).div_ceil(chunk),
+        None => (budget_gib << 30) / chunk,
+    };
+    let first_slots = if state > 0 { slots } else { 0 };
+    let pool = Arc::new(Pool::new(&m, chunk, chunks as u32, first_slots).expect("the budget holds the first slots").0);
     let mut prefix = Prefix::new(unit);
     let mut tally = Tally::default();
     let mut order: Vec<usize> = (0..reqs.len()).collect();
@@ -238,7 +265,7 @@ fn main() {
     let finish = |live: Live, prefix: &mut Prefix, tally: &mut Tally| {
         let r = &reqs[live.req];
         let total = r.input + r.out;
-        if state {
+        if state > 0 {
             if total >= 1 {
                 let cp = pool.retire(live.lease, total);
                 prefix.insert(&live.chain, cp);
@@ -292,6 +319,12 @@ fn main() {
                             break None;
                         }
                     }
+                    Err(Denied::Remapping) => {
+                        let plan = pool.take_pending().expect("a remap was planned");
+                        pool.complete(plan);
+                        tally.remaps += 1;
+                        tally.max_slots = tally.max_slots.max(pool.slots());
+                    }
                     Err(_) => {
                         tally.rejected += 1;
                         break None;
@@ -316,7 +349,7 @@ fn main() {
             tally.hit += hit_len as u64;
             tally.extend.push(r.input - hit_len);
             let chain = Chain::over(unit, &toks);
-            if !state {
+            if state == 0 {
                 for k in (hit_len / unit + 1)..=r.input / unit {
                     if let Ok((cp, _)) = pool.checkpoint(&mut lease, k * unit) {
                         prefix.insert(&chain, cp);
@@ -337,13 +370,18 @@ fn main() {
     }
     let main_reqs = reqs.iter().filter(|r| !r.subagent).count();
     println!(
-        "{} sessions, {} requests ({main_reqs} main), unit {unit}, {}, capacity {} tokens ({} pages), {} slots, concurrency {concurrency}",
+        "{} sessions, {} requests ({main_reqs} main), unit {unit} ({} MiB/page), {}, budget {:.1} GiB in {chunks} chunks of {} MiB: {} pages ({} tokens) and {} slots at the end, {} slots at most, {} remaps, concurrency {concurrency}",
         sessions,
         reqs.len(),
-        if state { "recurrent state (checkpoint at request end)" } else { "paged only (checkpoint every page)" },
-        pool.total() as u64 * unit as u64,
+        page_bytes >> 20,
+        if state > 0 { format!("recurrent state {} MiB/slot (checkpoint at request end)", state >> 20) } else { "paged only (checkpoint every page)".into() },
+        (chunks * chunk) as f64 / (1u64 << 30) as f64,
+        chunk >> 20,
         pool.total(),
-        slots,
+        pool.total() as u64 * unit as u64,
+        pool.slots(),
+        tally.max_slots.max(pool.slots()),
+        tally.remaps,
     );
     println!(
         "hit {:.1}% of {} input tokens; extend p50 {} p90 {} p99 {}; {} checkpoints made, {} kept, {} evicted; {} requests waited, {} rejected; max live {}",

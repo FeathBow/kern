@@ -413,7 +413,7 @@ impl KernScheduler {
             bail!("capacity {} tokens holds one page; nothing left to serve from", rt.capacity());
         }
         let stats = Stats::new(&c.spec);
-        let every_page = rt.seq_slots() == 0;
+        let every_page = !rt.has_seq_state();
         let prefix = Prefix::new(rt.page() as usize);
         let s = KernScheduler {
             rt: Rt(rt),
@@ -523,6 +523,7 @@ impl KernScheduler {
             let pages = match pages {
                 Ok(pages) => pages,
                 Err(Error::Denied(Denied::Busy)) => break, // wait for pages / a slot
+                Err(Error::Denied(Denied::Remapping)) => break, // pages or a slot are on their way
                 Err(Error::Denied(Denied::ExceedsRow { limit })) => {
                     ledger.reject(id, RejectReason::ContextLength { prompt_tokens: prompt, max_tokens, limit });
                     self.waiting.pop_front();
@@ -970,6 +971,9 @@ impl KernScheduler {
                 prefix_hit_tokens = st.prefix_hit_tokens,
                 checkpoints = self.prefix.len(),
                 evictions = st.evictions,
+                slots_used = self.rt.0.has_seq_state().then(|| self.rt.0.seq_slots_used()),
+                slots = self.rt.0.has_seq_state().then(|| self.rt.0.seq_slots()),
+                remaps = self.rt.0.remaps(),
                 accepted = self.spec.as_ref().map(|_| round((accepted + drafts) as f64 / drafts.max(1) as f64, 100.0)),
                 accept_pct =
                     self.spec.as_ref().map(|_| round(accepted as f64 * 100.0 / draft_tokens.max(1) as f64, 1.0)),
