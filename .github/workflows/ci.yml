@@ -16,7 +16,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
 
       - name: Format check
         run: |
@@ -24,6 +24,9 @@ jobs:
           rustfmt --check --edition 2021 crates/kern-serve/src/lib.rs crates/kern-serve/src/main.rs
 
       - uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Clippy kern-manifest
+        run: cargo clippy -p kern-manifest --all-targets -- -D warnings
 
       - name: Test kern-manifest
         run: cargo test -p kern-manifest

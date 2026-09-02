@@ -26,3 +26,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "kern"
 path = "src/bin/kern.rs"
+
+[lints]
+workspace = true

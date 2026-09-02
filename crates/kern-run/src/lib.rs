@@ -5,6 +5,8 @@
 //! token slots for its whole life. `kern-run` (generation) and
 //! `kern-attest` (A/B evidence) both drive the runtime through it.
 
+#![forbid(unsafe_code)]
+
 pub mod attest;
 pub mod config;
 pub mod run;

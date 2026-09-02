@@ -3,6 +3,8 @@
 //! Inputs come from flags, else from the nearest `kern.toml` (see
 //! `kern_run::config`). Targets are names the user picks there.
 
+#![forbid(unsafe_code)]
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

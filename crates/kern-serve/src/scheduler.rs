@@ -62,6 +62,7 @@ use crate::logline;
 /// from the scheduler thread only; every entry point rebinds the context
 /// to the calling thread, so moving it there once is sound.
 struct Rt(Runtime);
+#[allow(unsafe_code)]
 unsafe impl Send for Rt {}
 
 /// Decode batch buckets; a batch is padded up to the smallest one that

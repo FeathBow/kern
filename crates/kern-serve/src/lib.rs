@@ -7,6 +7,8 @@
 //! `kern_runtime::Runtime` (KV pages are the runtime's leases). The crate's
 //! public surface is [`serve`] and its option structs.
 
+#![deny(unsafe_code)]
+
 pub mod logline;
 mod scheduler;
 

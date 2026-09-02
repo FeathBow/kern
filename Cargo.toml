@@ -27,3 +27,10 @@ tokenizers = "=0.22.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ureq = "2"
+
+[workspace.lints.clippy]
+disallowed_types = "deny"  # clippy.toml: std hash maps, whose iteration order is random per process
+dbg_macro = "deny"
+todo = "deny"
+type_complexity = "allow"
+needless_range_loop = "allow"

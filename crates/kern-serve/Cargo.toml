@@ -7,6 +7,15 @@ description = "OpenAI-compatible serving over a kern manifest: a continuous-batc
 # Its own workspace, on purpose: the serving stack (pegainfer frontend, vLLM
 # Rust server crates) stays out of the runtime's dependency graph and CI.
 [workspace]
+[workspace.lints.clippy]
+disallowed_types = "deny"  # clippy.toml: std hash maps, whose iteration order is random per process
+dbg_macro = "deny"
+todo = "deny"
+type_complexity = "allow"
+needless_range_loop = "allow"
+
+[lints]
+workspace = true
 
 [dependencies]
 kern-manifest = { path = "../kern-manifest" }

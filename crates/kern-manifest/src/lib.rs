@@ -7,6 +7,8 @@
 //! evaluates a closed set of scalar expressions for launch geometry. All
 //! model semantics live on the provider's side of this boundary.
 
+#![forbid(unsafe_code)]
+
 pub mod types;
 pub mod verify;
 

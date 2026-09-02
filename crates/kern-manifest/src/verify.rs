@@ -753,7 +753,7 @@ fn check_domain(
         match (m.buffers.contains_key(t), m.states.contains_key(t)) {
             (false, false) => errs.push(format!("{ctx}: `index_into` unknown buffer/state `{t}`")),
             (true, true) => errs.push(format!("{ctx}: `index_into` `{t}` is both a buffer and a state")),
-            (false, true) if m.states[t].is_per_seq() && m.states[t].bytes_per_seq % d.stride.max(1) != 0 => {
+            (false, true) if m.states[t].is_per_seq() && !m.states[t].bytes_per_seq.is_multiple_of(d.stride.max(1)) => {
                 errs.push(format!(
                     "{ctx}: `index_into` per-sequence state `{t}` in lines of {} bytes, which do not divide its {} bytes per sequence",
                     d.stride, m.states[t].bytes_per_seq

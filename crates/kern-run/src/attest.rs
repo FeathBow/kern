@@ -983,7 +983,7 @@ impl Renderer {
                 } else {
                     // Pad on the raw title so escape codes don't skew it.
                     let pad = " ".repeat(15usize.saturating_sub(sec.title.chars().count()));
-                    println!("{t}{pad}{}", self.paint(&Cell::dim(&format!("{}{took}", sec.subtitle))));
+                    println!("{t}{pad}{}", self.paint(&Cell::dim(format!("{}{took}", sec.subtitle))));
                 }
                 for (bi, b) in sec.blocks.iter().enumerate() {
                     match b {
@@ -1066,13 +1066,10 @@ impl Renderer {
                     self.paint(&Cell::bold("VERDICT")),
                     self.paint(&tag),
                     summary,
-                    self.paint(&Cell::dim(&format!("{elapsed:.1?}")))
+                    self.paint(&Cell::dim(format!("{elapsed:.1?}")))
                 );
                 if let Some(p) = out {
-                    println!(
-                        "{}",
-                        self.paint(&Cell::dim(&format!("          attestation written to {}", p.display())))
-                    );
+                    println!("{}", self.paint(&Cell::dim(format!("          attestation written to {}", p.display()))));
                 }
             }
             Format::Md => {
@@ -1579,7 +1576,7 @@ fn execute(o: Opts) -> Result<i32> {
     for ((label, name, e, a), (_, _, _, b)) in a_logits.iter().zip(&b_logits) {
         let dt = ma.buffers[name].dtype;
         let row = row_elems(&ma, name, e) * dt.bytes() as usize;
-        let rows = if row > 0 { a.len() / row } else { 0 };
+        let rows = a.len().checked_div(row).unwrap_or(0);
         for r in 0..rows.max(1) {
             let (lo, hi) = if rows > 1 { (r * row, (r + 1) * row) } else { (0, a.len()) };
             let lbl = if a_logits.iter().filter(|x| x.0 == *label).count() > 1 || rows > 1 {

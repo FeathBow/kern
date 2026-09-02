@@ -4,6 +4,8 @@
 //! the target in the nearest `kern.toml`; `--model-path` is the HF directory
 //! the frontend reads (tokenizer, chat template, stop tokens).
 
+#![deny(unsafe_code)]
+
 use std::path::PathBuf;
 
 use anyhow::{bail, ensure, Result};
