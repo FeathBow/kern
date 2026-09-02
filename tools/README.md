@@ -29,7 +29,7 @@ examples/k3_golden.rs`）。
 | `kernels-src/k3_mla_paged_attn.cu`、`k3_kv_append.cu`、`k3_mega_stage.cu` | pegainfer 的 absorbed paged-MLA decode 核原样（加 `extern "C"`）；latent 追加（token slot → 页/行）；MegaMoE 输入 staging |
 | `export_k3.py` | HF checkpoint → `dense/bookends + dense/l<i>`（所有 rank 共用）+ `experts/ep<R>-r<r>-l<i>`（按 rank 分片，MegaMoE 布局，复用 `export_k3_moe.py` 的变换）；slot 布局照 pegainfer `model/plan.rs`。权重放数据盘（tray04 `/data/susun/kern-k3/`），跑在 vllm 镜像的 CPU 容器里 |
 | `gen_k3_decode.py` | `--layers N --ranks R` → `examples/k3-<N>l-ep<R>.json` / `k3-ep4.json`：整条 decode program（3792 步 @93 层），几何与参数从 TileLang 源码解析，MoE 三步来自 `gen_k3_moe.mega_pieces` |
-| `k3_oracle_dump.py` | 任一 OpenAI 兼容服务（vLLM / pegainfer）→ fixture（teacher-forced greedy，top-5 logprob），给 `k3_golden --margin-abs` 做全深度门禁 |
+| `k3_oracle_dump.py` | 任一 OpenAI 兼容服务 → fixture（teacher-forced greedy）。vLLM 带 top-5 logprob，给 `k3_golden --margin-abs` 做 noise-floor 判定；pegainfer 的 K3 不出 logprob，用 `--no-logprobs`（`return_token_ids`，只记 argmax，逐步必须精确一致） |
 
 支撑件：
 

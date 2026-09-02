@@ -328,6 +328,11 @@ rank 死 → 组内所有图在 flag 上永久 spin。**所有跨 rank 等待都
 8. **MoE 通信 = DeepGEMM MegaMoE**（pegainfer 的 AOT fork，一层一个 launch），源码级
    对比见 `moe-comm-survey.md`。TRT one-sided 作为 fallback 的事以后再说；不自写，NCCL
    不作为 extern 保留。
+9. **K3 decode 核来源 = pegainfer 认证核集，不从 vLLM 挖。** vLLM 的 K3 路径
+   （fused_kda_decode / flashinfer-trtllm MLA / DeepGEMM / torch.compile）拆不出可
+   AOT 的核；kern 的 93 层 EP4 program（E2）逐行对照 pegainfer `k3_step`，正确性以
+   pegainfer fixture + 三方 teacher-forced oracle 定案（见 roadmap E2 行）。导出的权重
+   放 tray 本地 `/data`（tray04 `/data/susun/kern-k3/`），不进 Ceph。
 
 ## 待决
 

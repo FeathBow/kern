@@ -19,10 +19,13 @@ import json
 import sys
 import urllib.request
 
+LOGPROBS = True
+
 
 def complete(url, ids, model):
-    body = {"model": model, "prompt": ids, "max_tokens": 1, "temperature": 0, "logprobs": 5,
-            "return_tokens_as_token_ids": True}
+    body = {"model": model, "prompt": ids, "max_tokens": 1, "temperature": 0, "return_token_ids": True}
+    if LOGPROBS:
+        body.update({"logprobs": 5, "return_tokens_as_token_ids": True})
     req = urllib.request.Request(url + "/v1/completions", data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=600) as r:
@@ -43,7 +46,11 @@ def main():
     ap.add_argument("--steps", type=int, default=40)
     ap.add_argument("--layers", type=int, default=93)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--no-logprobs", action="store_true",
+                    help="server returns no logprobs (pegainfer K3): record the argmax alone, every step must match exactly")
     a = ap.parse_args()
+    global LOGPROBS
+    LOGPROBS = not a.no_logprobs
     model = a.model
     if model is None:
         with urllib.request.urlopen(a.url + "/v1/models") as r:
@@ -63,11 +70,15 @@ def main():
             feed.append(steps[-1]["argmax"])
         resp = complete(a.url, feed[:i + 1], model)
         choice = resp["choices"][0]
-        lp = choice["logprobs"]
-        argmax = token_id(lp["tokens"][0])
-        top = sorted(((token_id(t), v) for t, v in lp["top_logprobs"][0].items()), key=lambda kv: -kv[1])
-        if top[0][0] != argmax:
-            print(f"step {i}: sampled {argmax} is not the top logprob {top[0]}", file=sys.stderr)
+        if LOGPROBS:
+            lp = choice["logprobs"]
+            argmax = token_id(lp["tokens"][0])
+            top = sorted(((token_id(t), v) for t, v in lp["top_logprobs"][0].items()), key=lambda kv: -kv[1])
+            if top[0][0] != argmax:
+                print(f"step {i}: sampled {argmax} is not the top logprob {top[0]}", file=sys.stderr)
+        else:
+            argmax = choice["token_ids"][0]
+            top = [(argmax, 0.0), (-1, -1e9)]
         steps.append({"feed": feed[i], "argmax": argmax, "top5_ids": [t for t, _ in top],
                       "top5_logits": [v for _, v in top]})
         print(i, feed[i], "->", argmax, [round(v, 3) for _, v in top[:2]], file=sys.stderr, flush=True)
