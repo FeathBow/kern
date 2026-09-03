@@ -8,6 +8,7 @@ kern-manifest.workspace = true
 
 cudarc.workspace = true
 half.workspace = true
+libc.workspace = true
 safetensors.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

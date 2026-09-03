@@ -23,12 +23,22 @@
 //! virtual-memory allocations with fabric handles; [`Runtime::export_handles`]
 //! hands them out, [`Runtime::import_peers`] maps the other ranks' and fills
 //! the `peer` address arrays. Nothing runs until every peer array is filled.
+//!
+//! Two streams: every program and every pool copy runs on the compute
+//! stream in order; the host tier's copies ([`Runtime::park`] out,
+//! [`Runtime::wake`] in) run on a transfer stream, and the compute stream
+//! never waits for them. The transfer stream starts each batch of copies
+//! after everything the compute stream has enqueued; a parked checkpoint
+//! stays held (its pages and slot out of the pool) until its copy has
+//! landed, and a woken lease is a [`Waking`] until [`Runtime::awake`]
+//! finds its copy landed, so no program can read pages still in flight.
 
 mod chunks;
 mod compile;
 mod cubin;
 mod device;
 mod error;
+mod host;
 mod pages;
 mod prefix;
 pub mod values;
@@ -47,13 +57,17 @@ pub use chunks::{Kind, Remap};
 use compile::{CompiledProgram, Launch, LaunchKind, RVal, Slot, TmaBlob};
 pub use device::PeerHandle;
 use device::{
-    alloc, alloc_vmm, chunk_granularity, gemm_bf16_tn, gemm_bf16_tn_f32, Arena, Blas, DeviceBuf, Mapper, Physical,
-    Share,
+    alloc, alloc_vmm, chunk_granularity, copy_2d, gemm_bf16_tn, gemm_bf16_tn_f32, Arena, Blas, DeviceBuf, Mapper,
+    Physical, Pinned, Share,
 };
 use error::{bail, cuda_check};
 pub use error::{Error, Result};
+pub use host::{Host, Parked};
 pub use pages::{page_unit, Checkpoint, Copies, Denied, Lease, Pool, Pooled};
-pub use prefix::{Chain, Hit, Prefix};
+pub use prefix::{Chain, Hit, Prefix, Tier};
+
+/// The host tier's block is handed out in these units.
+const HOST_GRAIN: u64 = 1 << 16;
 
 /// This rank's place in every group the manifest's `topology` declares.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -85,6 +99,13 @@ pub struct Runtime {
     pub manifest: Manifest,
     ctx: Arc<CudaContext>,
     stream: Arc<CudaStream>,
+    /// The host tier's copies run here, off the compute stream.
+    xfer: Arc<CudaStream>,
+    /// The host tier: its accounting and its pinned block, once reserved.
+    host: Option<(Arc<Host>, Pinned)>,
+    /// Checkpoints whose park copies are still in flight: held here so
+    /// their pages and slots stay out of the pool until the copy lands.
+    parking: Vec<(Checkpoint, sys::CUevent)>,
     blt: CudaBlasLT,
     /// cuBLAS handle (with its own workspace) for the f32-result GEMM built-in.
     blas: Blas,
@@ -136,9 +157,13 @@ impl Drop for Runtime {
         for exec in self.graphs.values() {
             unsafe { sys::cuGraphExecDestroy(*exec) };
         }
-        // The thread owns the arenas: nothing on the stream may still
+        // The thread owns the arenas: nothing on either stream may still
         // touch them when it unmaps.
         let _ = self.stream.synchronize();
+        let _ = self.xfer.synchronize();
+        for (_, ev) in self.parking.drain(..) {
+            unsafe { sys::cuEventDestroy_v2(ev) };
+        }
         let _ = self.remaps.jobs.send(Job::Stop);
         if let Some(t) = self.remaps.thread.take() {
             let _ = t.join();
@@ -146,10 +171,10 @@ impl Drop for Runtime {
     }
 }
 
-/// What the remap thread is told: a plan to run once the stream has
-/// passed `after` (a recorded event, destroyed by the thread), or to stop.
+/// What the remap thread is told: a plan to run once both streams have
+/// passed `after` (recorded events, destroyed by the thread), or to stop.
 enum Job {
-    Run { plan: Remap, after: u64 },
+    Run { plan: Remap, after: [u64; 2] },
     Stop,
 }
 
@@ -169,10 +194,14 @@ fn remap_thread(ctx: Arc<CudaContext>, mut mapper: Mapper, jobs: Receiver<Job>, 
     while let Ok(job) = jobs.recv() {
         match job {
             Job::Run { plan, after } => {
-                let ev = after as sys::CUevent;
-                let r = cuda_check(unsafe { sys::cuEventSynchronize(ev) }, "cuEventSynchronize")
+                let evs = after.map(|e| e as sys::CUevent);
+                let r = evs
+                    .iter()
+                    .try_for_each(|&ev| cuda_check(unsafe { sys::cuEventSynchronize(ev) }, "cuEventSynchronize"))
                     .and_then(|()| mapper.run(&plan));
-                unsafe { sys::cuEventDestroy_v2(ev) };
+                for ev in evs {
+                    unsafe { sys::cuEventDestroy_v2(ev) };
+                }
                 if done.send(r.map(|()| plan)).is_err() {
                     break;
                 }
@@ -212,6 +241,65 @@ impl Drop for Events {
     fn drop(&mut self) {
         for ev in &self.0 {
             unsafe { sys::cuEventDestroy_v2(*ev) };
+        }
+    }
+}
+
+/// A fresh event recorded on `stream`; the caller destroys it.
+fn record(stream: &CudaStream) -> Result<sys::CUevent> {
+    let mut ev: sys::CUevent = std::ptr::null_mut();
+    cuda_check(
+        unsafe { sys::cuEventCreate(&mut ev, sys::CUevent_flags::CU_EVENT_DISABLE_TIMING as u32) },
+        "cuEventCreate",
+    )?;
+    cuda_check(unsafe { sys::cuEventRecord(ev, stream.cu_stream()) }, "cuEventRecord")?;
+    Ok(ev)
+}
+
+/// `stream` waits for `ev`, which is then destroyed.
+fn wait_then_destroy(stream: &CudaStream, ev: sys::CUevent) -> Result<()> {
+    let r = cuda_check(unsafe { sys::cuStreamWaitEvent(stream.cu_stream(), ev, 0) }, "cuStreamWaitEvent");
+    unsafe { sys::cuEventDestroy_v2(ev) };
+    r
+}
+
+/// Whether everything before `ev` on its stream has completed.
+fn landed(ev: sys::CUevent) -> Result<bool> {
+    match unsafe { sys::cuEventQuery(ev) } {
+        sys::CUresult::CUDA_SUCCESS => Ok(true),
+        sys::CUresult::CUDA_ERROR_NOT_READY => Ok(false),
+        r => cuda_check(r, "cuEventQuery").map(|_| true),
+    }
+}
+
+/// A lease being woken: its pages are taken, their bytes still on the way
+/// in. [`Runtime::awake`] turns it into the lease once they have landed;
+/// dropping it earlier waits for them first, so the pages never return to
+/// the pool with a copy still writing them.
+pub struct Waking {
+    lease: Option<Lease>,
+    event: sys::CUevent,
+}
+
+// The event is only ever queried through the runtime that recorded it,
+// on whatever thread drives that runtime; the runtime itself moves
+// between threads the same way.
+unsafe impl Send for Waking {}
+
+impl Waking {
+    /// Positions the lease will hold filled.
+    pub fn prefix(&self) -> usize {
+        self.lease.as_ref().map_or(0, Lease::prefix)
+    }
+}
+
+impl Drop for Waking {
+    fn drop(&mut self) {
+        if !self.event.is_null() {
+            unsafe {
+                sys::cuEventSynchronize(self.event);
+                sys::cuEventDestroy_v2(self.event);
+            }
         }
     }
 }
@@ -260,6 +348,7 @@ impl Runtime {
         // A created (non-legacy) stream: the NULL stream cannot be captured
         // into a CUDA graph.
         let stream = ctx.new_stream()?;
+        let xfer = ctx.new_stream()?;
         let blt = CudaBlasLT::new(stream.clone())?;
         let blas = Blas::new(&stream)?;
         ctx.bind_to_thread()?;
@@ -404,6 +493,9 @@ impl Runtime {
             manifest,
             ctx,
             stream,
+            xfer,
+            host: None,
+            parking: Vec::new(),
             blt,
             blas,
             provision,
@@ -694,18 +786,168 @@ impl Runtime {
         self.pool.retire(lease, len)
     }
 
-    /// A sequence continuing from `cp` with room for `tokens`: shares the
-    /// checkpoint's pages (copying the one `cp.len()` ends inside), copies
-    /// its state into a fresh slot, and hands out a lease that names
-    /// positions from `cp.len()` on. [`Error::Denied`] as for [`Runtime::lease`].
-    pub fn lease_from(&mut self, cp: &Checkpoint, tokens: usize) -> Result<Lease> {
+    /// A sequence continuing from the first `len` tokens of `cp` with room
+    /// for `tokens`: shares those pages (copying the one `len` ends
+    /// inside), copies the state into a fresh slot, and hands out a lease
+    /// that names positions from `len` on. `len` is the checkpoint's own
+    /// length, or any whole number of its pages when it holds no state.
+    /// [`Error::Denied`] as for [`Runtime::lease`].
+    pub fn lease_from(&mut self, cp: &Checkpoint, len: usize, tokens: usize) -> Result<Lease> {
         self.poll()?;
-        let (lease, copies) = match self.pool.restore(cp, tokens) {
+        let (lease, copies) = match self.pool.restore(cp, len, tokens) {
             Ok(x) => x,
             Err(d) => return self.denied(d),
         };
         self.copy(&copies)?;
         Ok(lease)
+    }
+
+    /// A sequence branched off the first `len` tokens of `parent`, which
+    /// keeps running: the whole pages shared, the page `len` ends inside
+    /// copied, the parent's state copied into a fresh slot. With a
+    /// recurrent state `len` is the parent's position — the state is the
+    /// parent's as of now. The lease names positions from `len` on.
+    pub fn fork(&mut self, parent: &mut Lease, len: usize, tokens: usize) -> Result<Lease> {
+        self.poll()?;
+        let (lease, copies) = match self.pool.fork(parent, len, tokens) {
+            Ok(x) => x,
+            Err(d) => return self.denied(d),
+        };
+        self.copy(&copies)?;
+        Ok(lease)
+    }
+
+    // ---- the host tier: checkpoints parked in pinned DRAM.
+
+    /// Reserve `bytes` of page-locked host memory for parked checkpoints
+    /// (once; ~100 ms per GiB on GB300).
+    pub fn reserve_host(&mut self, bytes: u64) -> Result<()> {
+        if self.host.is_some() {
+            bail!(Api, "the host tier is reserved already");
+        }
+        let pinned = Pinned::alloc(bytes, self.gpu as i32)?;
+        self.host = Some((Arc::new(Host::new(bytes, HOST_GRAIN)), pinned));
+        Ok(())
+    }
+
+    /// (bytes used, bytes reserved) of the host tier, when there is one.
+    pub fn host_tier(&self) -> Option<(u64, u64)> {
+        self.host.as_ref().map(|(h, p)| (h.used(), p.bytes()))
+    }
+
+    /// Bytes per host page (every paged state's page back to back) and per
+    /// host slot, and each pooled state's offset inside its one.
+    fn host_layout(&self) -> (u64, u64, Vec<u64>) {
+        let (mut page, mut slot) = (0u64, 0u64);
+        let offsets = self
+            .pool
+            .pooled()
+            .iter()
+            .map(|a| match a.kind {
+                Kind::Page => {
+                    page += a.object;
+                    page - a.object
+                }
+                Kind::Slot => {
+                    slot += a.object;
+                    slot - a.object
+                }
+            })
+            .collect();
+        (page, slot, offsets)
+    }
+
+    /// Copy `cp`'s pages and slot to the host tier: the pages not parked
+    /// already (an earlier turn of the same session shares them there).
+    /// The checkpoint is held until the copies, on the transfer stream,
+    /// have landed; then its device pages and slot return. `Err(cp)`
+    /// hands it back when the block cannot hold it.
+    pub fn park(&mut self, cp: Checkpoint) -> Result<std::result::Result<Parked, Checkpoint>> {
+        self.poll()?;
+        let Some((host, _)) = &self.host else {
+            bail!(Api, "no host tier: reserve_host first");
+        };
+        let (page_bytes, slot_bytes, _) = self.host_layout();
+        let (parked, plan) =
+            match host.park(&cp.nodes(), page_bytes, cp.seq_slot().map(|s| (s, slot_bytes)), cp.tokens()) {
+                Ok(x) => x,
+                Err(Denied::HostFull) => return Ok(Err(cp)),
+                Err(d) => return Err(Error::Denied(d)),
+            };
+        self.transfer(&plan.pages, plan.slot, true)?;
+        self.parking.push((cp, record(&self.xfer)?));
+        Ok(Ok(parked))
+    }
+
+    /// A sequence continuing from the first `len` tokens of a parked
+    /// checkpoint with room for `tokens`: fresh pages with those tokens'
+    /// pages copied back in, a fresh slot with its state when `len` is the
+    /// whole checkpoint (a parked state is usable at its length only). The
+    /// copies run on the transfer stream; [`Runtime::awake`] hands out the
+    /// lease once they have landed.
+    pub fn wake(&mut self, p: &Parked, len: usize, tokens: usize) -> Result<Waking> {
+        self.poll()?;
+        if self.host.is_none() {
+            bail!(Api, "no host tier: reserve_host first");
+        }
+        let unit = self.pool.unit() as usize;
+        if len == 0 || len > p.tokens() || (len != p.tokens() && (p.has_slot() || !len.is_multiple_of(unit))) {
+            bail!(Api, "waking {len} tokens of a parked checkpoint of {} ({p:?})", p.tokens());
+        }
+        let lease = match self.pool.wake(len, tokens) {
+            Ok(l) => l,
+            Err(d) => return self.denied(d),
+        };
+        let n = len.div_ceil(unit);
+        let pairs: Vec<(i32, u64)> = lease.page_ids()[..n].iter().copied().zip(p.pages(n)).collect();
+        let slot = if len == p.tokens() { lease.seq_slot().zip(p.slot()) } else { None };
+        self.transfer(&pairs, slot, false)?;
+        Ok(Waking { lease: Some(lease), event: record(&self.xfer)? })
+    }
+
+    /// The lease of a wake whose copies have landed; `Err(w)` while they
+    /// are still in flight. Does not block.
+    pub fn awake(&self, mut w: Waking) -> Result<std::result::Result<Lease, Waking>> {
+        if !landed(w.event)? {
+            return Ok(Err(w));
+        }
+        unsafe { sys::cuEventDestroy_v2(w.event) };
+        w.event = std::ptr::null_mut();
+        Ok(Ok(w.lease.take().expect("a waking lease")))
+    }
+
+    /// (device page, host offset) pages and a (device slot, host offset)
+    /// slot between the pooled states and the host block, on the transfer
+    /// stream after everything the compute stream has enqueued: one
+    /// strided copy per run of consecutive pages per state.
+    fn transfer(&self, pages: &[(i32, u64)], slot: Option<(i32, u64)>, to_host: bool) -> Result<()> {
+        let Some((_, pinned)) = &self.host else {
+            bail!(Api, "no host tier: reserve_host first");
+        };
+        let base = pinned.ptr();
+        let (page_bytes, slot_bytes, offsets) = self.host_layout();
+        wait_then_destroy(&self.xfer, record(&self.stream)?)?;
+        let stream = self.xfer.cu_stream();
+        for (a, ar) in self.pool.pooled().iter().enumerate() {
+            let st = &self.states[&ar.state];
+            match ar.kind {
+                Kind::Page => {
+                    for (p, o, n) in host::runs(pages, page_bytes) {
+                        let dev = st.ptr + p as u64 * ar.object;
+                        let hst = base + o + offsets[a];
+                        copy_2d(stream, (dev, ar.object), (hst, page_bytes), ar.object, n as u64, to_host)?;
+                    }
+                }
+                Kind::Slot => {
+                    if let Some((s, o)) = slot {
+                        let dev = st.ptr + s as u64 * ar.object;
+                        let hst = base + o + offsets[a];
+                        copy_2d(stream, (dev, ar.object), (hst, slot_bytes), ar.object, 1, to_host)?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Run a pool decision's byte moves on the stream: whole pages of every
@@ -741,6 +983,15 @@ impl Runtime {
     /// load — and hand the thread the plan the pool has pending: it runs
     /// once the stream has passed everything enqueued so far.
     fn poll(&mut self) -> Result<()> {
+        let mut parking = std::mem::take(&mut self.parking);
+        for (cp, ev) in parking.drain(..) {
+            if landed(ev)? {
+                unsafe { sys::cuEventDestroy_v2(ev) };
+                drop(cp);
+            } else {
+                self.parking.push((cp, ev));
+            }
+        }
         loop {
             match self.remaps.done.try_recv() {
                 Ok(Ok(plan)) => {
@@ -753,12 +1004,10 @@ impl Runtime {
             }
         }
         if let Some(plan) = self.pool.take_pending() {
-            let mut ev: sys::CUevent = std::ptr::null_mut();
-            cuda_check(unsafe { sys::cuEventCreate(&mut ev, 0) }, "cuEventCreate")?;
-            cuda_check(unsafe { sys::cuEventRecord(ev, self.stream.cu_stream()) }, "cuEventRecord")?;
+            let after = [record(&self.stream)? as u64, record(&self.xfer)? as u64];
             self.remap_count += 1;
             tracing::debug!(unmap = plan.unmap.len(), map = plan.map.len(), "remap");
-            if self.remaps.jobs.send(Job::Run { plan, after: ev as u64 }).is_err() {
+            if self.remaps.jobs.send(Job::Run { plan, after }).is_err() {
                 bail!(Cuda, "the remap thread is gone");
             }
         }
@@ -924,6 +1173,25 @@ impl Runtime {
             self.stream.memset_zeros(&mut v)?;
         }
         self.stream.synchronize()?;
+        Ok(())
+    }
+
+    /// `len` bytes of a state from `offset` (synchronous).
+    pub fn read_state_at(&self, name: &str, offset: usize, len: usize) -> Result<Vec<u8>> {
+        self.whole_state(name)?;
+        let Some(s) = self.states.get(name) else {
+            bail!(Api, "no state `{name}`");
+        };
+        if (offset + len) as u64 > s.bytes {
+            bail!(Api, "state `{name}`: read [{offset}, {}) exceeds allocation {}", offset + len, s.bytes);
+        }
+        Ok(self.stream.clone_dtoh(&s.view(offset..offset + len)?)?)
+    }
+
+    /// Wait for everything enqueued on both streams.
+    pub fn synchronize(&self) -> Result<()> {
+        self.stream.synchronize()?;
+        self.xfer.synchronize()?;
         Ok(())
     }
 

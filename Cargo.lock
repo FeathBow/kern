@@ -762,6 +762,7 @@ dependencies = [
  "cudarc",
  "half",
  "kern-manifest",
+ "libc",
  "safetensors",
  "serde_json",
  "sha2",

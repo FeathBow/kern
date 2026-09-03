@@ -73,6 +73,41 @@ checkpoint drop 时回池，checkpoint 本身不会被 runtime 淘汰。
 逻辑时钟计数，不读钟，同样的 token 序列给同样的判定。决策（共享哪些页、拷哪一页、
 拷哪个 slot）由 `Pool` 在 host 上算成 `Copies`，runtime 只在 stream 上执行拷贝。
 kern run / kern test 仍默认 4096（test 的 workload 抽样以 capacity 为界）。
+
+**fork（K2）**：`Runtime::fork(&mut parent, len, tokens)` 从一条活着的序列的前 `len`
+个 token 分出一条新序列：整页共享（引用计数 +1），`len` 落在页中间时把那一页拷一份
+给孩子（父序列继续往自己那页写，孩子往拷贝写，各写各的），有 per-seq state 时把父
+的 slot 拷进新 slot——所以带循环状态的模型只能在父的当前位置分叉（state 就是此刻的
+state），纯 KV 模型可以分在任何位置。和 `lease_from` 是同一套 `Pool` 决策（`Copies`），
+区别只在源头是 `Lease` 还是 `Checkpoint`，父序列不用先 checkpoint。`lease_from`
+现在也接受 `len < checkpoint.len`（只对纯 KV 的 checkpoint，整页处起步）。
+
+**host 层（K3）**：`Runtime::reserve_host(bytes)` 一次 `cuMemHostAlloc` 一块 pinned
+DRAM（GB300 上约 100 ms/GiB，只做一次），分配前把线程的 NUMA 策略绑到这张卡所在的
+节点（sysfs 的 `numa_node` + `set_mempolicy`，分完恢复默认）：一个 GB300 tray 两颗
+Grace 各挂两张卡，本地 DRAM 拷贝 180 / 197 GiB/s（park / wake），跨到另一颗 CPU 的
+只有 115 / 117——同一个 6 GB 唤醒 31 ms 与 52 ms 的差别就在这里；`Runtime::park(checkpoint) -> Result<Parked,
+Checkpoint>` 把 checkpoint 的页和 slot 拷到 host（放不下时把 checkpoint 原样退回，调用方
+淘汰点什么再试），runtime 攥着这个 checkpoint 直到拷贝落地，页和 slot 才回池，前缀一直
+可查；`Runtime::wake(&parked, len, tokens) -> Waking` 租一条新序列并把前 `len` 个 token
+的页（和 slot）拷回来，`Runtime::awake(waking) -> Result<Lease, Waking>` 不阻塞地问拷贝
+落地没有，落地了才给出 `Lease`——没有 `Lease` 就没有程序能读到还在路上的页，这是类型
+保证的，不靠 compute stream 等事件（`Waking` 提前 drop 会等拷贝完再还页）。host 上
+的页也是链（`host.rs`，一页一个节点，按它拷自的 device 节点编号索引），同一 session
+下一轮再 park 只拷新增的页；一页在 host 上是所有分页 state 的该页首尾相接，slot 同理，
+按 64 KiB 粒度 first-fit（页从低端长、slot 从高端长）。拷贝走单独的 transfer stream
+（`cuMemcpy2DAsync`，连续页折成一次），transfer stream 在 compute stream 已入队的一切
+之后开始，compute stream 从不等它，decode 步不排在拷贝后面。`Prefix` 表按
+`Tier::{Resident, Parked}` 分层：`lookup` 先挑 resident；纯 KV 的 checkpoint 链在表里
+是一个随页增长的条目（每个深度都登记），所以 parked 的条目部分命中时只醒需要的页；
+`coldest(tier)` / `park(id, |cp| rt.park(cp))` / `remove(id)` 是调用方腾地方的三个动作。实测
+（tray08 GB300 单卡，2026-09-03，`crates/kern-runtime/examples/park_wake.rs`，写入
+按位置的 pattern、park、清零、wake、逐字节比对）：qwen3.8-27b 形状 98k token =
+125 页 × 49 MiB + 147 MiB slot = 6.12 GiB，park 34 ms（180 GiB/s）、wake 31 ms
+（197 GiB/s），发起各 0.1 ms，pinned 块落在另一颗 CPU 上时 53 / 52 ms；qwen3-4b 形状 40k token = 2500 页 × 2.25 MiB = 5.49 GiB，
+park 31 ms、wake 28 ms，发起 0.9 / 0.5 ms（2500 页折成 ~50 次拷贝）。C2C 单向 memcpy
+实测 116–119 GiB/s（D2H）/ 85–117（H2D），多 stream 不涨、双向叠加 208 GiB/s；2-D
+拷贝比逐页 memcpy 快得多，每次 memcpy 发起约 12 µs。
 `extern:cublaslt_bf16_tn` 特判：行主序 `C[m,n]=A[m,k]@W[n,k]^T` 映射成列
 主序 `C'=W_cm^T×A_cm`（transa=T、lda=ldb=k、m'=n、ldc=n）；
 `extern:cublaslt_bf16_tn_acc` 是同一条路径 β=1（`C += A@W^T`，c 参

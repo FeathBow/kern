@@ -138,6 +138,7 @@ struct Inner {
     /// Taken, not yet completed.
     in_flight: bool,
     remapped: bool,
+    next_node: u64,
 }
 
 /// Shared between the runtime and every live lease and checkpoint so a
@@ -285,6 +286,8 @@ pub struct Copies {
 /// A shared page and the chain before it. Holding a node holds every page
 /// up to it; the page returns when its last holder lets go.
 struct Node {
+    /// Unique for the pool's life: the host tier keys its copies by it.
+    id: u64,
     page: i32,
     parent: Option<Arc<Node>>,
     pool: Arc<Pool>,
@@ -307,10 +310,15 @@ impl Drop for Node {
 
 /// The pages of a chain, root first.
 fn chain_pages(chain: &Option<Arc<Node>>) -> Vec<i32> {
+    chain_nodes(chain).into_iter().map(|(_, p)| p).collect()
+}
+
+/// The (node id, page) of a chain, root first.
+fn chain_nodes(chain: &Option<Arc<Node>>) -> Vec<(u64, i32)> {
     let mut out = Vec::new();
     let mut cur = chain.as_ref();
     while let Some(n) = cur {
-        out.push(n.page);
+        out.push((n.id, n.page));
         cur = n.parent.as_ref();
     }
     out.reverse();
@@ -434,6 +442,7 @@ impl Pool {
             pending: None,
             in_flight: false,
             remapped: false,
+            next_node: 0,
         };
         let mut plan = Remap::default();
         for s in 0..first_slots {
@@ -590,6 +599,12 @@ impl Pool {
         Err(Denied::Remapping)
     }
 
+    fn node_id(&self) -> u64 {
+        let mut g = lock(&self.inner);
+        g.next_node += 1;
+        g.next_node
+    }
+
     fn release(&self, pages: &[i32], slot: Option<i32>) {
         let mut g = lock(&self.inner);
         for &p in pages {
@@ -636,25 +651,73 @@ impl Pool {
         Checkpoint { len, chain, slot: lease.slot.take(), pool: Arc::clone(self) }
     }
 
-    /// A sequence continuing from `cp` with room for `tokens` (more than
-    /// the checkpoint's `len`): the checkpoint's whole pages shared, a copy
-    /// of the page `len` ends inside when it does, fresh pages for the
-    /// rest, a fresh slot with the checkpoint's state copied in. The lease
-    /// names positions from `len` on.
-    pub fn restore(self: &Arc<Pool>, cp: &Checkpoint, tokens: usize) -> std::result::Result<(Lease, Copies), Denied> {
-        assert!(tokens > cp.len, "restoring {} tokens into room for {tokens}", cp.len);
-        let need = self.pages_for(tokens)?;
+    /// A sequence continuing from the first `len` tokens of `cp` with room
+    /// for `tokens` (more than `len`): those whole pages shared, a copy of
+    /// the page `len` ends inside when it does, fresh pages for the rest,
+    /// a fresh slot with the checkpoint's state copied in. `len` is the
+    /// checkpoint's own length or, for one without a state slot, any
+    /// whole number of its pages. The lease names positions from `len` on.
+    pub fn restore(
+        self: &Arc<Pool>,
+        cp: &Checkpoint,
+        len: usize,
+        tokens: usize,
+    ) -> std::result::Result<(Lease, Copies), Denied> {
         let unit = self.unit as usize;
-        let full = cp.len / unit;
-        let partial = if cp.len.is_multiple_of(unit) { None } else { Some(cp.chain.page) };
+        assert!(
+            len == cp.len || (cp.slot.is_none() && len >= 1 && len < cp.len && len.is_multiple_of(unit)),
+            "restoring {len} tokens of a checkpoint of {} ({} slot)",
+            cp.len,
+            if cp.slot.is_some() { "with a" } else { "no" }
+        );
+        assert!(tokens > len, "restoring {len} tokens into room for {tokens}");
+        let need = self.pages_for(tokens)?;
+        let full = len / unit;
+        let partial = if len.is_multiple_of(unit) { None } else { Some(cp.chain.page) };
         let (fresh, slot) = self.take(need - full)?;
-        // The chain through the whole pages: the checkpoint's own node, or
-        // its parent when the checkpoint's last page is the partial one.
-        let chain = if partial.is_some() { cp.chain.parent.clone() } else { Some(Arc::clone(&cp.chain)) };
+        // The chain through the whole pages: the node `full` pages deep.
+        let chain = ancestor(&Some(Arc::clone(&cp.chain)), cp.pages() - full);
         let mut pages = chain_pages(&chain);
         pages.extend_from_slice(&fresh);
         let copies = Copies { pages: partial.map(|p| (p, fresh[0])).into_iter().collect(), slot: cp.slot.zip(slot) };
-        Ok((Lease { chain, shared: full, pages, slot, prefix: cp.len, pool: Arc::clone(self) }, copies))
+        Ok((Lease { chain, shared: full, pages, slot, prefix: len, pool: Arc::clone(self) }, copies))
+    }
+
+    /// A sequence branched off the first `len` tokens of `parent`, which
+    /// keeps running, with room for `tokens`: the whole pages shared, the
+    /// page `len` ends inside copied, a fresh slot with the parent's state
+    /// copied in. A recurrent state is the parent's as of now, so with one
+    /// `len` must be the parent's position. The lease names positions from
+    /// `len` on.
+    pub fn fork(
+        self: &Arc<Pool>,
+        parent: &mut Lease,
+        len: usize,
+        tokens: usize,
+    ) -> std::result::Result<(Lease, Copies), Denied> {
+        assert!(len >= 1 && len <= parent.tokens(), "forking {len} tokens out of a lease of {}", parent.tokens());
+        assert!(tokens > len, "forking {len} tokens into room for {tokens}");
+        let unit = self.unit as usize;
+        let need = self.pages_for(tokens)?;
+        let full = len / unit;
+        let partial = if len.is_multiple_of(unit) { None } else { Some(parent.pages[full]) };
+        let (fresh, slot) = self.take(need - full)?;
+        let chain = if full > 0 { Some(parent.share(full)) } else { None };
+        let mut pages = chain_pages(&chain);
+        pages.extend_from_slice(&fresh);
+        let copies =
+            Copies { pages: partial.map(|p| (p, fresh[0])).into_iter().collect(), slot: parent.slot.zip(slot) };
+        Ok((Lease { chain, shared: full, pages, slot, prefix: len, pool: Arc::clone(self) }, copies))
+    }
+
+    /// A fresh lease whose first `len` positions the caller fills from
+    /// elsewhere (a parked checkpoint's bytes): its own pages, a slot, and
+    /// a prefix of `len`.
+    pub fn wake(self: &Arc<Pool>, len: usize, tokens: usize) -> std::result::Result<Lease, Denied> {
+        assert!(len >= 1 && tokens > len, "waking {len} tokens into room for {tokens}");
+        let need = self.pages_for(tokens)?;
+        let (pages, slot) = self.take(need)?;
+        Ok(Lease { chain: None, shared: 0, pages, slot, prefix: len, pool: Arc::clone(self) })
     }
 }
 
@@ -669,6 +732,8 @@ pub enum Denied {
     Busy,
     /// Fits once the remap in flight lands; ask again, evict nothing.
     Remapping,
+    /// The host tier has no room for the checkpoint; drop a parked one.
+    HostFull,
 }
 
 impl fmt::Display for Denied {
@@ -678,6 +743,7 @@ impl fmt::Display for Denied {
             Denied::ExceedsPool => write!(f, "no layout of the state budget holds it"),
             Denied::Busy => write!(f, "pages or sequence slots busy"),
             Denied::Remapping => write!(f, "pages or sequence slots being remapped"),
+            Denied::HostFull => write!(f, "no room in the host tier"),
         }
     }
 }
@@ -706,7 +772,8 @@ impl Lease {
     fn share(&mut self, keep: usize) -> Arc<Node> {
         while self.shared < keep {
             let page = self.pages[self.shared];
-            self.chain = Some(Arc::new(Node { page, parent: self.chain.take(), pool: Arc::clone(&self.pool) }));
+            let node = Node { id: self.pool.node_id(), page, parent: self.chain.take(), pool: Arc::clone(&self.pool) };
+            self.chain = Some(Arc::new(node));
             self.shared += 1;
         }
         ancestor(&self.chain, self.shared - keep).expect("keep is at least 1")
@@ -715,6 +782,12 @@ impl Lease {
     /// Pages held.
     pub fn pages(&self) -> usize {
         self.pages.len()
+    }
+
+    /// The page ids, in position order (a harness reading a restored
+    /// prefix back; programs get them through `extend_row`).
+    pub fn page_ids(&self) -> &[i32] {
+        &self.pages
     }
 
     /// Token slots held (whole pages, so at least what was asked for).
@@ -848,6 +921,12 @@ impl Checkpoint {
     /// The sequence slot holding the state, when the manifest has one.
     pub fn seq_slot(&self) -> Option<i32> {
         self.slot
+    }
+
+    /// (node id, page) of every page held, root first: what the host tier
+    /// keys its copies by.
+    pub fn nodes(&self) -> Vec<(u64, i32)> {
+        chain_nodes(&Some(Arc::clone(&self.chain)))
     }
 }
 
@@ -1188,7 +1267,7 @@ mod tests {
         // 20 tokens: page a0 whole, a1 holds positions 16..20.
         let (cp, _) = p.checkpoint(&mut a, 20).unwrap();
         drop(a);
-        let (b, copies) = p.restore(&cp, 40).unwrap();
+        let (b, copies) = p.restore(&cp, cp.tokens(), 40).unwrap();
         let [b0, b1, b2] = b.pages[..] else { panic!() };
         // Shares a0, gets a fresh copy of a1 (a1 itself stays the checkpoint's), one more fresh page.
         assert_eq!((b0, b.shared, b.prefix(), b.tokens()), (a0, 1, 20, 48));
@@ -1211,10 +1290,76 @@ mod tests {
         let mut a = p.lease(32).unwrap();
         let (cp, _) = p.checkpoint(&mut a, 32).unwrap();
         drop(a);
-        let (b, copies) = p.restore(&cp, 33).unwrap();
+        let (b, copies) = p.restore(&cp, cp.tokens(), 33).unwrap();
         assert_eq!((b.prefix(), b.shared, b.pages(), copies), (32, 2, 3, Copies::default()));
         assert_eq!(&b.pages[..2], &chain_pages(&Some(Arc::clone(&cp.chain)))[..]);
         assert_eq!(p.used(), 3);
+    }
+
+    #[test]
+    fn restore_at_a_shallower_page_of_a_pages_only_checkpoint() {
+        let p = pool();
+        let mut a = p.lease(40).unwrap();
+        let [a0, a1, _] = a.pages[..] else { panic!() };
+        let (cp, _) = p.checkpoint(&mut a, 36).unwrap(); // 3 pages, 4 tokens into the third
+        drop(a);
+        // 32 tokens: a0 and a1 shared, one fresh page.
+        let (c, copies) = p.restore(&cp, 32, 33).unwrap();
+        assert_eq!(
+            (&c.pages[..2], c.shared, c.prefix(), c.pages(), copies),
+            (&[a0, a1][..], 2, 32, 3, Copies::default())
+        );
+        drop(c);
+        // 16 tokens: page a0 shared, nothing copied.
+        let (b, copies) = p.restore(&cp, 16, 20).unwrap();
+        assert_eq!((b.pages[0], b.shared, b.prefix(), b.pages(), copies), (a0, 1, 16, 2, Copies::default()));
+        assert_ne!(b.pages[1], a1);
+    }
+
+    #[test]
+    #[should_panic(expected = "restoring 4 tokens of a checkpoint of 10 (with a slot)")]
+    fn a_stateful_checkpoint_restores_at_its_length_only() {
+        let p = Arc::new(Pool::new(&hybrid(), 8, 26, 4).unwrap().0);
+        let mut a = p.lease(16).unwrap();
+        let (cp, _) = p.checkpoint(&mut a, 10).unwrap();
+        let _ = p.restore(&cp, 4, 20);
+    }
+
+    #[test]
+    fn fork_shares_whole_pages_and_copies_the_partial_one_and_the_slot() {
+        let p = Arc::new(Pool::new(&hybrid(), 8, 26, 4).unwrap().0); // 4 slots, 7 pages
+        let mut a = p.lease(40).unwrap(); // 3 pages
+        let [a0, a1, _] = a.pages[..] else { panic!() };
+        let sa = a.seq_slot().unwrap();
+        // The parent is 20 tokens in: page a0 whole, a1 holds 16..20.
+        let (b, copies) = p.fork(&mut a, 20, 40).unwrap();
+        let [b0, b1, _] = b.pages[..] else { panic!() };
+        assert_eq!((b0, b.shared, b.prefix(), a.shared), (a0, 1, 20, 1));
+        assert_ne!(b1, a1);
+        assert_eq!(copies, Copies { pages: vec![(a1, b1)], slot: Some((sa, b.seq_slot().unwrap())) });
+        // Both keep writing their own copy of the page; a0 stays until both are gone.
+        assert_eq!((a.slot(20), b.slot(20)), (a1 as i64 * 16 + 4, b1 as i64 * 16 + 4));
+        assert_eq!((p.used(), p.slots_used()), (5, 2));
+        drop(a);
+        assert_eq!(p.used(), 3);
+        drop(b);
+        assert_eq!((p.used(), p.slots_used()), (0, 0));
+        // At a page boundary nothing is copied; before the first boundary nothing is shared.
+        let mut a = p.lease(32).unwrap();
+        let (b, copies) = p.fork(&mut a, 16, 32).unwrap();
+        assert_eq!((b.shared, copies.pages.len(), b.pages[0]), (1, 0, a.pages[0]));
+        let (c, copies) = p.fork(&mut a, 3, 32).unwrap();
+        assert_eq!((c.shared, c.prefix(), copies.pages), (0, 3, vec![(a.pages[0], c.pages[0])]));
+        assert_eq!(p.fork(&mut a, 3, 32).unwrap_err(), Denied::Busy);
+    }
+
+    #[test]
+    fn wake_is_a_fresh_lease_with_a_prefix() {
+        let p = pool();
+        let l = p.wake(20, 40).unwrap();
+        assert_eq!((l.pages(), l.shared, l.prefix(), l.chain.is_none(), p.used()), (3, 0, 20, true, 3));
+        assert_eq!(l.page_ids().len(), 3);
+        assert_eq!(l.slot(20), l.pages[1] as i64 * 16 + 4);
     }
 
     #[test]
@@ -1223,7 +1368,7 @@ mod tests {
         let p = pool();
         let mut a = p.lease(32).unwrap();
         let (cp, _) = p.checkpoint(&mut a, 20).unwrap();
-        let (b, _) = p.restore(&cp, 40).unwrap();
+        let (b, _) = p.restore(&cp, cp.tokens(), 40).unwrap();
         b.slot(19);
     }
 
@@ -1232,12 +1377,12 @@ mod tests {
         let p = pool();
         let mut a = p.lease(16).unwrap();
         let (cp, _) = p.checkpoint(&mut a, 16).unwrap();
-        assert_eq!(p.restore(&cp, 49).unwrap_err(), Denied::ExceedsRow { limit: 48 });
+        assert_eq!(p.restore(&cp, cp.tokens(), 49).unwrap_err(), Denied::ExceedsRow { limit: 48 });
         let _b = p.lease(48).unwrap();
         // 3 more pages held: the one fresh page a 17-token restore needs is gone.
-        assert_eq!(p.restore(&cp, 17).unwrap_err(), Denied::Busy);
+        assert_eq!(p.restore(&cp, cp.tokens(), 17).unwrap_err(), Denied::Busy);
         drop(a);
-        assert_eq!(p.restore(&cp, 17).unwrap_err(), Denied::Busy);
+        assert_eq!(p.restore(&cp, cp.tokens(), 17).unwrap_err(), Denied::Busy);
     }
 
     #[test]
@@ -1251,14 +1396,14 @@ mod tests {
         assert_ne!(sc, sa);
         assert_eq!((copies, p.slots_used()), (Copies { pages: vec![], slot: Some((sa, sc)) }, 2));
         // A slot each for a and cp: one left; a restore takes it and copies the state in.
-        let (b, copies) = p.restore(&cp, 17).unwrap();
+        let (b, copies) = p.restore(&cp, cp.tokens(), 17).unwrap();
         let sb = b.seq_slot().unwrap();
         assert_eq!((copies.slot, b.prefix(), p.slots_used()), (Some((sc, sb)), 10, 3));
         // No slot left; of the four free pages the restore needs two, the
         // other two hold a slot's worth of chunks.
-        assert_eq!(p.restore(&cp, 17).unwrap_err(), Denied::Remapping);
+        assert_eq!(p.restore(&cp, cp.tokens(), 17).unwrap_err(), Denied::Remapping);
         land(&p);
-        let (c, copies) = p.restore(&cp, 17).unwrap();
+        let (c, copies) = p.restore(&cp, cp.tokens(), 17).unwrap();
         assert_eq!((copies.slot, p.slots(), p.slots_used(), p.total()), (Some((sc, 4)), 5, 4, 5));
         drop((b, c));
         // Retiring a moves its slot to the checkpoint: no copy; its one page is the same one cp shares.
@@ -1351,7 +1496,7 @@ mod tests {
                 2 if !cps.is_empty() => {
                     let cp = &cps[rand(cps.len())];
                     if cp.tokens() < 48 {
-                        if let Ok((l, c)) = p.restore(cp, cp.tokens() + 1 + rand(48 - cp.tokens())) {
+                        if let Ok((l, c)) = p.restore(cp, cp.tokens(), cp.tokens() + 1 + rand(48 - cp.tokens())) {
                             assert_eq!(
                                 (l.prefix(), c.pages.len()),
                                 (cp.tokens(), (!cp.tokens().is_multiple_of(16)) as usize)

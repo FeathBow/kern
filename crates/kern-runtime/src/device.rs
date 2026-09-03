@@ -297,6 +297,113 @@ impl DeviceBuf {
     }
 }
 
+/// Page-locked host memory: the host tier's block, allocated once.
+pub(crate) struct Pinned {
+    ptr: *mut c_void,
+    bytes: u64,
+}
+
+// Only ever touched through copies enqueued from the runtime's thread.
+unsafe impl Send for Pinned {}
+unsafe impl Sync for Pinned {}
+
+impl Pinned {
+    /// `bytes` of pinned memory on the NUMA node `dev` hangs off (a GB300
+    /// tray has two Grace CPUs, two GPUs each: local DRAM copies at ~180
+    /// GiB/s per direction, the other socket's at ~115); anywhere when the
+    /// node cannot be told.
+    pub(crate) fn alloc(bytes: u64, dev: i32) -> Result<Pinned> {
+        let node = numa_node(dev);
+        if let Some(n) = node {
+            mempolicy(libc::MPOL_BIND, Some(n));
+        }
+        let mut ptr: *mut c_void = std::ptr::null_mut();
+        let r = cuda_check(unsafe { sys::cuMemHostAlloc(&mut ptr, bytes.max(1) as usize, 0) }, "cuMemHostAlloc");
+        if node.is_some() {
+            mempolicy(libc::MPOL_DEFAULT, None);
+        }
+        r?;
+        Ok(Pinned { ptr, bytes })
+    }
+
+    pub(crate) fn ptr(&self) -> u64 {
+        self.ptr as u64
+    }
+
+    pub(crate) fn bytes(&self) -> u64 {
+        self.bytes
+    }
+}
+
+impl Drop for Pinned {
+    fn drop(&mut self) {
+        unsafe { sys::cuMemFreeHost(self.ptr) };
+    }
+}
+
+/// The NUMA node of `dev`'s PCI slot, as sysfs reports it.
+fn numa_node(dev: i32) -> Option<u32> {
+    let mut id = [0u8; 32];
+    let r = unsafe { sys::cuDeviceGetPCIBusId(id.as_mut_ptr() as *mut std::ffi::c_char, id.len() as i32, dev) };
+    if r != sys::CUresult::CUDA_SUCCESS {
+        return None;
+    }
+    let id = std::ffi::CStr::from_bytes_until_nul(&id).ok()?.to_str().ok()?.to_ascii_lowercase();
+    let node = std::fs::read_to_string(format!("/sys/bus/pci/devices/{id}/numa_node")).ok()?;
+    node.trim().parse::<i32>().ok().filter(|&n| n >= 0).map(|n| n as u32)
+}
+
+/// This thread's memory policy: bound to one node, or the default.
+fn mempolicy(mode: i32, node: Option<u32>) {
+    let mask: [u64; 16] = node.map_or([0; 16], |n| {
+        let mut m = [0u64; 16];
+        m[(n / 64) as usize] |= 1 << (n % 64);
+        m
+    });
+    let (ptr, bits) = match node {
+        Some(_) => (mask.as_ptr(), mask.len() * 64),
+        None => (std::ptr::null(), 0),
+    };
+    // Best effort: a refused policy only costs bandwidth.
+    unsafe { libc::syscall(libc::SYS_set_mempolicy, mode, ptr, bits) };
+}
+
+/// `rows` rows of `width` bytes between device address `dev.0` (rows
+/// `dev.1` apart) and host address `host.0` (rows `host.1` apart), on
+/// `stream`, towards the host or the device: one copy-engine transfer
+/// either way.
+pub(crate) fn copy_2d(
+    stream: sys::CUstream,
+    dev: (u64, u64),
+    host: (u64, u64),
+    width: u64,
+    rows: u64,
+    to_host: bool,
+) -> Result<()> {
+    let ((dev, dpitch), (host, hpitch)) = (dev, host);
+    let (device, pinned) = (sys::CUmemorytype::CU_MEMORYTYPE_DEVICE, sys::CUmemorytype::CU_MEMORYTYPE_HOST);
+    let (src, dst) = if to_host { (device, pinned) } else { (pinned, device) };
+    let c = sys::CUDA_MEMCPY2D {
+        srcXInBytes: 0,
+        srcY: 0,
+        srcMemoryType: src,
+        srcHost: if to_host { std::ptr::null() } else { host as *const c_void },
+        srcDevice: if to_host { dev } else { 0 },
+        srcArray: std::ptr::null_mut(),
+        srcPitch: if to_host { dpitch } else { hpitch } as usize,
+        dstXInBytes: 0,
+        dstY: 0,
+        dstMemoryType: dst,
+        dstHost: if to_host { host as *mut c_void } else { std::ptr::null_mut() },
+        dstDevice: if to_host { 0 } else { dev },
+        dstArray: std::ptr::null_mut(),
+        dstPitch: if to_host { hpitch } else { dpitch } as usize,
+        WidthInBytes: width as usize,
+        Height: rows as usize,
+    };
+    cuda_check(unsafe { sys::cuMemcpy2DAsync_v2(&c, stream) }, "cuMemcpy2DAsync")
+}
+
 /// The allocation granularity for chunks on `dev`.
 pub(crate) fn chunk_granularity(dev: i32) -> Result<usize> {
     granularity(&alloc_prop(dev, none_handle_type()))
