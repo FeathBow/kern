@@ -7,6 +7,9 @@
   },
   "seqs": {
    "max": 8
+  },
+  "rows": {
+   "max": 8
   }
  },
  "topology": {
@@ -26,7 +29,7 @@
   "token_ids": {
    "dtype": "i64",
    "shape": [
-    "tokens"
+    "rows"
    ],
    "kind": "input",
    "domain": {
@@ -80,7 +83,7 @@
   "next_token": {
    "dtype": "i64",
    "shape": [
-    "seqs"
+    "rows"
    ],
    "kind": "output",
    "domain": {
@@ -144,7 +147,7 @@
   "hidden": {
    "dtype": "bf16",
    "shape": [
-    "tokens",
+    "rows",
     7168
    ],
    "kind": "workspace"
@@ -152,7 +155,7 @@
   "prefix2": {
    "dtype": "bf16",
    "shape": [
-    "tokens",
+    "rows",
     7168
    ],
    "kind": "workspace"
@@ -160,7 +163,7 @@
   "normed": {
    "dtype": "bf16",
    "shape": [
-    "tokens",
+    "rows",
     7168
    ],
    "kind": "workspace"
@@ -168,7 +171,7 @@
   "blocks": {
    "dtype": "bf16",
    "shape": [
-    "tokens",
+    "rows",
     8,
     7168
    ],
@@ -313,7 +316,7 @@
   "routed_latent_norm": {
    "dtype": "bf16",
    "shape": [
-    "tokens",
+    "rows",
     3584
    ],
    "kind": "workspace"
@@ -321,7 +324,7 @@
   "routed_partial": {
    "dtype": "f32",
    "shape": [
-    "tokens",
+    "rows",
     7168
    ],
    "kind": "workspace"
@@ -329,7 +332,7 @@
   "shared_partial": {
    "dtype": "f32",
    "shape": [
-    "tokens",
+    "rows",
     12288
    ],
    "kind": "workspace"
@@ -337,7 +340,7 @@
   "shared_act": {
    "dtype": "bf16",
    "shape": [
-    "tokens",
+    "rows",
     6144
    ],
    "kind": "workspace"
@@ -345,7 +348,7 @@
   "shared_partial2": {
    "dtype": "f32",
    "shape": [
-    "tokens",
+    "rows",
     7168
    ],
    "kind": "workspace"
@@ -353,7 +356,7 @@
   "dense_partial": {
    "dtype": "f32",
    "shape": [
-    "tokens",
+    "rows",
     67584
    ],
    "kind": "workspace"
@@ -361,7 +364,7 @@
   "dense_act": {
    "dtype": "bf16",
    "shape": [
-    "tokens",
+    "rows",
     33792
    ],
    "kind": "workspace"
@@ -369,7 +372,7 @@
   "logit_partial": {
    "dtype": "f32",
    "shape": [
-    "tokens",
+    "rows",
     163840
    ],
    "kind": "workspace"
@@ -1070,7 +1073,7 @@
        1
       ],
       "grid": [
-       "tokens",
+       "rows",
        1,
        1
       ],
@@ -1143,7 +1146,7 @@
        1
       ],
       "grid": [
-       "tokens",
+       "rows",
        1,
        1
       ],
@@ -1207,7 +1210,7 @@
        1
       ],
       "grid": [
-       "tokens",
+       "rows",
        1,
        1
       ],
@@ -1276,7 +1279,7 @@
        1
       ],
       "grid": [
-       "tokens",
+       "rows",
        1,
        1
       ],
@@ -1336,7 +1339,7 @@
        1
       ],
       "grid": [
-       "tokens",
+       "rows",
        1,
        1
       ]
@@ -1700,14 +1703,14 @@
      "pmax": {
       "dtype": "f32",
       "shape": [
-       "tokens",
+       "rows",
        64
       ]
      },
      "pidx": {
       "dtype": "i32",
       "shape": [
-       "tokens",
+       "rows",
        64
       ]
      }
@@ -1728,7 +1731,7 @@
        1
       ],
       "grid": [
-       "tokens",
+       "rows",
        64,
        1
       ],
@@ -1762,7 +1765,7 @@
        1
       ],
       "grid": [
-       "tokens",
+       "rows",
        1,
        1
       ],
@@ -1809,7 +1812,7 @@
        1
       ],
       "grid": [
-       "tokens",
+       "rows",
        1,
        1
       ],
@@ -2379,7 +2382,7 @@
        1
       ],
       "grid": [
-       "tokens",
+       "rows",
        33,
        1
       ],
@@ -2477,7 +2480,7 @@
        1
       ],
       "grid": [
-       "tokens",
+       "rows",
        6,
        1
       ],
@@ -2516,7 +2519,7 @@
       "buf": "hidden"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -2540,7 +2543,7 @@
       "buf": "normed"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -2729,7 +2732,7 @@
       "i32": 1
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -2747,7 +2750,7 @@
       "buf": "dense_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 67584
@@ -2771,7 +2774,7 @@
       "buf": "dense_act"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -2789,7 +2792,7 @@
       "buf": "routed_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
@@ -2822,7 +2825,7 @@
       "i32": 0
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -2846,7 +2849,7 @@
       "buf": "normed"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -3037,7 +3040,7 @@
       "i32": 0
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -3245,7 +3248,7 @@
       "buf": "routed_latent_norm"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -3263,7 +3266,7 @@
       "buf": "routed_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
@@ -3290,7 +3293,7 @@
       "buf": "shared_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 12288
@@ -3314,7 +3317,7 @@
       "buf": "shared_act"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -3332,7 +3335,7 @@
       "buf": "shared_partial2"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
@@ -3365,7 +3368,7 @@
       "i32": 1
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -3389,7 +3392,7 @@
       "buf": "normed"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -3580,7 +3583,7 @@
       "i32": 0
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -3788,7 +3791,7 @@
       "buf": "routed_latent_norm"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -3806,7 +3809,7 @@
       "buf": "routed_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
@@ -3833,7 +3836,7 @@
       "buf": "shared_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 12288
@@ -3857,7 +3860,7 @@
       "buf": "shared_act"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -3875,7 +3878,7 @@
       "buf": "shared_partial2"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
@@ -3908,7 +3911,7 @@
       "i32": 1
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -3932,7 +3935,7 @@
       "buf": "normed"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -4110,7 +4113,7 @@
       "i32": 0
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -4318,7 +4321,7 @@
       "buf": "routed_latent_norm"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -4336,7 +4339,7 @@
       "buf": "routed_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
@@ -4363,7 +4366,7 @@
       "buf": "shared_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 12288
@@ -4387,7 +4390,7 @@
       "buf": "shared_act"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -4405,7 +4408,7 @@
       "buf": "shared_partial2"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
@@ -4438,7 +4441,7 @@
       "i32": 1
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -4462,7 +4465,7 @@
       "buf": "normed"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -4480,7 +4483,7 @@
       "buf": "logit_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 163840

@@ -1,6 +1,6 @@
 {
  "schema_version": 3,
- "model": "kimi-k3-pruned-75pct/4l/ep8",
+ "model": "kimi-k3-pruned-75pct/4l/ep4-tp4",
  "vars": {
   "tokens": {
    "max": 8
@@ -9,12 +9,13 @@
    "max": 8
   },
   "rows": {
-   "max": 8
+   "max": 32
   }
  },
  "topology": {
   "groups": {
-   "ep": 8
+   "ep": 4,
+   "tp": 4
   }
  },
  "states": {
@@ -50,7 +51,7 @@
    "dtype": "i32",
    "shape": [
     "seqs",
-    2
+    256
    ],
    "kind": "input",
    "domain": {
@@ -93,7 +94,7 @@
   "slab": {
    "dtype": "u8",
    "shape": [
-    11196265056
+    6645999680
    ],
    "kind": "carry",
    "export": true
@@ -101,7 +102,7 @@
   "slab_peers": {
    "dtype": "u64",
    "shape": [
-    8
+    4
    ],
    "kind": "peer",
    "of": "slab",
@@ -110,9 +111,40 @@
   "stats": {
    "dtype": "i32",
    "shape": [
-    28
+    56
    ],
    "kind": "workspace"
+  },
+  "tp_sym": {
+   "dtype": "u8",
+   "shape": [
+    3670016
+   ],
+   "kind": "carry",
+   "export": true
+  },
+  "tp_peers": {
+   "dtype": "u64",
+   "shape": [
+    4
+   ],
+   "kind": "peer",
+   "of": "tp_sym",
+   "group": "tp"
+  },
+  "tp_epochs": {
+   "dtype": "u32",
+   "shape": [
+    256
+   ],
+   "kind": "carry"
+  },
+  "tp_err": {
+   "dtype": "i32",
+   "shape": [
+    1
+   ],
+   "kind": "output"
   },
   "embed": {
    "dtype": "bf16",
@@ -182,6 +214,22 @@
    "shape": [
     "tokens",
     7168
+   ],
+   "kind": "workspace"
+  },
+  "hidden_partial_all": {
+   "dtype": "f32",
+   "shape": [
+    "rows",
+    7168
+   ],
+   "kind": "workspace"
+  },
+  "routed_latent_all": {
+   "dtype": "bf16",
+   "shape": [
+    "rows",
+    3584
    ],
    "kind": "workspace"
   },
@@ -630,28 +678,28 @@
   "layers.1.l1_weights": {
    "dtype": "u8",
    "shape": [
-    308281344
+    616562688
    ],
    "kind": "weight"
   },
   "layers.1.l1_weights_sf": {
    "dtype": "i32",
    "shape": [
-    4816896
+    9633792
    ],
    "kind": "weight"
   },
   "layers.1.l2_weights": {
    "dtype": "u8",
    "shape": [
-    154140672
+    308281344
    ],
    "kind": "weight"
   },
   "layers.1.l2_weights_sf": {
    "dtype": "i32",
    "shape": [
-    2408448
+    4816896
    ],
    "kind": "weight"
   },
@@ -809,28 +857,28 @@
   "layers.2.l1_weights": {
    "dtype": "u8",
    "shape": [
-    308281344
+    616562688
    ],
    "kind": "weight"
   },
   "layers.2.l1_weights_sf": {
    "dtype": "i32",
    "shape": [
-    4816896
+    9633792
    ],
    "kind": "weight"
   },
   "layers.2.l2_weights": {
    "dtype": "u8",
    "shape": [
-    154140672
+    308281344
    ],
    "kind": "weight"
   },
   "layers.2.l2_weights_sf": {
    "dtype": "i32",
    "shape": [
-    2408448
+    4816896
    ],
    "kind": "weight"
   },
@@ -979,28 +1027,28 @@
   "layers.3.l1_weights": {
    "dtype": "u8",
    "shape": [
-    308281344
+    616562688
    ],
    "kind": "weight"
   },
   "layers.3.l1_weights_sf": {
    "dtype": "i32",
    "shape": [
-    4816896
+    9633792
    ],
    "kind": "weight"
   },
   "layers.3.l2_weights": {
    "dtype": "u8",
    "shape": [
-    154140672
+    308281344
    ],
    "kind": "weight"
   },
   "layers.3.l2_weights_sf": {
    "dtype": "i32",
    "shape": [
-    2408448
+    4816896
    ],
    "kind": "weight"
   }
@@ -1045,6 +1093,10 @@
   "k3_router_argmax": {
    "source": "k3_router_argmax.cubin",
    "sha256": "33255ebce3a483c1ad43898bf19f3a49149878a443c4d9f0ab8b4addd9eb6f20"
+  },
+  "peer_collective": {
+   "source": "peer_collective.cubin",
+   "sha256": "5578dc834ddb7924bb4d1bb7ffe5eaeaaddfac62c41d56689abe9306d78c52ed"
   }
  },
  "ops": {
@@ -1640,7 +1692,7 @@
         "param": 3
        },
        {
-        "i32": 2
+        "i32": 256
        },
        {
         "i64": 36864
@@ -1837,6 +1889,170 @@
     ]
    }
   },
+  "tp_allgather_f32": {
+   "params": [
+    "in buffer<f32>",
+    "out buffer<f32>",
+    "inout buffer<u8>",
+    "in buffer<u64>",
+    "inout buffer<u32>",
+    "out buffer<i32>",
+    "i32",
+    "i32"
+   ],
+   "impl": {
+    "launches": [
+     {
+      "module": "peer_collective",
+      "entry": "kern_peer_allgather",
+      "params": [
+       "in buffer<f32>",
+       "out buffer<f32>",
+       "inout buffer<u8>",
+       "in buffer<u64>",
+       "inout buffer<u32>",
+       "out buffer<i32>",
+       "i32",
+       "i32",
+       "i32",
+       "i32",
+       "i32",
+       "i64"
+      ],
+      "block": [
+       256,
+       1,
+       1
+      ],
+      "grid": [
+       256,
+       1,
+       1
+      ],
+      "args": [
+       {
+        "param": 0
+       },
+       {
+        "param": 1
+       },
+       {
+        "param": 2
+       },
+       {
+        "param": 3
+       },
+       {
+        "param": 4
+       },
+       {
+        "param": 5
+       },
+       {
+        "param": 6
+       },
+       {
+        "i32": 4
+       },
+       {
+        "param": 7
+       },
+       {
+        "i32": 28672
+       },
+       {
+        "i32": 28672
+       },
+       {
+        "i64": 2000000000
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "tp_allgather_bf16": {
+   "params": [
+    "in buffer<bf16>",
+    "out buffer<bf16>",
+    "inout buffer<u8>",
+    "in buffer<u64>",
+    "inout buffer<u32>",
+    "out buffer<i32>",
+    "i32",
+    "i32"
+   ],
+   "impl": {
+    "launches": [
+     {
+      "module": "peer_collective",
+      "entry": "kern_peer_allgather",
+      "params": [
+       "in buffer<bf16>",
+       "out buffer<bf16>",
+       "inout buffer<u8>",
+       "in buffer<u64>",
+       "inout buffer<u32>",
+       "out buffer<i32>",
+       "i32",
+       "i32",
+       "i32",
+       "i32",
+       "i32",
+       "i64"
+      ],
+      "block": [
+       256,
+       1,
+       1
+      ],
+      "grid": [
+       256,
+       1,
+       1
+      ],
+      "args": [
+       {
+        "param": 0
+       },
+       {
+        "param": 1
+       },
+       {
+        "param": 2
+       },
+       {
+        "param": 3
+       },
+       {
+        "param": 4
+       },
+       {
+        "param": 5
+       },
+       {
+        "param": 6
+       },
+       {
+        "i32": 4
+       },
+       {
+        "param": 7
+       },
+       {
+        "i32": 7168
+       },
+       {
+        "i32": 28672
+       },
+       {
+        "i64": 2000000000
+       }
+      ]
+     }
+    ]
+   }
+  },
   "quant_x": {
    "params": [
     "in buffer<bf16>",
@@ -1962,7 +2178,7 @@
     "launches": [
      {
       "module": "k3_mega_moe",
-      "entry": "kern_k3_mega_moe_e224_r8_situ",
+      "entry": "kern_k3_mega_moe_e224_r4_situ",
       "params": [
        "out buffer<bf16>",
        "out buffer<i32>",
@@ -2026,7 +2242,7 @@
          "dtype": "u8",
          "dims": [
           3584,
-          905472
+          457344
          ],
          "strides": [
           3584
@@ -2044,11 +2260,11 @@
          "param": 6,
          "dtype": "i32",
          "dims": [
-          14487552,
+          7317504,
           28
          ],
          "strides": [
-          57950208
+          29270016
          ],
          "box": [
           256,
@@ -2063,7 +2279,7 @@
          "dtype": "u4",
          "dims": [
           3584,
-          172032
+          344064
          ],
          "strides": [
           1792
@@ -2082,7 +2298,7 @@
          "dtype": "i32",
          "dims": [
           6144,
-          784
+          1568
          ],
          "strides": [
           24576
@@ -2100,7 +2316,7 @@
          "dtype": "u8",
          "dims": [
           3072,
-          905472
+          457344
          ],
          "strides": [
           3072
@@ -2119,7 +2335,7 @@
          "dtype": "u8",
          "dims": [
           3072,
-          905472
+          457344
          ],
          "strides": [
           3072
@@ -2137,11 +2353,11 @@
          "param": 10,
          "dtype": "i32",
          "dims": [
-          14487552,
+          7317504,
           24
          ],
          "strides": [
-          57950208
+          29270016
          ],
          "box": [
           256,
@@ -2156,7 +2372,7 @@
          "dtype": "u4",
          "dims": [
           3072,
-          100352
+          200704
          ],
          "strides": [
           1536
@@ -2175,7 +2391,7 @@
          "dtype": "i32",
          "dims": [
           3584,
-          672
+          1344
          ],
          "strides": [
           14336
@@ -2193,7 +2409,7 @@
          "dtype": "u8",
          "dims": [
           3584,
-          905472
+          457344
          ],
          "strides": [
           3584
@@ -2211,11 +2427,11 @@
          "param": 6,
          "dtype": "i32",
          "dims": [
-          14487552,
+          7317504,
           28
          ],
          "strides": [
-          57950208
+          29270016
          ],
          "box": [
           256,
@@ -2230,7 +2446,7 @@
          "dtype": "u4",
          "dims": [
           3584,
-          172032
+          344064
          ],
          "strides": [
           1792
@@ -2249,7 +2465,7 @@
          "dtype": "i32",
          "dims": [
           6144,
-          784
+          1568
          ],
          "strides": [
           24576
@@ -2267,7 +2483,7 @@
          "dtype": "u8",
          "dims": [
           3072,
-          905472
+          457344
          ],
          "strides": [
           3072
@@ -2286,7 +2502,7 @@
          "dtype": "u8",
          "dims": [
           3072,
-          905472
+          457344
          ],
          "strides": [
           3072
@@ -2304,11 +2520,11 @@
          "param": 10,
          "dtype": "i32",
          "dims": [
-          14487552,
+          7317504,
           24
          ],
          "strides": [
-          57950208
+          29270016
          ],
          "box": [
           256,
@@ -2323,7 +2539,7 @@
          "dtype": "u4",
          "dims": [
           3072,
-          100352
+          200704
          ],
          "strides": [
           1536
@@ -2342,7 +2558,7 @@
          "dtype": "i32",
          "dims": [
           3584,
-          672
+          1344
          ],
          "strides": [
           14336
@@ -2704,11 +2920,41 @@
     ]
    },
    {
+    "label": "l0.gather_attn",
+    "op": "tp_allgather_f32",
+    "args": [
+     {
+      "buf": "hidden_partial"
+     },
+     {
+      "buf": "hidden_partial_all"
+     },
+     {
+      "buf": "tp_sym"
+     },
+     {
+      "buf": "tp_peers"
+     },
+     {
+      "buf": "tp_epochs"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
+     }
+    ]
+   },
+   {
     "label": "l0.res_mlp",
     "op": "land_add_attnres_rms",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "hidden_partial_all"
      },
      {
       "buf": "hidden"
@@ -3012,11 +3258,41 @@
     ]
    },
    {
+    "label": "l1.gather_attn",
+    "op": "tp_allgather_f32",
+    "args": [
+     {
+      "buf": "hidden_partial"
+     },
+     {
+      "buf": "hidden_partial_all"
+     },
+     {
+      "buf": "tp_sym"
+     },
+     {
+      "buf": "tp_peers"
+     },
+     {
+      "buf": "tp_epochs"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
+     }
+    ]
+   },
+   {
     "label": "l1.res_mlp",
     "op": "land_add_attnres_rms",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "hidden_partial_all"
      },
      {
       "buf": "hidden"
@@ -3146,11 +3422,11 @@
      },
      {
       "buf": "slab",
-      "offset": 148950624
+      "offset": 74587712
      },
      {
       "buf": "slab",
-      "offset": 209505888
+      "offset": 135142976
      },
      {
       "var": "tokens"
@@ -3169,11 +3445,11 @@
      },
      {
       "buf": "slab",
-      "offset": 211398240
+      "offset": 137035328
      },
      {
       "buf": "slab",
-      "offset": 213560928
+      "offset": 139198016
      },
      {
       "expr": {
@@ -3206,11 +3482,11 @@
      },
      {
       "buf": "slab",
-      "offset": 214642272
+      "offset": 140279360
      },
      {
       "buf": "slab",
-      "offset": 3459853920
+      "offset": 1779400256
      },
      {
       "buf": "layers.1.l1_weights"
@@ -3220,11 +3496,11 @@
      },
      {
       "buf": "slab",
-      "offset": 5086081632
+      "offset": 2600790080
      },
      {
       "buf": "slab",
-      "offset": 7867691616
+      "offset": 4005750848
      },
      {
       "buf": "layers.1.l2_weights"
@@ -3235,11 +3511,41 @@
     ]
    },
    {
+    "label": "l1.gather_moe",
+    "op": "tp_allgather_bf16",
+    "args": [
+     {
+      "buf": "routed_latent"
+     },
+     {
+      "buf": "routed_latent_all"
+     },
+     {
+      "buf": "tp_sym"
+     },
+     {
+      "buf": "tp_peers"
+     },
+     {
+      "buf": "tp_epochs"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
+     }
+    ]
+   },
+   {
     "label": "l1.lat_norm",
     "op": "rms",
     "args": [
      {
-      "buf": "routed_latent"
+      "buf": "routed_latent_all"
      },
      {
       "buf": "layers.1.gamma_lat"
@@ -3555,11 +3861,41 @@
     ]
    },
    {
+    "label": "l2.gather_attn",
+    "op": "tp_allgather_f32",
+    "args": [
+     {
+      "buf": "hidden_partial"
+     },
+     {
+      "buf": "hidden_partial_all"
+     },
+     {
+      "buf": "tp_sym"
+     },
+     {
+      "buf": "tp_peers"
+     },
+     {
+      "buf": "tp_epochs"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
+     }
+    ]
+   },
+   {
     "label": "l2.res_mlp",
     "op": "land_add_attnres_rms",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "hidden_partial_all"
      },
      {
       "buf": "hidden"
@@ -3689,11 +4025,11 @@
      },
      {
       "buf": "slab",
-      "offset": 148950624
+      "offset": 74587712
      },
      {
       "buf": "slab",
-      "offset": 209505888
+      "offset": 135142976
      },
      {
       "var": "tokens"
@@ -3712,11 +4048,11 @@
      },
      {
       "buf": "slab",
-      "offset": 211398240
+      "offset": 137035328
      },
      {
       "buf": "slab",
-      "offset": 213560928
+      "offset": 139198016
      },
      {
       "expr": {
@@ -3749,11 +4085,11 @@
      },
      {
       "buf": "slab",
-      "offset": 214642272
+      "offset": 140279360
      },
      {
       "buf": "slab",
-      "offset": 3459853920
+      "offset": 1779400256
      },
      {
       "buf": "layers.2.l1_weights"
@@ -3763,11 +4099,11 @@
      },
      {
       "buf": "slab",
-      "offset": 5086081632
+      "offset": 2600790080
      },
      {
       "buf": "slab",
-      "offset": 7867691616
+      "offset": 4005750848
      },
      {
       "buf": "layers.2.l2_weights"
@@ -3778,11 +4114,41 @@
     ]
    },
    {
+    "label": "l2.gather_moe",
+    "op": "tp_allgather_bf16",
+    "args": [
+     {
+      "buf": "routed_latent"
+     },
+     {
+      "buf": "routed_latent_all"
+     },
+     {
+      "buf": "tp_sym"
+     },
+     {
+      "buf": "tp_peers"
+     },
+     {
+      "buf": "tp_epochs"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
+     }
+    ]
+   },
+   {
     "label": "l2.lat_norm",
     "op": "rms",
     "args": [
      {
-      "buf": "routed_latent"
+      "buf": "routed_latent_all"
      },
      {
       "buf": "layers.2.gamma_lat"
@@ -4085,11 +4451,41 @@
     ]
    },
    {
+    "label": "l3.gather_attn",
+    "op": "tp_allgather_f32",
+    "args": [
+     {
+      "buf": "hidden_partial"
+     },
+     {
+      "buf": "hidden_partial_all"
+     },
+     {
+      "buf": "tp_sym"
+     },
+     {
+      "buf": "tp_peers"
+     },
+     {
+      "buf": "tp_epochs"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
+     }
+    ]
+   },
+   {
     "label": "l3.res_mlp",
     "op": "land_add_attnres_rms",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "hidden_partial_all"
      },
      {
       "buf": "hidden"
@@ -4219,11 +4615,11 @@
      },
      {
       "buf": "slab",
-      "offset": 148950624
+      "offset": 74587712
      },
      {
       "buf": "slab",
-      "offset": 209505888
+      "offset": 135142976
      },
      {
       "var": "tokens"
@@ -4242,11 +4638,11 @@
      },
      {
       "buf": "slab",
-      "offset": 211398240
+      "offset": 137035328
      },
      {
       "buf": "slab",
-      "offset": 213560928
+      "offset": 139198016
      },
      {
       "expr": {
@@ -4279,11 +4675,11 @@
      },
      {
       "buf": "slab",
-      "offset": 214642272
+      "offset": 140279360
      },
      {
       "buf": "slab",
-      "offset": 3459853920
+      "offset": 1779400256
      },
      {
       "buf": "layers.3.l1_weights"
@@ -4293,11 +4689,11 @@
      },
      {
       "buf": "slab",
-      "offset": 5086081632
+      "offset": 2600790080
      },
      {
       "buf": "slab",
-      "offset": 7867691616
+      "offset": 4005750848
      },
      {
       "buf": "layers.3.l2_weights"
@@ -4308,11 +4704,41 @@
     ]
    },
    {
+    "label": "l3.gather_moe",
+    "op": "tp_allgather_bf16",
+    "args": [
+     {
+      "buf": "routed_latent"
+     },
+     {
+      "buf": "routed_latent_all"
+     },
+     {
+      "buf": "tp_sym"
+     },
+     {
+      "buf": "tp_peers"
+     },
+     {
+      "buf": "tp_epochs"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
+     }
+    ]
+   },
+   {
     "label": "l3.lat_norm",
     "op": "rms",
     "args": [
      {
-      "buf": "routed_latent"
+      "buf": "routed_latent_all"
      },
      {
       "buf": "layers.3.gamma_lat"

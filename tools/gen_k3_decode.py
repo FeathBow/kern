@@ -3,6 +3,7 @@
 
     python3 tools/gen_k3_decode.py --layers 4 --ranks 1 > examples/k3-4l-ep1.json
     python3 tools/gen_k3_decode.py --ranks 4 > examples/k3-ep4.json
+    python3 tools/gen_k3_decode.py --ranks 4 --tp 4 > examples/k3-ep4-tp4.json
 
 One SPMD manifest per world: every rank runs the whole dense trunk on its own
 batch of sequences and serves its expert shard to the world through MegaMoE
@@ -12,6 +13,18 @@ delta rule, state in a `bytes_per_seq` line) or absorbed paged MLA (latent
 cache in `kv`), latent MoE (router → down-proj → MegaMoE → norm → up-proj,
 plus the shared experts) or the dense MLP — then the output mix, final norm,
 lm_head and argmax into `next_token`.
+
+`--tp R` makes the tray one batch (docs/multi-gpu.md "最终形态"): the `tp`
+group's R ranks each own `tokens` rows and run the trunk on all `rows` ==
+R * `tokens` rows in the "own rows first" layout (rank r's rows are rows
+0..tokens of every row buffer, rank q's follow at block (q - r) mod R). The
+ops that only work on their owner's rows — the attention with its paged /
+per-sequence state, the expert dispatch — run on rows 0..tokens; their
+outputs are all-gathered (tools/kernels-src/peer_collective.cu) and the
+rest runs on `rows`. This first cut shards nothing yet: the dense trunk is
+computed R times over, once per rank, which at decode costs the same weight
+read as once; it is the data flow the sharded weights (E5) drop into. The
+caller sets `rows` = R * `tokens` every run (kern does not relate vars).
 
 The kernels are kern's own (docs/k3-kernel-abi.md, tools/kernels-src/k3_*.cu):
 B is a runtime argument, every launch takes one row per block.x, and the
@@ -58,6 +71,9 @@ PAGE = 64
 LATENT_ROW = KV_A
 
 T = "tokens"
+R = "rows"
+TP_GRID = 256
+TP_TIMEOUT_NS = 2_000_000_000
 
 # Launch geometry per entry, as the kernel headers document it
 # (docs/k3-kernel-abi.md §1). grid.x is always the batch.
@@ -80,17 +96,20 @@ def is_mla(i):
     return i in MLA_LAYERS
 
 
-def launch(cubin, entry, grid=None, block=None, smem=None, **extra):
+def launch(cubin, entry, grid=None, block=None, smem=None, var=T, **extra):
+    """A launch of `entry`; `var` is the batch var its grid.x runs over."""
     g, b, s = GEOM.get(entry, (None, None, 0))
-    l = {**handwritten.hw(cubin), "entry": entry, "block": block or b, "grid": grid or g, **extra}
+    g = [var if d == T else d for d in (grid or g)]
+    l = {**handwritten.hw(cubin), "entry": entry, "block": block or b, "grid": g, **extra}
     s = s if smem is None else smem
     if s:
         l["shared_mem"] = s
     return l
 
 
-def build(layers, ranks, max_ctx, seqs_max):
+def build(layers, ranks, max_ctx, seqs_max, tp=1):
     assert 1 <= layers <= LAYERS
+    assert tp == 1 or ranks % tp == 0, "the tp group is a subset of the ep world"
     n_kda = sum(1 for i in range(layers) if not is_mla(i))
     mla_index = {i: k for k, i in enumerate(i for i in range(layers) if is_mla(i))}
     n_mla = len(mla_index)
@@ -104,10 +123,12 @@ def build(layers, ranks, max_ctx, seqs_max):
     def per_row(n):
         return [T, -(-n // 1024), 1]
 
+    # Ops on all `rows` of the tray batch (var R) and ops on their owner's
+    # rows only (var T); with tp == 1 the two are the same number.
     ops = {
         "embedding": {
             "params": ["in buffer<i64>", "in buffer<bf16>", "out buffer<bf16>", "i32", "i32"],
-            "impl": {"launches": [launch("embedding", "kern_embedding_i64_bf16", grid=[T, 1, 1], block=[256, 1, 1])]},
+            "impl": {"launches": [launch("embedding", "kern_embedding_i64_bf16", grid=[T, 1, 1], block=[256, 1, 1], var=R)]},
         },
         "gemm_f32": {
             "params": ["in buffer<bf16>", "in buffer<bf16>", "out buffer<f32>", "i32", "i32", "i32", "i32"],
@@ -117,23 +138,23 @@ def build(layers, ranks, max_ctx, seqs_max):
         "attnres_rms": {
             "params": ["in buffer<bf16>", "inout buffer<bf16>", "in buffer<f32>", "in buffer<bf16>", "out buffer<bf16>",
                        "i32", "i32", "i32"],
-            "impl": {"launches": [launch("k3_residual", "kern_k3_attnres_rms")]},
+            "impl": {"launches": [launch("k3_residual", "kern_k3_attnres_rms", var=R)]},
         },
         # Layer 0: nb == 0 reads no snapshot, so `blocks` is a pure output there
         # (the verifier wants the first touch of a workspace to be a write).
         "attnres_rms_first": {
             "params": ["in buffer<bf16>", "out buffer<bf16>", "in buffer<f32>", "in buffer<bf16>", "out buffer<bf16>",
                        "i32", "i32", "i32"],
-            "impl": {"launches": [launch("k3_residual", "kern_k3_attnres_rms")]},
+            "impl": {"launches": [launch("k3_residual", "kern_k3_attnres_rms", var=R)]},
         },
         "land_add_attnres_rms": {
             "params": ["in buffer<f32>", "in buffer<bf16>", "in buffer<bf16>", "in buffer<f32>", "in buffer<bf16>",
                        "out buffer<bf16>", "out buffer<bf16>", "i32", "i32", "i32"],
-            "impl": {"launches": [launch("k3_residual", "kern_k3_land_add_attnres_rms")]},
+            "impl": {"launches": [launch("k3_residual", "kern_k3_land_add_attnres_rms", var=R)]},
         },
         "land_add2": {
             "params": ["in buffer<f32>", "in buffer<f32>", "in buffer<bf16>", "out buffer<bf16>", "i32", "i32"],
-            "impl": {"launches": [launch("k3_residual", "kern_k3_land_add2")]},
+            "impl": {"launches": [launch("k3_residual", "kern_k3_land_add2", var=R)]},
         },
         # K2 / K3 KDA
         "conv_silu": {
@@ -166,12 +187,12 @@ def build(layers, ranks, max_ctx, seqs_max):
         "argmax_f32": {
             "params": ["in buffer<f32>", "out buffer<i64>", "i32"],
             "impl": {
-                "scratch": {"pmax": {"dtype": "f32", "shape": [T, 64]}, "pidx": {"dtype": "i32", "shape": [T, 64]}},
+                "scratch": {"pmax": {"dtype": "f32", "shape": [R, 64]}, "pidx": {"dtype": "i32", "shape": [R, 64]}},
                 "launches": [
-                    launch("k3_router_argmax", "kern_k3_argmax_f32_partial",
+                    launch("k3_router_argmax", "kern_k3_argmax_f32_partial", var=R,
                            params=["in buffer<f32>", "out buffer<f32>", "out buffer<i32>", "i32"],
                            args=[{"param": 0}, {"scratch": "pmax"}, {"scratch": "pidx"}, {"param": 2}]),
-                    launch("k3_router_argmax", "kern_k3_argmax_f32_final",
+                    launch("k3_router_argmax", "kern_k3_argmax_f32_final", var=R,
                            params=["in buffer<f32>", "in buffer<i32>", "out buffer<i64>", "i32"],
                            args=[{"scratch": "pmax"}, {"scratch": "pidx"}, {"param": 1}, {"i32": 64}]),
                 ],
@@ -179,9 +200,20 @@ def build(layers, ranks, max_ctx, seqs_max):
         },
         "rms": {
             "params": ["in buffer<bf16>", "in buffer<bf16>", "out buffer<bf16>", "i32", "i32"],
-            "impl": {"launches": [launch("k3_land", "kern_k3_rms")]},
+            "impl": {"launches": [launch("k3_land", "kern_k3_rms", var=R)]},
         },
     }
+    if tp > 1:
+        # The tray-local all-gather (peer_collective.cu): one op per row dtype,
+        # both over the same symmetric buffer and epoch carry.
+        coll = ["inout buffer<u8>", "in buffer<u64>", "inout buffer<u32>", "out buffer<i32>",
+                "i32", "i32", "i32", "i32", "i32", "i64"]
+        for dt in ["f32", "bf16"]:
+            ops[f"tp_allgather_{dt}"] = {
+                "params": [f"in buffer<{dt}>", f"out buffer<{dt}>"] + coll,
+                "impl": {"launches": [launch("peer_collective", "kern_peer_allgather",
+                                             grid=[TP_GRID, 1, 1], block=[256, 1, 1])]},
+            }
     # land / land_situ: grid.y depends on the width, one op per width.
     land_ops = {}
 
@@ -199,7 +231,7 @@ def build(layers, ranks, max_ctx, seqs_max):
         if name not in ops:
             ops[name] = {
                 "params": ["in buffer<f32>", "out buffer<bf16>", "i32", "i32"],
-                "impl": {"launches": [launch("k3_land", "kern_k3_land_situ", grid=per_row(n), block=[1024, 1, 1])]},
+                "impl": {"launches": [launch("k3_land", "kern_k3_land_situ", grid=per_row(n), block=[1024, 1, 1], var=R)]},
             }
         return name
 
@@ -207,16 +239,24 @@ def build(layers, ranks, max_ctx, seqs_max):
 
     # ---- buffers
     buffers = {
-        "token_ids": {"dtype": "i64", "shape": [T], "kind": "input", "domain": {"index_into": "embed"}},
+        "token_ids": {"dtype": "i64", "shape": [R], "kind": "input", "domain": {"index_into": "embed"}},
         "slot_mapping": {"dtype": "i64", "shape": [T], "kind": "input", "domain": {"index_into": "kv"}},
         "block_table": {"dtype": "i32", "shape": ["seqs", max_pages], "kind": "input",
                         "domain": {"index_into": "kv", "stride": PAGE}},
         "seq_lens": {"dtype": "i32", "shape": ["seqs"], "kind": "input", "domain": {"min": 1}},
         "kda.line_index": {"dtype": "i32", "shape": [n_kda, "seqs"], "kind": "input",
                            "domain": {"index_into": "kda", "stride": KDA_LINE_BYTES}},
-        "next_token": {"dtype": "i64", "shape": ["seqs"], "kind": "output", "domain": {"index_into": "embed"}},
+        "next_token": {"dtype": "i64", "shape": [R], "kind": "output", "domain": {"index_into": "embed"}},
         **mp["buffers"],
     }
+    ag_region = seqs_max * H * 4 // 8  # packs: the widest gathered row is the f32 attention landing
+    if tp > 1:
+        buffers.update({
+            "tp_sym": {"dtype": "u8", "shape": [2 * tp * ag_region * 16], "kind": "carry", "export": True},
+            "tp_peers": {"dtype": "u64", "shape": [tp], "kind": "peer", "of": "tp_sym", "group": "tp"},
+            "tp_epochs": {"dtype": "u32", "shape": [TP_GRID], "kind": "carry"},
+            "tp_err": {"dtype": "i32", "shape": [1], "kind": "output"},
+        })
     states = {
         "kv": {"bytes_per_token": n_mla * LATENT_ROW * 2},
         "kda": {"bytes_per_seq": n_kda * KDA_LINE_BYTES},
@@ -225,17 +265,20 @@ def build(layers, ranks, max_ctx, seqs_max):
     def weight(name, shape, dtype="bf16"):
         buffers[name] = {"dtype": dtype, "shape": list(shape), "kind": "weight"}
 
-    def work(name, width, dtype="bf16"):
-        buffers[name] = {"dtype": dtype, "shape": [T, width], "kind": "workspace"}
+    def work(name, width, dtype="bf16", var=T):
+        buffers[name] = {"dtype": dtype, "shape": [var, width], "kind": "workspace"}
 
     weight("embed", [V, H])
     weight("gamma_final", [H])
     weight("sw_out", [H], "f32")
     weight("w_lm", [V, H])
     for n in ["hidden", "prefix2", "normed"]:
-        work(n, H)
-    buffers["blocks"] = {"dtype": "bf16", "shape": [T, NB_MAX, H], "kind": "workspace"}
+        work(n, H, var=R)
+    buffers["blocks"] = {"dtype": "bf16", "shape": [R, NB_MAX, H], "kind": "workspace"}
     work("hidden_partial", H, "f32")
+    if tp > 1:
+        work("hidden_partial_all", H, "f32", var=R)
+        work("routed_latent_all", LATENT, var=R)
     work("kda_partial", KDA_FUSED, "f32")
     work("wsm_partial", WSM, "f32")
     for n in ["conv_q", "conv_k", "conv_v", "gated", "mla_gate"]:
@@ -247,15 +290,16 @@ def build(layers, ranks, max_ctx, seqs_max):
     work("topk_idx", TOPK, "i32")
     work("topk_weight", TOPK, "f32")
     work("latent_partial", LATENT, "f32")
-    for n in ["latent", "routed_latent", "routed_latent_norm"]:
+    for n in ["latent", "routed_latent"]:
         work(n, LATENT)
-    work("routed_partial", H, "f32")
-    work("shared_partial", 2 * SHARED, "f32")
-    work("shared_act", SHARED)
-    work("shared_partial2", H, "f32")
-    work("dense_partial", 2 * DENSE_I, "f32")
-    work("dense_act", DENSE_I)
-    work("logit_partial", V, "f32")
+    work("routed_latent_norm", LATENT, var=R)
+    work("routed_partial", H, "f32", var=R)
+    work("shared_partial", 2 * SHARED, "f32", var=R)
+    work("shared_act", SHARED, var=R)
+    work("shared_partial2", H, "f32", var=R)
+    work("dense_partial", 2 * DENSE_I, "f32", var=R)
+    work("dense_act", DENSE_I, var=R)
+    work("logit_partial", V, "f32", var=R)
 
     # ---- program
     prog = []
@@ -263,21 +307,31 @@ def build(layers, ranks, max_ctx, seqs_max):
     i32 = lambda v: {"i32": v}
     i64 = lambda v: {"i64": v}
     B = {"var": T}
+    RB = {"var": R}
 
     def step(label, op, *args):
         prog.append({"label": label, "op": op, "args": list(args)})
 
-    def gemm(label, a, w, c, n, k, ldc=None):
-        """c[tokens, ldc] (cols 0..n from c's offset) = a[tokens, k] @ w[n, k]^T, f32."""
-        step(label, "gemm_f32", a, w, c, B, i32(n), i32(k), i32(ldc or n))
+    def gemm(label, a, w, c, n, k, ldc=None, m=B):
+        """c[m, ldc] (cols 0..n from c's offset) = a[m, k] @ w[n, k]^T, f32."""
+        step(label, "gemm_f32", a, w, c, m, i32(n), i32(k), i32(ldc or n))
 
     def land(label, p, o, n, off, ldc):
         step(label, land_op(n), p, o, i32(n), i32(off), i32(ldc), B)
 
     def land_situ(label, p, act, n):
-        step(label, situ_op(n), p, act, i32(n), B)
+        step(label, situ_op(n), p, act, i32(n), RB)
 
-    step("embed", "embedding", b("token_ids"), b("embed"), b("hidden"), B, i32(H))
+    def gathered(label, own, whole, dt, row_bytes):
+        """The tray's rows of `own` (this rank's `tokens` rows): `whole` after
+        the all-gather with tp > 1, `own` itself otherwise."""
+        if tp == 1:
+            return own
+        step(label, f"tp_allgather_{dt}", own, whole, b("tp_sym"), b("tp_peers"), b("tp_epochs"), b("tp_err"),
+             {"rank": "tp"}, i32(tp), B, i32(row_bytes), i32(ag_region), i64(TP_TIMEOUT_NS))
+        return whole
+
+    step("embed", "embedding", b("token_ids"), b("embed"), b("hidden"), RB, i32(H))
 
     blocks = 0
     kda_k = 0
@@ -293,7 +347,7 @@ def build(layers, ranks, max_ctx, seqs_max):
         # residual mix in + snapshot + norm → normed
         step(L + "res_in", "attnres_rms" if nb_in > 0 else "attnres_rms_first", b("hidden"), b("blocks"),
              w("sw_attn") if nb_in > 0 else w("sw_mlp"),
-             w("gamma_in"), b("normed"), i32(nb_in), i32(int(snapshot)), B)
+             w("gamma_in"), b("normed"), i32(nb_in), i32(int(snapshot)), RB)
         if is_mla(i):
             k = mla_index[i]
             layer_off = k * PAGE * LATENT_ROW  # elements
@@ -315,15 +369,16 @@ def build(layers, ranks, max_ctx, seqs_max):
                  w("w_f_b"), w("dt_bias"), w("a_log"), w("gamma_o"), {"state": "kda"}, line, i64(KDA_LINE_BYTES),
                  b("gated"), B)
         gemm(L + "o_proj", b("gated"), w("w_o"), b("hidden_partial"), H, INNER)
+        attn_out = gathered(L + "gather_attn", b("hidden_partial"), b("hidden_partial_all"), "f32", H * 4)
         # attn_out landing + residual (or snapshot replace) + mix + norm → prefix2, normed
-        step(L + "res_mlp", "land_add_attnres_rms", b("hidden_partial"), b("hidden"), b("blocks"), w("sw_mlp"),
-             w("gamma_post"), b("prefix2"), b("normed"), i32(nb_mlp), i32(int(snapshot)), B)
+        step(L + "res_mlp", "land_add_attnres_rms", attn_out, b("hidden"), b("blocks"), w("sw_mlp"),
+             w("gamma_post"), b("prefix2"), b("normed"), i32(nb_mlp), i32(int(snapshot)), RB)
 
         if i == 0:
-            gemm(L + "wgu", b("normed"), w("wgu"), b("dense_partial"), 2 * DENSE_I, H)
+            gemm(L + "wgu", b("normed"), w("wgu"), b("dense_partial"), 2 * DENSE_I, H, m=RB)
             land_situ(L + "situ", b("dense_partial"), b("dense_act"), DENSE_I)
-            gemm(L + "w_dn", b("dense_act"), w("w_dn"), b("routed_partial"), H, DENSE_I)
-            step(L + "hidden", "land_add2", b("routed_partial"), b("routed_partial"), b("prefix2"), b("hidden"), i32(0), B)
+            gemm(L + "w_dn", b("dense_act"), w("w_dn"), b("routed_partial"), H, DENSE_I, m=RB)
+            step(L + "hidden", "land_add2", b("routed_partial"), b("routed_partial"), b("prefix2"), b("hidden"), i32(0), RB)
         else:
             gemm(L + "router", b("normed"), w("w_router"), b("router_partial"), EXPERTS, H)
             step(L + "topk", "router_topk", b("router_partial"), w("bias"), w("rs"), b("topk_idx"), b("topk_weight"), B)
@@ -331,12 +386,13 @@ def build(layers, ranks, max_ctx, seqs_max):
             land(L + "latent", b("latent_partial"), b("latent"), LATENT, 0, LATENT)
             prog.extend(gen_k3_moe.mega_pieces(ranks, seqs_max, wprefix=f"layers.{i}.")["steps"](
                 b("latent"), b("topk_idx"), b("topk_weight"), b("routed_latent"), label=L))
-            step(L + "lat_norm", "rms", b("routed_latent"), w("gamma_lat"), b("routed_latent_norm"), i32(LATENT), B)
-            gemm(L + "lat_up", b("routed_latent_norm"), w("w_lat_up"), b("routed_partial"), H, LATENT)
-            gemm(L + "wsh", b("normed"), w("wsh"), b("shared_partial"), 2 * SHARED, H)
+            routed = gathered(L + "gather_moe", b("routed_latent"), b("routed_latent_all"), "bf16", LATENT * 2)
+            step(L + "lat_norm", "rms", routed, w("gamma_lat"), b("routed_latent_norm"), i32(LATENT), RB)
+            gemm(L + "lat_up", b("routed_latent_norm"), w("w_lat_up"), b("routed_partial"), H, LATENT, m=RB)
+            gemm(L + "wsh", b("normed"), w("wsh"), b("shared_partial"), 2 * SHARED, H, m=RB)
             land_situ(L + "shared_situ", b("shared_partial"), b("shared_act"), SHARED)
-            gemm(L + "sh_down", b("shared_act"), w("sh_down"), b("shared_partial2"), H, SHARED)
-            step(L + "hidden", "land_add2", b("routed_partial"), b("shared_partial2"), b("prefix2"), b("hidden"), i32(1), B)
+            gemm(L + "sh_down", b("shared_act"), w("sh_down"), b("shared_partial2"), H, SHARED, m=RB)
+            step(L + "hidden", "land_add2", b("routed_partial"), b("shared_partial2"), b("prefix2"), b("hidden"), i32(1), RB)
 
         # weights
         weight(f"layers.{i}.gamma_in", [H])
@@ -377,15 +433,16 @@ def build(layers, ranks, max_ctx, seqs_max):
 
     assert blocks == blocks_total
     step("out.res", "attnres_rms", b("hidden"), b("blocks"), b("sw_out"), b("gamma_final"), b("normed"),
-         i32(blocks_total), i32(0), B)
-    gemm("out.lm_head", b("normed"), b("w_lm"), b("logit_partial"), V, H)
+         i32(blocks_total), i32(0), RB)
+    gemm("out.lm_head", b("normed"), b("w_lm"), b("logit_partial"), V, H, m=RB)
     step("out.argmax", "argmax_f32", b("logit_partial"), b("next_token"), i32(V))
 
+    groups = {"ep": ranks, **({"tp": tp} if tp > 1 else {})}
     m = {
         "schema_version": kern_manifest.SCHEMA_VERSION,
-        "model": f"kimi-k3-pruned-75pct/{layers}l/ep{ranks}",
-        "vars": {T: {"max": seqs_max}, "seqs": {"max": seqs_max}},
-        "topology": {"groups": {"ep": ranks}},
+        "model": f"kimi-k3-pruned-75pct/{layers}l/ep{ranks}" + (f"-tp{tp}" if tp > 1 else ""),
+        "vars": {T: {"max": seqs_max}, "seqs": {"max": seqs_max}, R: {"max": tp * seqs_max}},
+        "topology": {"groups": groups},
         "states": states,
         "buffers": buffers,
         "ops": ops,
@@ -400,8 +457,9 @@ def main():
     ap.add_argument("--ranks", type=int, default=4)
     ap.add_argument("--max-ctx", type=int, default=16384)
     ap.add_argument("--seqs", type=int, default=64, help="sequences per rank (the `tokens`/`seqs` bound)")
+    ap.add_argument("--tp", type=int, default=1, help="tray-batch group size (a divisor of --ranks)")
     a = ap.parse_args()
-    json.dump(build(a.layers, a.ranks, a.max_ctx, a.seqs), sys.stdout, indent=1)
+    json.dump(build(a.layers, a.ranks, a.max_ctx, a.seqs, a.tp), sys.stdout, indent=1)
     print()
 
 

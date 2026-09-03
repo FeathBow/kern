@@ -37,6 +37,14 @@
 //! (reported, not judged: the rows around it differ, and that is a
 //! near-tie's difference). Every reference batch forks the same way, so
 //! rows meet the same batch sizes in both runs (the K2 gate).
+//!
+//! A manifest with a `tp` group runs tray batches (docs/multi-gpu.md "最终
+//! 形态"): `tp` consecutive local ranks hold one batch of `tp * seqs` rows in
+//! the "own rows first" layout, every rank stages the whole batch's tokens
+//! (its peers' feeds are computable, their free-running tokens are in its
+//! own replicated output), and the copies of the batch the ranks compute
+//! must agree token for token. `--distinct` then also varies the random
+//! rows across the ranks of a group.
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -133,6 +141,9 @@ struct Outcome {
     tokens: Vec<i64>,
     /// greedy continuation past the fixture (`--free N`), row 0
     free: Vec<i64>,
+    /// Every rank of the tray group's rows as this rank computed them, by
+    /// group index and row: the group's replicated output must agree.
+    table: Vec<Vec<Vec<i64>>>,
     checked: usize,
     exact: usize,
     excused: usize,
@@ -275,11 +286,30 @@ impl Batch {
         self.stage_tables(rt)
     }
 
-    fn stage(&self, rt: &mut Runtime, toks: &[i64]) -> anyhow::Result<BTreeMap<String, u64>> {
+    /// Stage one step: this rank's `toks` as rows 0..B, then, for a tray
+    /// batch of `tp` ranks, rank `q`'s rows at block `(q - me) mod tp` from
+    /// `peer(q, row)` (docs/multi-gpu.md "own rows first").
+    fn stage(
+        &self,
+        rt: &mut Runtime,
+        toks: &[i64],
+        tp: usize,
+        me: usize,
+        peer: &dyn Fn(usize, usize) -> i64,
+    ) -> anyhow::Result<BTreeMap<String, u64>> {
         let b = self.leases.len();
         assert_eq!(toks.len(), b);
-        let e = BTreeMap::from([("tokens".to_string(), b as u64), ("seqs".to_string(), b as u64)]);
-        rt.write_input_at("token_ids", &le_bytes_i64(toks), &e)?;
+        let e = BTreeMap::from([
+            ("tokens".to_string(), b as u64),
+            ("seqs".to_string(), b as u64),
+            ("rows".to_string(), (tp * b) as u64),
+        ]);
+        let mut all = toks.to_vec();
+        for d in 1..tp {
+            let q = (me + d) % tp;
+            all.extend((0..b).map(|j| peer(q, j)));
+        }
+        rt.write_input_at("token_ids", &le_bytes_i64(&all), &e)?;
         let slots: Vec<i64> = self.leases.iter().map(|l| l.slot(self.pos)).collect();
         rt.write_input_at("slot_mapping", &le_bytes_i64(&slots), &e)?;
         rt.write_input_at("seq_lens", &le_bytes_i32(&vec![(self.pos + 1) as i32; b]), &e)?;
@@ -295,25 +325,31 @@ fn le_bytes_i32(v: &[i32]) -> Vec<u8> {
     v.iter().flat_map(|x| x.to_le_bytes()).collect()
 }
 
-/// Run `feeds` (one token list per row, all the same length) as a batch;
-/// returns each row's sampled tokens (`steps + free` of them) and, with
-/// `iters > 0`, the replay time. `fork` = (step, feed): after that many
-/// steps two children of row 0 join as the last rows, the twin feeding
-/// row 0's tokens and the stray `feed[step..]`; their tokens before the
-/// fork are empty.
+/// Run a batch: `feeds[q]` is rank `q`'s rows (one token list per row, all
+/// the same length) for every rank of this rank's tray group, `me` this
+/// rank's index in it; every rank runs the same schedule, so each can stage
+/// its peers' tokens from the feeds and, past them, from the tray batch's
+/// own replicated output. Returns every rank's sampled tokens by group index
+/// and row (`steps + free` of them) and, with `iters > 0`, the replay time.
+/// `fork` = (step, stray feeds): after that many steps two children of row
+/// 0 join as the last rows on every rank, the twin feeding row 0's tokens
+/// and the stray `stray[q][step..]`; their tokens before the fork are empty.
+#[allow(clippy::too_many_arguments)]
 fn run_batch(
     rt: &mut Runtime,
-    feeds: &[Vec<i64>],
+    feeds: &[Vec<Vec<i64>>],
+    me: usize,
     tokens_per_row: usize,
     graph: bool,
     iters: usize,
     free: usize,
-    fork: Option<(usize, &[i64])>,
-) -> anyhow::Result<(Vec<Vec<i64>>, Option<f64>)> {
-    let rows = feeds.len();
-    let steps = feeds[0].len();
+    fork: Option<(usize, &[Vec<i64>])>,
+) -> anyhow::Result<(Vec<Vec<Vec<i64>>>, Option<f64>)> {
+    let tp = feeds.len();
+    let rows = feeds[me].len();
+    let steps = feeds[me][0].len();
     let mut batch = Batch::new(rt, rows, tokens_per_row)?;
-    let mut out: Vec<Vec<i64>> = vec![Vec::with_capacity(steps + free); rows];
+    let mut out: Vec<Vec<Vec<i64>>> = vec![vec![Vec::with_capacity(steps + free); rows]; tp];
     let mut env = BTreeMap::new();
     // After the scripted feed, `free` more steps run each row on its own
     // argmax (a greedy continuation, for reading the text back).
@@ -321,17 +357,19 @@ fn run_batch(
         if fork.is_some_and(|(at, _)| at == step) {
             for _ in 0..2 {
                 batch.fork(rt, 0, tokens_per_row)?;
-                out.push(Vec::with_capacity(steps + free - step));
+                for o in out.iter_mut() {
+                    o.push(Vec::with_capacity(steps + free - step));
+                }
             }
         }
-        let feed = |r: usize| match fork {
-            Some((_, stray)) if r == rows + 1 => stray[step],
-            Some(_) if r == rows => feeds[0][step],
-            _ => feeds[r][step],
+        let feed = |q: usize, r: usize| match fork {
+            Some((_, stray)) if r == rows + 1 => stray[q][step],
+            Some(_) if r == rows => feeds[q][0][step],
+            _ => feeds[q][r][step],
         };
-        let toks: Vec<i64> =
-            (0..out.len()).map(|r| if step < steps { feed(r) } else { *out[r].last().unwrap() }).collect();
-        env = batch.stage(rt, &toks)?;
+        let token = |q: usize, r: usize| if step < steps { feed(q, r) } else { *out[q][r].last().unwrap() };
+        let toks: Vec<i64> = (0..out[me].len()).map(|r| token(me, r)).collect();
+        env = batch.stage(rt, &toks, tp, me, &token)?;
         if graph {
             if !rt.is_captured("decode", &env) {
                 rt.capture("decode", &env)?;
@@ -342,8 +380,13 @@ fn run_batch(
         }
         batch.pos += 1;
         let bytes = rt.read_output("next_token")?;
-        for (r, o) in out.iter_mut().enumerate() {
-            o.push(i64::from_le_bytes(bytes[r * 8..r * 8 + 8].try_into().unwrap()));
+        let b = out[me].len();
+        for (q, o) in out.iter_mut().enumerate() {
+            let block = (q + tp - me) % tp;
+            for (r, row) in o.iter_mut().enumerate() {
+                let at = (block * b + r) * 8;
+                row.push(i64::from_le_bytes(bytes[at..at + 8].try_into().unwrap()));
+            }
         }
     }
     let ms = if iters > 0 {
@@ -417,40 +460,51 @@ fn run_rank(
     let mut out = Outcome {
         tokens: Vec::new(),
         free: Vec::new(),
+        table: Vec::new(),
         checked: 0,
         exact: 0,
         excused: 0,
         failures: Vec::new(),
         step_ms: None,
     };
+    // The tray group this rank runs one batch with (`tp` in the manifest's
+    // topology); alone, a group of one.
+    let (me, tp) = topo.groups.get("tp").map(|g| (g.index as usize, g.size as usize)).unwrap_or((0, 1));
 
     // Every distinct feed first runs as a batch of `seqs` copies of itself,
     // so the mixed batch can be held to it row by row at the same batch
     // size (cuBLAS picks its kernels by m, so B = 1 and B = 8 legitimately
     // differ at near-ties; what must not differ is a row's result with other
     // rows' content around it). `--mixed` gives rows 1.. a random prompt
-    // (`--distinct`: a different one per row); plain mode feeds the fixture
-    // everywhere and only checks row agreement.
-    let feeds: Vec<Vec<i64>> = (0..seqs)
-        .map(|r| {
-            if mixed && r > 0 {
-                random_feed(steps, vocab, if distinct { seed + r as u64 } else { seed })
-            } else {
-                golden.feed.clone()
-            }
-        })
-        .collect();
+    // (`--distinct`: a different one per row, and per rank of the group);
+    // plain mode feeds the fixture everywhere and only checks row agreement.
+    // The feeds of every rank in the group are built here, since each rank
+    // stages the whole tray batch; the schedule below is the same on all of
+    // them, so the group's runs stay in step.
+    let feeds_of = |q: usize| -> Vec<Vec<i64>> {
+        (0..seqs)
+            .map(|r| {
+                if mixed && r > 0 {
+                    random_feed(steps, vocab, if distinct { seed + (q * seqs + r) as u64 } else { seed })
+                } else {
+                    golden.feed.clone()
+                }
+            })
+            .collect()
+    };
+    let feeds: Vec<Vec<Vec<i64>>> = (0..tp).map(feeds_of).collect();
     let mut solo: Vec<Option<Vec<i64>>> = vec![None; seqs];
     if mixed && seqs > 1 {
         for r in 0..seqs {
-            if let Some(same) = (0..r).find(|&q| feeds[q] == feeds[r]) {
+            if let Some(same) = (0..r).find(|&q| feeds[me][q] == feeds[me][r]) {
                 solo[r] = solo[same].clone();
                 continue;
             }
-            let copies = vec![feeds[r].clone(); seqs];
-            let shape = fork.map(|at| (at, feeds[r].as_slice()));
-            let (t, _) = run_batch(&mut rt, &copies, per_row, graph, 0, 0, shape)?;
-            solo[r] = Some(t.into_iter().next().unwrap());
+            let copies: Vec<Vec<Vec<i64>>> = (0..tp).map(|q| vec![feeds[q][r].clone(); seqs]).collect();
+            let strays: Vec<Vec<i64>> = (0..tp).map(|q| feeds[q][r].clone()).collect();
+            let shape = fork.map(|at| (at, strays.as_slice()));
+            let (t, _) = run_batch(&mut rt, &copies, me, per_row, graph, 0, 0, shape)?;
+            solo[r] = Some(t[me][0].clone());
         }
     }
     // The stray child: the fixture up to the fork, random after it. Every
@@ -461,17 +515,27 @@ fn run_rank(
         f.extend(random_feed(steps - at, vocab, seed + 97));
         f
     });
+    let strays: Vec<Vec<i64>> = vec![stray.clone().unwrap_or_default(); tp];
     let stray_solo = match (&stray, fork) {
         (Some(f), Some(at)) => {
-            let (t, _) = run_batch(&mut rt, &vec![f.clone(); seqs], per_row, graph, 0, 0, Some((at, f.as_slice())))?;
-            Some(t.into_iter().next().unwrap())
+            let copies = vec![vec![f.clone(); seqs]; tp];
+            let (t, _) = run_batch(&mut rt, &copies, me, per_row, graph, 0, 0, Some((at, strays.as_slice())))?;
+            Some(t[me][0].clone())
         }
         _ => None,
     };
-    let (tokens, ms) = run_batch(&mut rt, &feeds, per_row, graph, iters, free, fork.zip(stray.as_deref()))?;
+    let (table, ms) =
+        run_batch(&mut rt, &feeds, me, per_row, graph, iters, free, fork.map(|at| (at, strays.as_slice())))?;
+    let tokens = &table[me];
     out.step_ms = ms;
     out.tokens = tokens[0][..steps].to_vec();
     out.free = tokens[0][steps..].to_vec();
+    if tp > 1 {
+        let err = i32::from_le_bytes(rt.read_output("tp_err")?[..4].try_into().unwrap());
+        if err != 0 {
+            out.failures.push(format!("a tray collective never heard from group rank {}", err - 1));
+        }
+    }
     for (step, &got) in tokens[0][..steps].iter().enumerate() {
         if golden.argmax[step] < 0 {
             continue; // fed but unchecked (long-prompt fixture, tools/k3_oracle_dump.py --check-last)
@@ -523,6 +587,7 @@ fn run_rank(
             None => println!("  the stray's {} tokens match its from-scratch run", steps - at),
         }
     }
+    out.table = table;
     Ok(out)
 }
 
@@ -575,13 +640,19 @@ fn main() {
     let n = gpus.len();
     let world = world.unwrap_or(n);
     assert!(rank_base + n <= world, "ranks {rank_base}..{} exceed world {world}", rank_base + n);
+    // A `tp` group is a tray batch: `tp` consecutive local ranks, all in
+    // this process.
+    let tp =
+        kern_manifest::types::Manifest::from_json(&json).ok().and_then(|m| m.group_size("tp")).unwrap_or(1) as usize;
+    assert!(n.is_multiple_of(tp), "{n} local ranks do not split into tray groups of {tp}");
     let kernels = std::env::temp_dir().join(format!("kern-k3-golden-{}", std::process::id()));
     stage_cubins(&cubins, &kernels);
     println!(
-        "{}: {} layers, EP{world} ranks {rank_base}..{} on gpus {gpus:?}, {} fixture steps, {}{}",
+        "{}: {} layers, EP{world} ranks {rank_base}..{} on gpus {gpus:?}{}, {} fixture steps, {}{}",
         manifest.display(),
         golden.num_layers,
         rank_base + n,
+        if tp > 1 { format!(", tray batches of TP{tp}") } else { String::new() },
         golden.feed.len(),
         if graph { "graph replay" } else { "eager" },
         if seqs > 1 {
@@ -642,13 +713,24 @@ fn main() {
                 }
                 gate.wait();
                 let members = table.lock().unwrap().clone().unwrap();
-                rt.import_peers("ep", &members)
+                rt.import_peers("ep", &members)?;
+                if tp > 1 {
+                    let group: Vec<Handles> =
+                        posted.lock().unwrap()[local / tp * tp..][..tp].iter().map(|m| m.clone().unwrap()).collect();
+                    rt.import_peers("tp", &group)?;
+                }
+                Ok(())
             };
+            let mut topo = Topology::one("ep", rank as u64, world as u64);
+            if tp > 1 {
+                topo.groups
+                    .insert("tp".to_string(), kern_runtime::GroupRank { index: (local % tp) as u64, size: tp as u64 });
+            }
             let r = run_rank(
                 &json,
                 &kernels,
                 gpu,
-                &Topology::one("ep", rank as u64, world as u64),
+                &topo,
                 &files,
                 &golden,
                 graph,
@@ -699,6 +781,15 @@ fn main() {
                         ok = false;
                     }
                     _ => {}
+                }
+                // A tray batch is replicated: every rank of the group holds
+                // every rank's rows, and the copies must be the same tokens.
+                let head = local / tp * tp;
+                if let Some(Ok(h)) = &results[head] {
+                    if local != head && h.table != o.table {
+                        println!("  rank {rank}'s copy of the tray batch differs from rank {}'s", rank_base + head);
+                        ok = false;
+                    }
                 }
             }
             Some(Err(e)) => {

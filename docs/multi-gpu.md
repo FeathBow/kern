@@ -133,6 +133,33 @@ barrier ≈ 3.8 µs**，这是 TP 的固有成本，与提交方式无关。
 | P2P 原子 barrier | 3.8 µs | 4.8 µs |
 | 单卡单向裸拷贝核 写 / 读 | — | 710 / 750 GB/s（NVLink5 单向峰值 900） |
 
+### tray 内 collective（tray03 4×GB300，2026-09-03）
+
+`tools/kernels-src/peer_collective.cu`：one-shot allreduce 与 all-gather，flag 随
+数据走（每 16 B 槽 {d0, epoch, d1, epoch}，Lamport / NCCL LL 的形状），epoch 每
+CTA 一条 carry，奇偶双缓冲，超时报 err 不挂；无 barrier。`crates/kern-runtime/
+examples/peer_collective.rs` 逐元素验证 + captured burst 计时（grid 256）：
+
+| 每 rank 行数 B | allreduce f32 [4B, 7168] | all-gather [B, 7168] bf16 | all-gather [B, 28672] f32 |
+|---:|---:|---:|---:|
+| 1 | 5.2 µs（0.11 MB） | 4.5 µs | |
+| 4 | 8.4 µs（0.46 MB） | 4.7 µs | |
+| 16 | 25 µs（1.84 MB） | 5.4 µs | 8.6 µs |
+| 64 | 150 µs（7.3 MB，一次跑到 690，不稳） | | 24 µs |
+
+延迟底 ≈ barrier 的 3.75 µs 加一次数据；带宽差：B=16 的 one-shot 要推 11 MB
+（LL 把字节翻倍，再乘 3 个 peer），只发不收 17.5 µs（≈ 630 GB/s），全程 25 µs，
+其余是按槽轮询回读——LL 协议的已知上限。轮询里加 nanosleep 只会更慢；grid 从 128
+到 256 有用，再大没有；gpu-scope load 在 B=64 快一倍但内存模型不保证跨 GPU 写可
+见，弱 .cg load 干脆看不到 peer 的写，所以保留 .sys。B > 16 的下一步是 128 B 线
+一个 flag（LL128）或 two-shot。学习来源：low-latency-nccl 的 LL buffer（flag
+in payload、poison 模式、多缓冲），没用它的代码。
+
+第一块 E5 门禁（tray07，4 层 EP4×TP4 只加 gather 不切权重，`k3_golden`）：fixture
+37/40 + 3 excused 与 EP4 相同；`--seqs 4 --mixed --distinct` 各行独立、四卡的复制
+批逐 token 一致；`--fork 12` 双子行正确；步时 4 层 B=1 1.653 → 1.723 ms、B=8
+1.951 → 2.176 ms（7 次 all-gather + 未分片的 trunk 跑 4B 行）。
+
 ### GPU 自提交
 
 `cudaGraphInstantiateFlagDeviceLaunch` + 图尾 kernel
