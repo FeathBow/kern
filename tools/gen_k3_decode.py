@@ -21,10 +21,14 @@ R * `tokens` rows in the "own rows first" layout (rank r's rows are rows
 ops that only work on their owner's rows — the attention with its paged /
 per-sequence state, the expert dispatch — run on rows 0..tokens; their
 outputs are all-gathered (tools/kernels-src/peer_collective.cu) and the
-rest runs on `rows`. This first cut shards nothing yet: the dense trunk is
-computed R times over, once per rank, which at decode costs the same weight
-read as once; it is the data flow the sharded weights (E5) drop into. The
-caller sets `rows` = R * `tokens` every run (kern does not relate vars).
+rest runs on `rows`. The KDA layers are head-sharded: every rank holds
+HEADS / R heads of every row (weights from tools/shard_k3_tp.py, kernels
+built for that width, the state line that many heads long), runs them on
+all `rows`, and the o_proj partial is all-reduced. The rest of the dense
+trunk is still computed R times over, once per rank (the same weight read
+as once at decode); the MLP shards come next. The caller sets `rows` = R *
+`tokens` every run (kern does not relate vars) and leases every row's KDA
+line on every rank.
 
 The kernels are kern's own (docs/k3-kernel-abi.md, tools/kernels-src/k3_*.cu):
 B is a runtime argument, every launch takes one row per block.x, and the
@@ -96,11 +100,12 @@ def is_mla(i):
     return i in MLA_LAYERS
 
 
-def launch(cubin, entry, grid=None, block=None, smem=None, var=T, **extra):
-    """A launch of `entry`; `var` is the batch var its grid.x runs over."""
+def launch(cubin, entry, grid=None, block=None, smem=None, var=T, defines=None, **extra):
+    """A launch of `entry`; `var` is the batch var its grid.x runs over,
+    `defines` selects a variant build of the source (handwritten.hw)."""
     g, b, s = GEOM.get(entry, (None, None, 0))
     g = [var if d == T else d for d in (grid or g)]
-    l = {**handwritten.hw(cubin), "entry": entry, "block": block or b, "grid": g, **extra}
+    l = {**handwritten.hw(cubin, **(defines or {})), "entry": entry, "block": block or b, "grid": g, **extra}
     s = s if smem is None else smem
     if s:
         l["shared_mem"] = s
@@ -119,6 +124,18 @@ def build(layers, ranks, max_ctx, seqs_max, tp=1):
     blocks_total = -(-layers // ATTN_RES_BLOCK)
     assert blocks_total <= NB_MAX
     mp = gen_k3_moe.mega_pieces(ranks, seqs_max)
+    rows_max = tp * seqs_max
+    # This rank's KDA heads: whole, or the tray group's shard (heads, the
+    # per-head weights and the state line all HEADS / tp wide; the kernels
+    # are built for that width, tools/shard_k3_tp.py cuts the weights).
+    hl = HEADS // tp
+    inner_l, fused_l = hl * HEAD_DIM, 4 * hl * HEAD_DIM
+    line_l = hl * HEAD_DIM * HEAD_DIM * 4 + 3 * (3 * inner_l * 2)
+    kda_defs = {"HEADS": hl} if tp > 1 else None
+    # In a tray batch the KDA layers run on every row (their state is
+    # head-sharded, every rank holds a slice of every row's); alone, rows
+    # and tokens are the same number.
+    KV = R if tp > 1 else T
 
     def per_row(n):
         return [T, -(-n // 1024), 1]
@@ -160,13 +177,15 @@ def build(layers, ranks, max_ctx, seqs_max, tp=1):
         "conv_silu": {
             "params": ["in buffer<f32>", "in buffer<f32>", "inout state", "in buffer<i32>", "i64",
                        "out buffer<bf16>", "out buffer<bf16>", "out buffer<bf16>", "i32"],
-            "impl": {"launches": [launch("k3_conv_silu", "kern_k3_conv_silu")]},
+            "impl": {"launches": [launch("k3_conv_silu", "kern_k3_conv_silu", grid=[T, 3, inner_l // 512],
+                                         var=KV, defines=kda_defs)]},
         },
         "kda_core": {
             "params": ["in buffer<bf16>", "in buffer<bf16>", "in buffer<bf16>", "in buffer<f32>", "in buffer<f32>",
                        "in buffer<bf16>", "in buffer<f32>", "in buffer<f32>", "in buffer<f32>",
                        "inout state", "in buffer<i32>", "i64", "out buffer<bf16>", "i32"],
-            "impl": {"launches": [launch("k3_kda_core", "kern_k3_kda_core")]},
+            "impl": {"launches": [launch("k3_kda_core", "kern_k3_kda_core", grid=[T, hl, 1], var=KV,
+                                         defines=kda_defs)]},
         },
         # K4 / K5 MLA
         "mla_prep": {
@@ -214,6 +233,11 @@ def build(layers, ranks, max_ctx, seqs_max, tp=1):
                 "impl": {"launches": [launch("peer_collective", "kern_peer_allgather",
                                              grid=[TP_GRID, 1, 1], block=[256, 1, 1])]},
             }
+        ops["tp_allreduce_f32"] = {
+            "params": ["in buffer<f32>", "out buffer<f32>"] + coll,
+            "impl": {"launches": [launch("peer_collective", "kern_peer_allreduce_f32",
+                                         grid=[TP_GRID, 1, 1], block=[256, 1, 1])]},
+        }
     # land / land_situ: grid.y depends on the width, one op per width.
     land_ops = {}
 
@@ -244,26 +268,32 @@ def build(layers, ranks, max_ctx, seqs_max, tp=1):
         "block_table": {"dtype": "i32", "shape": ["seqs", max_pages], "kind": "input",
                         "domain": {"index_into": "kv", "stride": PAGE}},
         "seq_lens": {"dtype": "i32", "shape": ["seqs"], "kind": "input", "domain": {"min": 1}},
-        "kda.line_index": {"dtype": "i32", "shape": [n_kda, "seqs"], "kind": "input",
-                           "domain": {"index_into": "kda", "stride": KDA_LINE_BYTES}},
+        "kda.line_index": {"dtype": "i32", "shape": [n_kda, R], "kind": "input",
+                           "domain": {"index_into": "kda", "stride": line_l}},
         "next_token": {"dtype": "i64", "shape": [R], "kind": "output", "domain": {"index_into": "embed"}},
         **mp["buffers"],
     }
     ag_region = seqs_max * H * 4 // 8  # packs: the widest gathered row is the f32 attention landing
+    ar_region = rows_max * H // 2  # packs: the whole tray batch's f32 [rows, H] partial
     if tp > 1:
         buffers.update({
             "tp_sym": {"dtype": "u8", "shape": [2 * tp * ag_region * 16], "kind": "carry", "export": True},
             "tp_peers": {"dtype": "u64", "shape": [tp], "kind": "peer", "of": "tp_sym", "group": "tp"},
             "tp_epochs": {"dtype": "u32", "shape": [TP_GRID], "kind": "carry"},
+            "tp_sym_ar": {"dtype": "u8", "shape": [2 * tp * ar_region * 16], "kind": "carry", "export": True},
+            "tp_peers_ar": {"dtype": "u64", "shape": [tp], "kind": "peer", "of": "tp_sym_ar", "group": "tp"},
+            "tp_epochs_ar": {"dtype": "u32", "shape": [TP_GRID], "kind": "carry"},
             "tp_err": {"dtype": "i32", "shape": [1], "kind": "output"},
         })
     states = {
         "kv": {"bytes_per_token": n_mla * LATENT_ROW * 2},
-        "kda": {"bytes_per_seq": n_kda * KDA_LINE_BYTES},
+        "kda": {"bytes_per_seq": n_kda * line_l},
     }
 
     def weight(name, shape, dtype="bf16"):
         buffers[name] = {"dtype": dtype, "shape": list(shape), "kind": "weight"}
+
+    b = lambda name, off=0: {"buf": name, "offset": off} if off else {"buf": name}
 
     def work(name, width, dtype="bf16", var=T):
         buffers[name] = {"dtype": dtype, "shape": [var, width], "kind": "workspace"}
@@ -279,10 +309,15 @@ def build(layers, ranks, max_ctx, seqs_max, tp=1):
     if tp > 1:
         work("hidden_partial_all", H, "f32", var=R)
         work("routed_latent_all", LATENT, var=R)
-    work("kda_partial", KDA_FUSED, "f32")
-    work("wsm_partial", WSM, "f32")
-    for n in ["conv_q", "conv_k", "conv_v", "gated", "mla_gate"]:
+        work("o_partial", H, "f32", var=R)
+        work("gated_kda", inner_l, var=R)
+    work("kda_partial", fused_l, "f32", var=KV)
+    work("wsm_partial", WSM, "f32", var=KV)
+    for n in ["conv_q", "conv_k", "conv_v"]:
+        work(n, inner_l, var=KV)
+    for n in ["gated", "mla_gate"]:
         work(n, INNER)
+    gated_kda = b("gated_kda") if tp > 1 else b("gated")
     work("mla_fused_partial", MLA_FUSED, "f32")
     work("q_norm", Q_LORA)
     work("q_partial", Q_B, "f32")
@@ -303,7 +338,6 @@ def build(layers, ranks, max_ctx, seqs_max, tp=1):
 
     # ---- program
     prog = []
-    b = lambda name, off=0: {"buf": name, "offset": off} if off else {"buf": name}
     i32 = lambda v: {"i32": v}
     i64 = lambda v: {"i64": v}
     B = {"var": T}
@@ -329,6 +363,12 @@ def build(layers, ranks, max_ctx, seqs_max, tp=1):
             return own
         step(label, f"tp_allgather_{dt}", own, whole, b("tp_sym"), b("tp_peers"), b("tp_epochs"), b("tp_err"),
              {"rank": "tp"}, i32(tp), B, i32(row_bytes), i32(ag_region), i64(TP_TIMEOUT_NS))
+        return whole
+
+    def reduced(label, partial, whole):
+        """The tray group's sum of a head-sharded f32 [rows, H] partial."""
+        step(label, "tp_allreduce_f32", partial, whole, b("tp_sym_ar"), b("tp_peers_ar"), b("tp_epochs_ar"),
+             b("tp_err"), {"rank": "tp"}, i32(tp), B, i32(H), i32(ar_region), i64(TP_TIMEOUT_NS))
         return whole
 
     step("embed", "embedding", b("token_ids"), b("embed"), b("hidden"), RB, i32(H))
@@ -359,17 +399,23 @@ def build(layers, ranks, max_ctx, seqs_max, tp=1):
                  b("block_table"), i32(max_pages), i64(page_stride), b("seq_lens"), w("scale"), b("mla_gate"),
                  b("gated"), B)
         else:
-            line = b("kda.line_index", kda_k * seqs_max * 4)
+            line = b("kda.line_index", kda_k * rows_max * 4)
             kda_k += 1
-            gemm(L + "qkvg", b("normed"), w("wbig"), b("kda_partial"), KDA_FUSED, H)
-            gemm(L + "wsm", b("normed"), w("wsm"), b("wsm_partial"), WSM, H)
-            step(L + "conv", "conv_silu", b("kda_partial"), w("cw"), {"state": "kda"}, line, i64(KDA_LINE_BYTES),
-                 b("conv_q"), b("conv_k"), b("conv_v"), B)
+            KB = {"var": KV}
+            gemm(L + "qkvg", b("normed"), w("wbig"), b("kda_partial"), fused_l, H, m=KB)
+            gemm(L + "wsm", b("normed"), w("wsm"), b("wsm_partial"), WSM, H, m=KB)
+            step(L + "conv", "conv_silu", b("kda_partial"), w("cw"), {"state": "kda"}, line, i64(line_l),
+                 b("conv_q"), b("conv_k"), b("conv_v"), KB)
             step(L + "kda_core", "kda_core", b("conv_q"), b("conv_k"), b("conv_v"), b("wsm_partial"), b("kda_partial"),
-                 w("w_f_b"), w("dt_bias"), w("a_log"), w("gamma_o"), {"state": "kda"}, line, i64(KDA_LINE_BYTES),
-                 b("gated"), B)
-        gemm(L + "o_proj", b("gated"), w("w_o"), b("hidden_partial"), H, INNER)
-        attn_out = gathered(L + "gather_attn", b("hidden_partial"), b("hidden_partial_all"), "f32", H * 4)
+                 w("w_f_b"), w("dt_bias"), w("a_log"), w("gamma_o"), {"state": "kda"}, line, i64(line_l),
+                 gated_kda, KB)
+        if is_mla(i) or tp == 1:
+            gemm(L + "o_proj", b("gated"), w("w_o"), b("hidden_partial"), H, INNER)
+            attn_out = gathered(L + "gather_attn", b("hidden_partial"), b("hidden_partial_all"), "f32", H * 4)
+        else:
+            # Head-sharded o_proj on every row: each rank's slice of the sum.
+            gemm(L + "o_proj", gated_kda, w("w_o"), b("o_partial"), H, inner_l, m=RB)
+            attn_out = reduced(L + "reduce_attn", b("o_partial"), b("hidden_partial_all"))
         # attn_out landing + residual (or snapshot replace) + mix + norm → prefix2, normed
         step(L + "res_mlp", "land_add_attnres_rms", attn_out, b("hidden"), b("blocks"), w("sw_mlp"),
              w("gamma_post"), b("prefix2"), b("normed"), i32(nb_mlp), i32(int(snapshot)), RB)
@@ -408,14 +454,14 @@ def build(layers, ranks, max_ctx, seqs_max, tp=1):
             weight(f"layers.{i}.w_kv_b", [HEADS * 256, KV_LORA])
             weight(f"layers.{i}.scale", [1])
         else:
-            weight(f"layers.{i}.wbig", [KDA_FUSED, H])
+            weight(f"layers.{i}.wbig", [fused_l, H])
             weight(f"layers.{i}.wsm", [WSM, H])
-            weight(f"layers.{i}.w_f_b", [INNER, HEAD_DIM])
-            weight(f"layers.{i}.cw", [3, 4, INNER], "f32")
-            weight(f"layers.{i}.dt_bias", [INNER], "f32")
-            weight(f"layers.{i}.a_log", [HEADS], "f32")
+            weight(f"layers.{i}.w_f_b", [inner_l, HEAD_DIM])
+            weight(f"layers.{i}.cw", [3, 4, inner_l], "f32")
+            weight(f"layers.{i}.dt_bias", [inner_l], "f32")
+            weight(f"layers.{i}.a_log", [hl], "f32")
             weight(f"layers.{i}.gamma_o", [HEAD_DIM], "f32")
-        weight(f"layers.{i}.w_o", [H, INNER])
+        weight(f"layers.{i}.w_o", [H, INNER if is_mla(i) else inner_l])
         if i == 0:
             weight(f"layers.{i}.wgu", [2 * DENSE_I, H])
             weight(f"layers.{i}.w_dn", [H, DENSE_I])

@@ -72,7 +72,7 @@
    "dtype": "i32",
    "shape": [
     69,
-    "seqs"
+    "rows"
    ],
    "kind": "input",
    "domain": {

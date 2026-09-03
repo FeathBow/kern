@@ -126,10 +126,13 @@ fn stage_cubins(cubins: &Path, kernels: &Path) {
 
 /// The weight blobs one rank needs: the shared dense files plus its expert
 /// shard, all memory-mapped.
-fn weight_files(weights: &Path, layers: usize, ranks: usize, rank: usize) -> Vec<PathBuf> {
+/// The rank's weight files: the bookends, the dense layers (a `--tp` manifest
+/// loads tools/shard_k3_tp.py's `dense-tp{R}/r{me}` slice), its experts.
+fn weight_files(weights: &Path, layers: usize, ranks: usize, rank: usize, tp: usize, me: usize) -> Vec<PathBuf> {
     let mut files = vec![weights.join("dense/bookends.safetensors")];
+    let dense = if tp > 1 { format!("dense-tp{tp}/r{me}") } else { "dense".to_string() };
     for i in 0..layers {
-        files.push(weights.join(format!("dense/l{i}.safetensors")));
+        files.push(weights.join(format!("{dense}/l{i}.safetensors")));
     }
     for i in 1..layers {
         files.push(weights.join(format!("experts/ep{ranks}-r{rank}-l{i}.safetensors")));
@@ -234,42 +237,60 @@ fn exchange(addr: &str, mine: &[(u64, Handles)], world: usize) -> anyhow::Result
 }
 
 /// The per-rank batch: one lease per row, staged as `[seqs]`-shaped inputs.
+/// One rank's view of a tray batch: `leases[q][row]` holds group rank q's
+/// row. Every rank leases every row of the tray batch, since the
+/// head-sharded KDA state of a row lives on all ranks (docs/multi-gpu.md
+/// "最终形态"); the pages behind a peer's lease are its MLA KV, which only
+/// the owner writes and reads. Alone (`tp` = 1) the group is this rank.
 struct Batch {
-    leases: Vec<Lease>,
+    leases: Vec<Vec<Lease>>,
+    me: usize,
     seqs_max: usize,
+    rows_max: usize,
     pos: usize,
 }
 
 impl Batch {
-    fn new(rt: &mut Runtime, rows: usize, tokens_per_row: usize) -> anyhow::Result<Batch> {
+    fn new(rt: &mut Runtime, tp: usize, me: usize, rows: usize, tokens_per_row: usize) -> anyhow::Result<Batch> {
         let seqs_max = rt.manifest.vars["seqs"].max as usize;
+        let rows_max = rt.manifest.vars["rows"].max as usize;
         anyhow::ensure!(rows <= seqs_max, "{rows} rows, manifest seqs bound is {seqs_max}");
-        let leases = (0..rows).map(|_| rt.lease(tokens_per_row)).collect::<Result<Vec<_>, _>>()?;
-        let b = Batch { leases, seqs_max, pos: 0 };
+        let leases = (0..tp)
+            .map(|_| (0..rows).map(|_| rt.lease(tokens_per_row)).collect::<Result<Vec<_>, _>>())
+            .collect::<Result<Vec<_>, _>>()?;
+        let b = Batch { leases, me, seqs_max, rows_max, pos: 0 };
         b.stage_tables(rt)?;
         Ok(b)
     }
 
-    /// Page-table rows and line-table columns: row/column i = lease i, the
-    /// rest (never dereferenced, but domain-checked) repeat lease 0.
+    fn own(&self) -> &[Lease] {
+        &self.leases[self.me]
+    }
+
+    /// Page-table rows: row i = own lease i, the rest (never dereferenced,
+    /// but domain-checked) repeat lease 0. Line-table columns are the tray
+    /// batch's rows, own rows first, then rank (me + d)'s at block d.
     fn stage_tables(&self, rt: &mut Runtime) -> anyhow::Result<()> {
+        let tp = self.leases.len();
+        let b = self.own().len();
         let tables: Vec<String> = rt.page_tables().map(str::to_string).collect();
         for name in tables {
             let mut table = Vec::new();
             for i in 0..self.seqs_max {
-                self.leases[i.min(self.leases.len() - 1)].extend_row(&name, &mut table)?;
+                self.own()[i.min(b - 1)].extend_row(&name, &mut table)?;
             }
             rt.write_input(&name, &le_bytes_i32(&table))?;
         }
         let lines: Vec<String> = rt.seq_tables().map(str::to_string).collect();
         for name in lines {
-            let l0 = &self.leases[0];
+            let l0 = &self.own()[0];
             let w = l0.seq_width(&name)?;
             anyhow::ensure!(w == 1, "`{name}`: wide line tables are not staged here");
             let mut table = Vec::new();
             for r in 0..l0.seq_lines(&name)? {
-                for i in 0..self.seqs_max {
-                    table.push(if i < self.leases.len() { self.leases[i].seq_line(&name, r)? } else { 0 });
+                for i in 0..self.rows_max {
+                    let (d, j) = (i / b, i % b);
+                    table.push(if d < tp { self.leases[(self.me + d) % tp][j].seq_line(&name, r)? } else { 0 });
                 }
             }
             rt.write_input(&name, &le_bytes_i32(&table))?;
@@ -277,27 +298,28 @@ impl Batch {
         Ok(())
     }
 
-    /// A child of row `row` from the batch's position: one more row, the
-    /// tables restaged.
+    /// A child of row `row` from the batch's position, on every rank of the
+    /// group: one more row each, the tables restaged.
     fn fork(&mut self, rt: &mut Runtime, row: usize, tokens_per_row: usize) -> anyhow::Result<()> {
-        anyhow::ensure!(self.leases.len() < self.seqs_max, "no row for a fork: {} rows", self.seqs_max);
-        let child = rt.fork(&mut self.leases[row], self.pos, tokens_per_row)?;
-        self.leases.push(child);
+        anyhow::ensure!(self.own().len() < self.seqs_max, "no row for a fork: {} rows", self.seqs_max);
+        for q in 0..self.leases.len() {
+            let child = rt.fork(&mut self.leases[q][row], self.pos, tokens_per_row)?;
+            self.leases[q].push(child);
+        }
         self.stage_tables(rt)
     }
 
-    /// Stage one step: this rank's `toks` as rows 0..B, then, for a tray
-    /// batch of `tp` ranks, rank `q`'s rows at block `(q - me) mod tp` from
-    /// `peer(q, row)` (docs/multi-gpu.md "own rows first").
+    /// Stage one step: this rank's `toks` as rows 0..B, then rank
+    /// (me + d)'s rows at block d from `peer(q, row)` (docs/multi-gpu.md
+    /// "own rows first").
     fn stage(
         &self,
         rt: &mut Runtime,
         toks: &[i64],
-        tp: usize,
-        me: usize,
         peer: &dyn Fn(usize, usize) -> i64,
     ) -> anyhow::Result<BTreeMap<String, u64>> {
-        let b = self.leases.len();
+        let (tp, me) = (self.leases.len(), self.me);
+        let b = self.own().len();
         assert_eq!(toks.len(), b);
         let e = BTreeMap::from([
             ("tokens".to_string(), b as u64),
@@ -310,7 +332,7 @@ impl Batch {
             all.extend((0..b).map(|j| peer(q, j)));
         }
         rt.write_input_at("token_ids", &le_bytes_i64(&all), &e)?;
-        let slots: Vec<i64> = self.leases.iter().map(|l| l.slot(self.pos)).collect();
+        let slots: Vec<i64> = self.own().iter().map(|l| l.slot(self.pos)).collect();
         rt.write_input_at("slot_mapping", &le_bytes_i64(&slots), &e)?;
         rt.write_input_at("seq_lens", &le_bytes_i32(&vec![(self.pos + 1) as i32; b]), &e)?;
         Ok(e)
@@ -348,7 +370,7 @@ fn run_batch(
     let tp = feeds.len();
     let rows = feeds[me].len();
     let steps = feeds[me][0].len();
-    let mut batch = Batch::new(rt, rows, tokens_per_row)?;
+    let mut batch = Batch::new(rt, tp, me, rows, tokens_per_row)?;
     let mut out: Vec<Vec<Vec<i64>>> = vec![vec![Vec::with_capacity(steps + free); rows]; tp];
     let mut env = BTreeMap::new();
     // After the scripted feed, `free` more steps run each row on its own
@@ -369,7 +391,7 @@ fn run_batch(
         };
         let token = |q: usize, r: usize| if step < steps { feed(q, r) } else { *out[q][r].last().unwrap() };
         let toks: Vec<i64> = (0..out[me].len()).map(|r| token(me, r)).collect();
-        env = batch.stage(rt, &toks, tp, me, &token)?;
+        env = batch.stage(rt, &toks, &token)?;
         if graph {
             if !rt.is_captured("decode", &env) {
                 rt.capture("decode", &env)?;
@@ -438,7 +460,11 @@ fn run_rank(
         s => anyhow::bail!("unexpected block_table shape {s:?}"),
     };
     let per_row = per_row as usize;
-    let capacity = (per_row * (seqs.max(1) + 2 * fork.is_some() as usize)) as u64;
+    // The tray group this rank runs one batch with (`tp` in the manifest's
+    // topology); alone, a group of one. Every rank leases the whole tray
+    // batch's rows.
+    let (me, tp) = topo.groups.get("tp").map(|g| (g.index as usize, g.size as usize)).unwrap_or((0, 1));
+    let capacity = (per_row * (seqs.max(1) + 2 * fork.is_some() as usize) * tp) as u64;
     let mut rt = Runtime::load(json, kernels, gpu, Some(capacity), Some(topo))?;
     let maps: Vec<memmap2::Mmap> = files
         .iter()
@@ -467,10 +493,6 @@ fn run_rank(
         failures: Vec::new(),
         step_ms: None,
     };
-    // The tray group this rank runs one batch with (`tp` in the manifest's
-    // topology); alone, a group of one.
-    let (me, tp) = topo.groups.get("tp").map(|g| (g.index as usize, g.size as usize)).unwrap_or((0, 1));
-
     // Every distinct feed first runs as a batch of `seqs` copies of itself,
     // so the mixed batch can be held to it row by row at the same batch
     // size (cuBLAS picks its kernels by m, so B = 1 and B = 8 legitimately
@@ -690,7 +712,7 @@ fn main() {
             rendezvous_addr.clone(),
         );
         threads.push(std::thread::spawn(move || {
-            let files = weight_files(&weights, golden.num_layers, world, rank);
+            let files = weight_files(&weights, golden.num_layers, world, rank, tp, local % tp);
             let rendezvous = |rt: &mut Runtime| -> kern_runtime::Result<()> {
                 let mine = rt.export_handles()?;
                 posted.lock().unwrap()[local] = Some(mine);

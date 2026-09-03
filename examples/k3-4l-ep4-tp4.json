@@ -23,7 +23,7 @@
    "bytes_per_token": 1152
   },
   "kda": {
-   "bytes_per_seq": 19537920
+   "bytes_per_seq": 4884480
   }
  },
  "buffers": {
@@ -73,12 +73,12 @@
    "dtype": "i32",
    "shape": [
     3,
-    "seqs"
+    "rows"
    ],
    "kind": "input",
    "domain": {
     "index_into": "kda",
-    "stride": 6512640
+    "stride": 1628160
    }
   },
   "next_token": {
@@ -133,6 +133,30 @@
    "group": "tp"
   },
   "tp_epochs": {
+   "dtype": "u32",
+   "shape": [
+    256
+   ],
+   "kind": "carry"
+  },
+  "tp_sym_ar": {
+   "dtype": "u8",
+   "shape": [
+    14680064
+   ],
+   "kind": "carry",
+   "export": true
+  },
+  "tp_peers_ar": {
+   "dtype": "u64",
+   "shape": [
+    4
+   ],
+   "kind": "peer",
+   "of": "tp_sym_ar",
+   "group": "tp"
+  },
+  "tp_epochs_ar": {
    "dtype": "u32",
    "shape": [
     256
@@ -233,18 +257,34 @@
    ],
    "kind": "workspace"
   },
+  "o_partial": {
+   "dtype": "f32",
+   "shape": [
+    "rows",
+    7168
+   ],
+   "kind": "workspace"
+  },
+  "gated_kda": {
+   "dtype": "bf16",
+   "shape": [
+    "rows",
+    3072
+   ],
+   "kind": "workspace"
+  },
   "kda_partial": {
    "dtype": "f32",
    "shape": [
-    "tokens",
-    49152
+    "rows",
+    12288
    ],
    "kind": "workspace"
   },
   "wsm_partial": {
    "dtype": "f32",
    "shape": [
-    "tokens",
+    "rows",
     256
    ],
    "kind": "workspace"
@@ -252,24 +292,24 @@
   "conv_q": {
    "dtype": "bf16",
    "shape": [
-    "tokens",
-    12288
+    "rows",
+    3072
    ],
    "kind": "workspace"
   },
   "conv_k": {
    "dtype": "bf16",
    "shape": [
-    "tokens",
-    12288
+    "rows",
+    3072
    ],
    "kind": "workspace"
   },
   "conv_v": {
    "dtype": "bf16",
    "shape": [
-    "tokens",
-    12288
+    "rows",
+    3072
    ],
    "kind": "workspace"
   },
@@ -449,7 +489,7 @@
   "layers.0.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -465,7 +505,7 @@
   "layers.0.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -475,21 +515,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.0.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.0.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -504,7 +544,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -555,7 +595,7 @@
   "layers.1.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -571,7 +611,7 @@
   "layers.1.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -581,21 +621,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.1.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.1.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -610,7 +650,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -734,7 +774,7 @@
   "layers.2.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -750,7 +790,7 @@
   "layers.2.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -760,21 +800,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.2.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.2.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -789,7 +829,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -1058,13 +1098,13 @@
    "source": "embedding.cubin",
    "sha256": "1c3dd3e591d872aed259d7ef59d44649061f77a4247a5df864a7fbf0ccbde92f"
   },
-  "k3_conv_silu": {
-   "source": "k3_conv_silu.cubin",
-   "sha256": "4d22e72cc3956a7d0ad47d773d02c1c6b0dba14dcc876895f02ec5a285f713d7"
+  "k3_conv_silu+HEADS=24": {
+   "source": "k3_conv_silu+HEADS=24.cubin",
+   "sha256": "d678a6b113978fb96f735493d2e7d59c772675e805b3fc6927e37505de51ad8f"
   },
-  "k3_kda_core": {
-   "source": "k3_kda_core.cubin",
-   "sha256": "b2b1f1e3b25ae75cb4bd7d8f6be4ade4e37dfbe949389da2e60dd6052a4d79b5"
+  "k3_kda_core+HEADS=24": {
+   "source": "k3_kda_core+HEADS=24.cubin",
+   "sha256": "906167e37edda3d3067f588a1e90f864af34b88b8514f7b47c7d167c3bf62838"
   },
   "k3_land": {
    "source": "k3_land.cubin",
@@ -1413,7 +1453,7 @@
    "impl": {
     "launches": [
      {
-      "module": "k3_conv_silu",
+      "module": "k3_conv_silu+HEADS=24",
       "entry": "kern_k3_conv_silu",
       "params": [
        "in buffer<f32>",
@@ -1432,9 +1472,9 @@
        1
       ],
       "grid": [
-       "tokens",
+       "rows",
        3,
-       24
+       6
       ],
       "args": [
        {
@@ -1450,7 +1490,7 @@
         "param": 3
        },
        {
-        "i64": 6512640
+        "i64": 1628160
        },
        {
         "param": 4
@@ -1488,7 +1528,7 @@
    "impl": {
     "launches": [
      {
-      "module": "k3_kda_core",
+      "module": "k3_kda_core+HEADS=24",
       "entry": "kern_k3_kda_core",
       "params": [
        "in buffer<bf16>",
@@ -1512,8 +1552,8 @@
        1
       ],
       "grid": [
-       "tokens",
-       96,
+       "rows",
+       24,
        1
       ],
       "args": [
@@ -1551,7 +1591,7 @@
         "param": 10
        },
        {
-        "i64": 6512640
+        "i64": 1628160
        },
        {
         "param": 11
@@ -2044,6 +2084,88 @@
        },
        {
         "i32": 28672
+       },
+       {
+        "i64": 2000000000
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "tp_allreduce_f32": {
+   "params": [
+    "in buffer<f32>",
+    "out buffer<f32>",
+    "inout buffer<u8>",
+    "in buffer<u64>",
+    "inout buffer<u32>",
+    "out buffer<i32>",
+    "i32",
+    "i32"
+   ],
+   "impl": {
+    "launches": [
+     {
+      "module": "peer_collective",
+      "entry": "kern_peer_allreduce_f32",
+      "params": [
+       "in buffer<f32>",
+       "out buffer<f32>",
+       "inout buffer<u8>",
+       "in buffer<u64>",
+       "inout buffer<u32>",
+       "out buffer<i32>",
+       "i32",
+       "i32",
+       "i32",
+       "i32",
+       "i32",
+       "i64"
+      ],
+      "block": [
+       256,
+       1,
+       1
+      ],
+      "grid": [
+       256,
+       1,
+       1
+      ],
+      "args": [
+       {
+        "param": 0
+       },
+       {
+        "param": 1
+       },
+       {
+        "param": 2
+       },
+       {
+        "param": 3
+       },
+       {
+        "param": 4
+       },
+       {
+        "param": 5
+       },
+       {
+        "param": 6
+       },
+       {
+        "i32": 4
+       },
+       {
+        "param": 7
+       },
+       {
+        "i32": 7168
+       },
+       {
+        "i32": 114688
        },
        {
         "i64": 2000000000
@@ -2777,16 +2899,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -2804,7 +2926,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -2843,7 +2965,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -2885,10 +3007,10 @@
       "buf": "kda.line_index"
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -2897,22 +3019,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.0.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -2920,23 +3042,23 @@
     ]
    },
    {
-    "label": "l0.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l0.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -3113,16 +3235,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -3140,7 +3262,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -3168,7 +3290,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 32
+      "offset": 128
      },
      {
       "buf": "conv_q"
@@ -3180,7 +3302,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -3220,13 +3342,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 32
+      "offset": 128
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -3235,22 +3357,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.1.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -3258,23 +3380,23 @@
     ]
    },
    {
-    "label": "l1.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l1.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -3716,16 +3838,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -3743,7 +3865,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -3771,7 +3893,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 64
+      "offset": 256
      },
      {
       "buf": "conv_q"
@@ -3783,7 +3905,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -3823,13 +3945,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 64
+      "offset": 256
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -3838,22 +3960,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.2.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -3861,23 +3983,23 @@
     ]
    },
    {
-    "label": "l2.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l2.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"

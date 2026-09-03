@@ -23,7 +23,7 @@
    "bytes_per_token": 27648
   },
   "kda": {
-   "bytes_per_seq": 449372160
+   "bytes_per_seq": 112343040
   }
  },
  "buffers": {
@@ -73,12 +73,12 @@
    "dtype": "i32",
    "shape": [
     69,
-    "seqs"
+    "rows"
    ],
    "kind": "input",
    "domain": {
     "index_into": "kda",
-    "stride": 6512640
+    "stride": 1628160
    }
   },
   "next_token": {
@@ -133,6 +133,30 @@
    "group": "tp"
   },
   "tp_epochs": {
+   "dtype": "u32",
+   "shape": [
+    256
+   ],
+   "kind": "carry"
+  },
+  "tp_sym_ar": {
+   "dtype": "u8",
+   "shape": [
+    117440512
+   ],
+   "kind": "carry",
+   "export": true
+  },
+  "tp_peers_ar": {
+   "dtype": "u64",
+   "shape": [
+    4
+   ],
+   "kind": "peer",
+   "of": "tp_sym_ar",
+   "group": "tp"
+  },
+  "tp_epochs_ar": {
    "dtype": "u32",
    "shape": [
     256
@@ -233,18 +257,34 @@
    ],
    "kind": "workspace"
   },
+  "o_partial": {
+   "dtype": "f32",
+   "shape": [
+    "rows",
+    7168
+   ],
+   "kind": "workspace"
+  },
+  "gated_kda": {
+   "dtype": "bf16",
+   "shape": [
+    "rows",
+    3072
+   ],
+   "kind": "workspace"
+  },
   "kda_partial": {
    "dtype": "f32",
    "shape": [
-    "tokens",
-    49152
+    "rows",
+    12288
    ],
    "kind": "workspace"
   },
   "wsm_partial": {
    "dtype": "f32",
    "shape": [
-    "tokens",
+    "rows",
     256
    ],
    "kind": "workspace"
@@ -252,24 +292,24 @@
   "conv_q": {
    "dtype": "bf16",
    "shape": [
-    "tokens",
-    12288
+    "rows",
+    3072
    ],
    "kind": "workspace"
   },
   "conv_k": {
    "dtype": "bf16",
    "shape": [
-    "tokens",
-    12288
+    "rows",
+    3072
    ],
    "kind": "workspace"
   },
   "conv_v": {
    "dtype": "bf16",
    "shape": [
-    "tokens",
-    12288
+    "rows",
+    3072
    ],
    "kind": "workspace"
   },
@@ -449,7 +489,7 @@
   "layers.0.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -465,7 +505,7 @@
   "layers.0.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -475,21 +515,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.0.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.0.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -504,7 +544,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -555,7 +595,7 @@
   "layers.1.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -571,7 +611,7 @@
   "layers.1.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -581,21 +621,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.1.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.1.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -610,7 +650,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -734,7 +774,7 @@
   "layers.2.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -750,7 +790,7 @@
   "layers.2.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -760,21 +800,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.2.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.2.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -789,7 +829,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -1083,7 +1123,7 @@
   "layers.4.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -1099,7 +1139,7 @@
   "layers.4.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -1109,21 +1149,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.4.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.4.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -1138,7 +1178,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -1262,7 +1302,7 @@
   "layers.5.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -1278,7 +1318,7 @@
   "layers.5.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -1288,21 +1328,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.5.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.5.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -1317,7 +1357,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -1441,7 +1481,7 @@
   "layers.6.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -1457,7 +1497,7 @@
   "layers.6.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -1467,21 +1507,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.6.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.6.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -1496,7 +1536,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -1790,7 +1830,7 @@
   "layers.8.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -1806,7 +1846,7 @@
   "layers.8.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -1816,21 +1856,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.8.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.8.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -1845,7 +1885,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -1969,7 +2009,7 @@
   "layers.9.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -1985,7 +2025,7 @@
   "layers.9.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -1995,21 +2035,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.9.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.9.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -2024,7 +2064,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -2148,7 +2188,7 @@
   "layers.10.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -2164,7 +2204,7 @@
   "layers.10.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -2174,21 +2214,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.10.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.10.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -2203,7 +2243,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -2497,7 +2537,7 @@
   "layers.12.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -2513,7 +2553,7 @@
   "layers.12.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -2523,21 +2563,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.12.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.12.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -2552,7 +2592,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -2676,7 +2716,7 @@
   "layers.13.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -2692,7 +2732,7 @@
   "layers.13.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -2702,21 +2742,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.13.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.13.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -2731,7 +2771,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -2855,7 +2895,7 @@
   "layers.14.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -2871,7 +2911,7 @@
   "layers.14.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -2881,21 +2921,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.14.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.14.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -2910,7 +2950,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -3204,7 +3244,7 @@
   "layers.16.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -3220,7 +3260,7 @@
   "layers.16.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -3230,21 +3270,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.16.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.16.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -3259,7 +3299,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -3383,7 +3423,7 @@
   "layers.17.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -3399,7 +3439,7 @@
   "layers.17.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -3409,21 +3449,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.17.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.17.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -3438,7 +3478,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -3562,7 +3602,7 @@
   "layers.18.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -3578,7 +3618,7 @@
   "layers.18.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -3588,21 +3628,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.18.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.18.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -3617,7 +3657,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -3911,7 +3951,7 @@
   "layers.20.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -3927,7 +3967,7 @@
   "layers.20.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -3937,21 +3977,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.20.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.20.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -3966,7 +4006,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -4090,7 +4130,7 @@
   "layers.21.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -4106,7 +4146,7 @@
   "layers.21.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -4116,21 +4156,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.21.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.21.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -4145,7 +4185,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -4269,7 +4309,7 @@
   "layers.22.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -4285,7 +4325,7 @@
   "layers.22.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -4295,21 +4335,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.22.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.22.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -4324,7 +4364,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -4618,7 +4658,7 @@
   "layers.24.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -4634,7 +4674,7 @@
   "layers.24.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -4644,21 +4684,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.24.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.24.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -4673,7 +4713,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -4797,7 +4837,7 @@
   "layers.25.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -4813,7 +4853,7 @@
   "layers.25.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -4823,21 +4863,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.25.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.25.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -4852,7 +4892,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -4976,7 +5016,7 @@
   "layers.26.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -4992,7 +5032,7 @@
   "layers.26.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -5002,21 +5042,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.26.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.26.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -5031,7 +5071,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -5325,7 +5365,7 @@
   "layers.28.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -5341,7 +5381,7 @@
   "layers.28.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -5351,21 +5391,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.28.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.28.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -5380,7 +5420,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -5504,7 +5544,7 @@
   "layers.29.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -5520,7 +5560,7 @@
   "layers.29.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -5530,21 +5570,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.29.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.29.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -5559,7 +5599,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -5683,7 +5723,7 @@
   "layers.30.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -5699,7 +5739,7 @@
   "layers.30.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -5709,21 +5749,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.30.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.30.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -5738,7 +5778,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -6032,7 +6072,7 @@
   "layers.32.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -6048,7 +6088,7 @@
   "layers.32.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -6058,21 +6098,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.32.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.32.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -6087,7 +6127,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -6211,7 +6251,7 @@
   "layers.33.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -6227,7 +6267,7 @@
   "layers.33.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -6237,21 +6277,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.33.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.33.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -6266,7 +6306,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -6390,7 +6430,7 @@
   "layers.34.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -6406,7 +6446,7 @@
   "layers.34.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -6416,21 +6456,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.34.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.34.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -6445,7 +6485,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -6739,7 +6779,7 @@
   "layers.36.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -6755,7 +6795,7 @@
   "layers.36.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -6765,21 +6805,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.36.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.36.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -6794,7 +6834,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -6918,7 +6958,7 @@
   "layers.37.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -6934,7 +6974,7 @@
   "layers.37.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -6944,21 +6984,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.37.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.37.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -6973,7 +7013,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -7097,7 +7137,7 @@
   "layers.38.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -7113,7 +7153,7 @@
   "layers.38.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -7123,21 +7163,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.38.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.38.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -7152,7 +7192,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -7446,7 +7486,7 @@
   "layers.40.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -7462,7 +7502,7 @@
   "layers.40.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -7472,21 +7512,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.40.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.40.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -7501,7 +7541,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -7625,7 +7665,7 @@
   "layers.41.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -7641,7 +7681,7 @@
   "layers.41.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -7651,21 +7691,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.41.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.41.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -7680,7 +7720,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -7804,7 +7844,7 @@
   "layers.42.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -7820,7 +7860,7 @@
   "layers.42.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -7830,21 +7870,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.42.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.42.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -7859,7 +7899,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -8153,7 +8193,7 @@
   "layers.44.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -8169,7 +8209,7 @@
   "layers.44.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -8179,21 +8219,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.44.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.44.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -8208,7 +8248,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -8332,7 +8372,7 @@
   "layers.45.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -8348,7 +8388,7 @@
   "layers.45.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -8358,21 +8398,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.45.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.45.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -8387,7 +8427,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -8511,7 +8551,7 @@
   "layers.46.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -8527,7 +8567,7 @@
   "layers.46.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -8537,21 +8577,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.46.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.46.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -8566,7 +8606,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -8860,7 +8900,7 @@
   "layers.48.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -8876,7 +8916,7 @@
   "layers.48.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -8886,21 +8926,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.48.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.48.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -8915,7 +8955,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -9039,7 +9079,7 @@
   "layers.49.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -9055,7 +9095,7 @@
   "layers.49.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -9065,21 +9105,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.49.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.49.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -9094,7 +9134,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -9218,7 +9258,7 @@
   "layers.50.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -9234,7 +9274,7 @@
   "layers.50.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -9244,21 +9284,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.50.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.50.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -9273,7 +9313,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -9567,7 +9607,7 @@
   "layers.52.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -9583,7 +9623,7 @@
   "layers.52.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -9593,21 +9633,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.52.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.52.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -9622,7 +9662,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -9746,7 +9786,7 @@
   "layers.53.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -9762,7 +9802,7 @@
   "layers.53.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -9772,21 +9812,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.53.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.53.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -9801,7 +9841,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -9925,7 +9965,7 @@
   "layers.54.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -9941,7 +9981,7 @@
   "layers.54.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -9951,21 +9991,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.54.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.54.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -9980,7 +10020,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -10274,7 +10314,7 @@
   "layers.56.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -10290,7 +10330,7 @@
   "layers.56.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -10300,21 +10340,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.56.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.56.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -10329,7 +10369,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -10453,7 +10493,7 @@
   "layers.57.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -10469,7 +10509,7 @@
   "layers.57.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -10479,21 +10519,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.57.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.57.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -10508,7 +10548,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -10632,7 +10672,7 @@
   "layers.58.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -10648,7 +10688,7 @@
   "layers.58.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -10658,21 +10698,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.58.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.58.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -10687,7 +10727,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -10981,7 +11021,7 @@
   "layers.60.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -10997,7 +11037,7 @@
   "layers.60.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -11007,21 +11047,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.60.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.60.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -11036,7 +11076,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -11160,7 +11200,7 @@
   "layers.61.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -11176,7 +11216,7 @@
   "layers.61.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -11186,21 +11226,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.61.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.61.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -11215,7 +11255,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -11339,7 +11379,7 @@
   "layers.62.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -11355,7 +11395,7 @@
   "layers.62.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -11365,21 +11405,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.62.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.62.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -11394,7 +11434,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -11688,7 +11728,7 @@
   "layers.64.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -11704,7 +11744,7 @@
   "layers.64.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -11714,21 +11754,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.64.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.64.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -11743,7 +11783,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -11867,7 +11907,7 @@
   "layers.65.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -11883,7 +11923,7 @@
   "layers.65.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -11893,21 +11933,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.65.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.65.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -11922,7 +11962,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -12046,7 +12086,7 @@
   "layers.66.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -12062,7 +12102,7 @@
   "layers.66.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -12072,21 +12112,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.66.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.66.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -12101,7 +12141,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -12395,7 +12435,7 @@
   "layers.68.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -12411,7 +12451,7 @@
   "layers.68.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -12421,21 +12461,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.68.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.68.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -12450,7 +12490,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -12574,7 +12614,7 @@
   "layers.69.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -12590,7 +12630,7 @@
   "layers.69.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -12600,21 +12640,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.69.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.69.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -12629,7 +12669,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -12753,7 +12793,7 @@
   "layers.70.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -12769,7 +12809,7 @@
   "layers.70.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -12779,21 +12819,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.70.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.70.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -12808,7 +12848,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -13102,7 +13142,7 @@
   "layers.72.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -13118,7 +13158,7 @@
   "layers.72.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -13128,21 +13168,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.72.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.72.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -13157,7 +13197,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -13281,7 +13321,7 @@
   "layers.73.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -13297,7 +13337,7 @@
   "layers.73.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -13307,21 +13347,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.73.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.73.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -13336,7 +13376,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -13460,7 +13500,7 @@
   "layers.74.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -13476,7 +13516,7 @@
   "layers.74.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -13486,21 +13526,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.74.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.74.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -13515,7 +13555,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -13809,7 +13849,7 @@
   "layers.76.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -13825,7 +13865,7 @@
   "layers.76.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -13835,21 +13875,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.76.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.76.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -13864,7 +13904,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -13988,7 +14028,7 @@
   "layers.77.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -14004,7 +14044,7 @@
   "layers.77.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -14014,21 +14054,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.77.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.77.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -14043,7 +14083,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -14167,7 +14207,7 @@
   "layers.78.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -14183,7 +14223,7 @@
   "layers.78.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -14193,21 +14233,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.78.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.78.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -14222,7 +14262,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -14516,7 +14556,7 @@
   "layers.80.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -14532,7 +14572,7 @@
   "layers.80.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -14542,21 +14582,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.80.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.80.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -14571,7 +14611,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -14695,7 +14735,7 @@
   "layers.81.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -14711,7 +14751,7 @@
   "layers.81.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -14721,21 +14761,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.81.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.81.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -14750,7 +14790,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -14874,7 +14914,7 @@
   "layers.82.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -14890,7 +14930,7 @@
   "layers.82.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -14900,21 +14940,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.82.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.82.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -14929,7 +14969,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -15223,7 +15263,7 @@
   "layers.84.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -15239,7 +15279,7 @@
   "layers.84.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -15249,21 +15289,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.84.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.84.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -15278,7 +15318,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -15402,7 +15442,7 @@
   "layers.85.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -15418,7 +15458,7 @@
   "layers.85.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -15428,21 +15468,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.85.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.85.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -15457,7 +15497,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -15581,7 +15621,7 @@
   "layers.86.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -15597,7 +15637,7 @@
   "layers.86.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -15607,21 +15647,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.86.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.86.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -15636,7 +15676,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -15930,7 +15970,7 @@
   "layers.88.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -15946,7 +15986,7 @@
   "layers.88.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -15956,21 +15996,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.88.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.88.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -15985,7 +16025,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -16109,7 +16149,7 @@
   "layers.89.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -16125,7 +16165,7 @@
   "layers.89.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -16135,21 +16175,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.89.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.89.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -16164,7 +16204,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -16288,7 +16328,7 @@
   "layers.90.wbig": {
    "dtype": "bf16",
    "shape": [
-    49152,
+    12288,
     7168
    ],
    "kind": "weight"
@@ -16304,7 +16344,7 @@
   "layers.90.w_f_b": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     128
    ],
    "kind": "weight"
@@ -16314,21 +16354,21 @@
    "shape": [
     3,
     4,
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.90.dt_bias": {
    "dtype": "f32",
    "shape": [
-    12288
+    3072
    ],
    "kind": "weight"
   },
   "layers.90.a_log": {
    "dtype": "f32",
    "shape": [
-    96
+    24
    ],
    "kind": "weight"
   },
@@ -16343,7 +16383,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    12288
+    3072
    ],
    "kind": "weight"
   },
@@ -16782,13 +16822,13 @@
    "source": "embedding.cubin",
    "sha256": "1c3dd3e591d872aed259d7ef59d44649061f77a4247a5df864a7fbf0ccbde92f"
   },
-  "k3_conv_silu": {
-   "source": "k3_conv_silu.cubin",
-   "sha256": "4d22e72cc3956a7d0ad47d773d02c1c6b0dba14dcc876895f02ec5a285f713d7"
+  "k3_conv_silu+HEADS=24": {
+   "source": "k3_conv_silu+HEADS=24.cubin",
+   "sha256": "d678a6b113978fb96f735493d2e7d59c772675e805b3fc6927e37505de51ad8f"
   },
-  "k3_kda_core": {
-   "source": "k3_kda_core.cubin",
-   "sha256": "b2b1f1e3b25ae75cb4bd7d8f6be4ade4e37dfbe949389da2e60dd6052a4d79b5"
+  "k3_kda_core+HEADS=24": {
+   "source": "k3_kda_core+HEADS=24.cubin",
+   "sha256": "906167e37edda3d3067f588a1e90f864af34b88b8514f7b47c7d167c3bf62838"
   },
   "k3_land": {
    "source": "k3_land.cubin",
@@ -17060,7 +17100,7 @@
    "impl": {
     "launches": [
      {
-      "module": "k3_conv_silu",
+      "module": "k3_conv_silu+HEADS=24",
       "entry": "kern_k3_conv_silu",
       "params": [
        "in buffer<f32>",
@@ -17079,9 +17119,9 @@
        1
       ],
       "grid": [
-       "tokens",
+       "rows",
        3,
-       24
+       6
       ],
       "args": [
        {
@@ -17097,7 +17137,7 @@
         "param": 3
        },
        {
-        "i64": 6512640
+        "i64": 1628160
        },
        {
         "param": 4
@@ -17135,7 +17175,7 @@
    "impl": {
     "launches": [
      {
-      "module": "k3_kda_core",
+      "module": "k3_kda_core+HEADS=24",
       "entry": "kern_k3_kda_core",
       "params": [
        "in buffer<bf16>",
@@ -17159,8 +17199,8 @@
        1
       ],
       "grid": [
-       "tokens",
-       96,
+       "rows",
+       24,
        1
       ],
       "args": [
@@ -17198,7 +17238,7 @@
         "param": 10
        },
        {
-        "i64": 6512640
+        "i64": 1628160
        },
        {
         "param": 11
@@ -17692,6 +17732,88 @@
        },
        {
         "i32": 229376
+       },
+       {
+        "i64": 2000000000
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "tp_allreduce_f32": {
+   "params": [
+    "in buffer<f32>",
+    "out buffer<f32>",
+    "inout buffer<u8>",
+    "in buffer<u64>",
+    "inout buffer<u32>",
+    "out buffer<i32>",
+    "i32",
+    "i32"
+   ],
+   "impl": {
+    "launches": [
+     {
+      "module": "peer_collective",
+      "entry": "kern_peer_allreduce_f32",
+      "params": [
+       "in buffer<f32>",
+       "out buffer<f32>",
+       "inout buffer<u8>",
+       "in buffer<u64>",
+       "inout buffer<u32>",
+       "out buffer<i32>",
+       "i32",
+       "i32",
+       "i32",
+       "i32",
+       "i32",
+       "i64"
+      ],
+      "block": [
+       256,
+       1,
+       1
+      ],
+      "grid": [
+       256,
+       1,
+       1
+      ],
+      "args": [
+       {
+        "param": 0
+       },
+       {
+        "param": 1
+       },
+       {
+        "param": 2
+       },
+       {
+        "param": 3
+       },
+       {
+        "param": 4
+       },
+       {
+        "param": 5
+       },
+       {
+        "param": 6
+       },
+       {
+        "i32": 4
+       },
+       {
+        "param": 7
+       },
+       {
+        "i32": 7168
+       },
+       {
+        "i32": 917504
        },
        {
         "i64": 2000000000
@@ -18425,16 +18547,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -18452,7 +18574,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -18491,7 +18613,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -18533,10 +18655,10 @@
       "buf": "kda.line_index"
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -18545,22 +18667,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.0.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -18568,23 +18690,23 @@
     ]
    },
    {
-    "label": "l0.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l0.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -18770,16 +18892,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -18797,7 +18919,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -18825,7 +18947,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 256
+      "offset": 1024
      },
      {
       "buf": "conv_q"
@@ -18837,7 +18959,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -18877,13 +18999,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 256
+      "offset": 1024
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -18892,22 +19014,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.1.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -18915,23 +19037,23 @@
     ]
    },
    {
-    "label": "l1.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l1.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -19382,16 +19504,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -19409,7 +19531,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -19437,7 +19559,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 512
+      "offset": 2048
      },
      {
       "buf": "conv_q"
@@ -19449,7 +19571,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -19489,13 +19611,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 512
+      "offset": 2048
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -19504,22 +19626,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.2.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -19527,23 +19649,23 @@
     ]
    },
    {
-    "label": "l2.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l2.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -20596,16 +20718,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -20623,7 +20745,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -20651,7 +20773,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 768
+      "offset": 3072
      },
      {
       "buf": "conv_q"
@@ -20663,7 +20785,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -20703,13 +20825,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 768
+      "offset": 3072
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -20718,22 +20840,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.4.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -20741,23 +20863,23 @@
     ]
    },
    {
-    "label": "l4.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l4.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -21208,16 +21330,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -21235,7 +21357,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -21263,7 +21385,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 1024
+      "offset": 4096
      },
      {
       "buf": "conv_q"
@@ -21275,7 +21397,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -21315,13 +21437,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 1024
+      "offset": 4096
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -21330,22 +21452,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.5.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -21353,23 +21475,23 @@
     ]
    },
    {
-    "label": "l5.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l5.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -21820,16 +21942,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -21847,7 +21969,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -21875,7 +21997,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 1280
+      "offset": 5120
      },
      {
       "buf": "conv_q"
@@ -21887,7 +22009,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -21927,13 +22049,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 1280
+      "offset": 5120
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -21942,22 +22064,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.6.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -21965,23 +22087,23 @@
     ]
    },
    {
-    "label": "l6.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l6.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -23034,16 +23156,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -23061,7 +23183,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -23089,7 +23211,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 1536
+      "offset": 6144
      },
      {
       "buf": "conv_q"
@@ -23101,7 +23223,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -23141,13 +23263,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 1536
+      "offset": 6144
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -23156,22 +23278,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.8.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -23179,23 +23301,23 @@
     ]
    },
    {
-    "label": "l8.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l8.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -23646,16 +23768,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -23673,7 +23795,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -23701,7 +23823,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 1792
+      "offset": 7168
      },
      {
       "buf": "conv_q"
@@ -23713,7 +23835,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -23753,13 +23875,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 1792
+      "offset": 7168
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -23768,22 +23890,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.9.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -23791,23 +23913,23 @@
     ]
    },
    {
-    "label": "l9.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l9.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -24258,16 +24380,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -24285,7 +24407,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -24313,7 +24435,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 2048
+      "offset": 8192
      },
      {
       "buf": "conv_q"
@@ -24325,7 +24447,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -24365,13 +24487,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 2048
+      "offset": 8192
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -24380,22 +24502,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.10.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -24403,23 +24525,23 @@
     ]
    },
    {
-    "label": "l10.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l10.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -25472,16 +25594,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -25499,7 +25621,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -25527,7 +25649,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 2304
+      "offset": 9216
      },
      {
       "buf": "conv_q"
@@ -25539,7 +25661,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -25579,13 +25701,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 2304
+      "offset": 9216
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -25594,22 +25716,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.12.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -25617,23 +25739,23 @@
     ]
    },
    {
-    "label": "l12.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l12.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -26084,16 +26206,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -26111,7 +26233,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -26139,7 +26261,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 2560
+      "offset": 10240
      },
      {
       "buf": "conv_q"
@@ -26151,7 +26273,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -26191,13 +26313,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 2560
+      "offset": 10240
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -26206,22 +26328,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.13.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -26229,23 +26351,23 @@
     ]
    },
    {
-    "label": "l13.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l13.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -26696,16 +26818,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -26723,7 +26845,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -26751,7 +26873,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 2816
+      "offset": 11264
      },
      {
       "buf": "conv_q"
@@ -26763,7 +26885,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -26803,13 +26925,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 2816
+      "offset": 11264
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -26818,22 +26940,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.14.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -26841,23 +26963,23 @@
     ]
    },
    {
-    "label": "l14.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l14.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -27910,16 +28032,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -27937,7 +28059,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -27965,7 +28087,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 3072
+      "offset": 12288
      },
      {
       "buf": "conv_q"
@@ -27977,7 +28099,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -28017,13 +28139,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 3072
+      "offset": 12288
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -28032,22 +28154,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.16.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -28055,23 +28177,23 @@
     ]
    },
    {
-    "label": "l16.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l16.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -28522,16 +28644,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -28549,7 +28671,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -28577,7 +28699,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 3328
+      "offset": 13312
      },
      {
       "buf": "conv_q"
@@ -28589,7 +28711,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -28629,13 +28751,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 3328
+      "offset": 13312
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -28644,22 +28766,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.17.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -28667,23 +28789,23 @@
     ]
    },
    {
-    "label": "l17.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l17.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -29134,16 +29256,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -29161,7 +29283,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -29189,7 +29311,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 3584
+      "offset": 14336
      },
      {
       "buf": "conv_q"
@@ -29201,7 +29323,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -29241,13 +29363,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 3584
+      "offset": 14336
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -29256,22 +29378,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.18.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -29279,23 +29401,23 @@
     ]
    },
    {
-    "label": "l18.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l18.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -30348,16 +30470,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -30375,7 +30497,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -30403,7 +30525,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 3840
+      "offset": 15360
      },
      {
       "buf": "conv_q"
@@ -30415,7 +30537,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -30455,13 +30577,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 3840
+      "offset": 15360
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -30470,22 +30592,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.20.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -30493,23 +30615,23 @@
     ]
    },
    {
-    "label": "l20.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l20.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -30960,16 +31082,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -30987,7 +31109,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -31015,7 +31137,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 4096
+      "offset": 16384
      },
      {
       "buf": "conv_q"
@@ -31027,7 +31149,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -31067,13 +31189,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 4096
+      "offset": 16384
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -31082,22 +31204,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.21.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -31105,23 +31227,23 @@
     ]
    },
    {
-    "label": "l21.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l21.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -31572,16 +31694,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -31599,7 +31721,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -31627,7 +31749,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 4352
+      "offset": 17408
      },
      {
       "buf": "conv_q"
@@ -31639,7 +31761,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -31679,13 +31801,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 4352
+      "offset": 17408
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -31694,22 +31816,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.22.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -31717,23 +31839,23 @@
     ]
    },
    {
-    "label": "l22.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l22.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -32786,16 +32908,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -32813,7 +32935,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -32841,7 +32963,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 4608
+      "offset": 18432
      },
      {
       "buf": "conv_q"
@@ -32853,7 +32975,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -32893,13 +33015,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 4608
+      "offset": 18432
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -32908,22 +33030,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.24.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -32931,23 +33053,23 @@
     ]
    },
    {
-    "label": "l24.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l24.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -33398,16 +33520,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -33425,7 +33547,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -33453,7 +33575,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 4864
+      "offset": 19456
      },
      {
       "buf": "conv_q"
@@ -33465,7 +33587,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -33505,13 +33627,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 4864
+      "offset": 19456
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -33520,22 +33642,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.25.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -33543,23 +33665,23 @@
     ]
    },
    {
-    "label": "l25.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l25.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -34010,16 +34132,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -34037,7 +34159,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -34065,7 +34187,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 5120
+      "offset": 20480
      },
      {
       "buf": "conv_q"
@@ -34077,7 +34199,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -34117,13 +34239,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 5120
+      "offset": 20480
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -34132,22 +34254,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.26.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -34155,23 +34277,23 @@
     ]
    },
    {
-    "label": "l26.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l26.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -35224,16 +35346,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -35251,7 +35373,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -35279,7 +35401,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 5376
+      "offset": 21504
      },
      {
       "buf": "conv_q"
@@ -35291,7 +35413,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -35331,13 +35453,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 5376
+      "offset": 21504
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -35346,22 +35468,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.28.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -35369,23 +35491,23 @@
     ]
    },
    {
-    "label": "l28.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l28.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -35836,16 +35958,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -35863,7 +35985,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -35891,7 +36013,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 5632
+      "offset": 22528
      },
      {
       "buf": "conv_q"
@@ -35903,7 +36025,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -35943,13 +36065,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 5632
+      "offset": 22528
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -35958,22 +36080,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.29.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -35981,23 +36103,23 @@
     ]
    },
    {
-    "label": "l29.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l29.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -36448,16 +36570,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -36475,7 +36597,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -36503,7 +36625,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 5888
+      "offset": 23552
      },
      {
       "buf": "conv_q"
@@ -36515,7 +36637,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -36555,13 +36677,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 5888
+      "offset": 23552
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -36570,22 +36692,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.30.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -36593,23 +36715,23 @@
     ]
    },
    {
-    "label": "l30.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l30.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -37662,16 +37784,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -37689,7 +37811,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -37717,7 +37839,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 6144
+      "offset": 24576
      },
      {
       "buf": "conv_q"
@@ -37729,7 +37851,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -37769,13 +37891,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 6144
+      "offset": 24576
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -37784,22 +37906,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.32.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -37807,23 +37929,23 @@
     ]
    },
    {
-    "label": "l32.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l32.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -38274,16 +38396,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -38301,7 +38423,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -38329,7 +38451,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 6400
+      "offset": 25600
      },
      {
       "buf": "conv_q"
@@ -38341,7 +38463,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -38381,13 +38503,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 6400
+      "offset": 25600
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -38396,22 +38518,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.33.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -38419,23 +38541,23 @@
     ]
    },
    {
-    "label": "l33.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l33.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -38886,16 +39008,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -38913,7 +39035,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -38941,7 +39063,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 6656
+      "offset": 26624
      },
      {
       "buf": "conv_q"
@@ -38953,7 +39075,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -38993,13 +39115,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 6656
+      "offset": 26624
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -39008,22 +39130,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.34.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -39031,23 +39153,23 @@
     ]
    },
    {
-    "label": "l34.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l34.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -40100,16 +40222,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -40127,7 +40249,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -40155,7 +40277,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 6912
+      "offset": 27648
      },
      {
       "buf": "conv_q"
@@ -40167,7 +40289,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -40207,13 +40329,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 6912
+      "offset": 27648
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -40222,22 +40344,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.36.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -40245,23 +40367,23 @@
     ]
    },
    {
-    "label": "l36.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l36.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -40712,16 +40834,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -40739,7 +40861,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -40767,7 +40889,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 7168
+      "offset": 28672
      },
      {
       "buf": "conv_q"
@@ -40779,7 +40901,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -40819,13 +40941,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 7168
+      "offset": 28672
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -40834,22 +40956,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.37.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -40857,23 +40979,23 @@
     ]
    },
    {
-    "label": "l37.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l37.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -41324,16 +41446,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -41351,7 +41473,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -41379,7 +41501,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 7424
+      "offset": 29696
      },
      {
       "buf": "conv_q"
@@ -41391,7 +41513,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -41431,13 +41553,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 7424
+      "offset": 29696
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -41446,22 +41568,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.38.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -41469,23 +41591,23 @@
     ]
    },
    {
-    "label": "l38.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l38.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -42538,16 +42660,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -42565,7 +42687,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -42593,7 +42715,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 7680
+      "offset": 30720
      },
      {
       "buf": "conv_q"
@@ -42605,7 +42727,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -42645,13 +42767,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 7680
+      "offset": 30720
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -42660,22 +42782,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.40.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -42683,23 +42805,23 @@
     ]
    },
    {
-    "label": "l40.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l40.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -43150,16 +43272,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -43177,7 +43299,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -43205,7 +43327,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 7936
+      "offset": 31744
      },
      {
       "buf": "conv_q"
@@ -43217,7 +43339,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -43257,13 +43379,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 7936
+      "offset": 31744
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -43272,22 +43394,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.41.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -43295,23 +43417,23 @@
     ]
    },
    {
-    "label": "l41.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l41.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -43762,16 +43884,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -43789,7 +43911,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -43817,7 +43939,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 8192
+      "offset": 32768
      },
      {
       "buf": "conv_q"
@@ -43829,7 +43951,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -43869,13 +43991,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 8192
+      "offset": 32768
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -43884,22 +44006,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.42.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -43907,23 +44029,23 @@
     ]
    },
    {
-    "label": "l42.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l42.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -44976,16 +45098,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -45003,7 +45125,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -45031,7 +45153,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 8448
+      "offset": 33792
      },
      {
       "buf": "conv_q"
@@ -45043,7 +45165,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -45083,13 +45205,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 8448
+      "offset": 33792
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -45098,22 +45220,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.44.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -45121,23 +45243,23 @@
     ]
    },
    {
-    "label": "l44.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l44.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -45588,16 +45710,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -45615,7 +45737,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -45643,7 +45765,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 8704
+      "offset": 34816
      },
      {
       "buf": "conv_q"
@@ -45655,7 +45777,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -45695,13 +45817,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 8704
+      "offset": 34816
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -45710,22 +45832,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.45.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -45733,23 +45855,23 @@
     ]
    },
    {
-    "label": "l45.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l45.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -46200,16 +46322,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -46227,7 +46349,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -46255,7 +46377,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 8960
+      "offset": 35840
      },
      {
       "buf": "conv_q"
@@ -46267,7 +46389,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -46307,13 +46429,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 8960
+      "offset": 35840
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -46322,22 +46444,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.46.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -46345,23 +46467,23 @@
     ]
    },
    {
-    "label": "l46.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l46.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -47414,16 +47536,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -47441,7 +47563,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -47469,7 +47591,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 9216
+      "offset": 36864
      },
      {
       "buf": "conv_q"
@@ -47481,7 +47603,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -47521,13 +47643,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 9216
+      "offset": 36864
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -47536,22 +47658,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.48.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -47559,23 +47681,23 @@
     ]
    },
    {
-    "label": "l48.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l48.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -48026,16 +48148,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -48053,7 +48175,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -48081,7 +48203,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 9472
+      "offset": 37888
      },
      {
       "buf": "conv_q"
@@ -48093,7 +48215,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -48133,13 +48255,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 9472
+      "offset": 37888
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -48148,22 +48270,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.49.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -48171,23 +48293,23 @@
     ]
    },
    {
-    "label": "l49.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l49.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -48638,16 +48760,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -48665,7 +48787,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -48693,7 +48815,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 9728
+      "offset": 38912
      },
      {
       "buf": "conv_q"
@@ -48705,7 +48827,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -48745,13 +48867,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 9728
+      "offset": 38912
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -48760,22 +48882,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.50.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -48783,23 +48905,23 @@
     ]
    },
    {
-    "label": "l50.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l50.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -49852,16 +49974,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -49879,7 +50001,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -49907,7 +50029,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 9984
+      "offset": 39936
      },
      {
       "buf": "conv_q"
@@ -49919,7 +50041,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -49959,13 +50081,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 9984
+      "offset": 39936
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -49974,22 +50096,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.52.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -49997,23 +50119,23 @@
     ]
    },
    {
-    "label": "l52.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l52.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -50464,16 +50586,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -50491,7 +50613,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -50519,7 +50641,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 10240
+      "offset": 40960
      },
      {
       "buf": "conv_q"
@@ -50531,7 +50653,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -50571,13 +50693,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 10240
+      "offset": 40960
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -50586,22 +50708,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.53.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -50609,23 +50731,23 @@
     ]
    },
    {
-    "label": "l53.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l53.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -51076,16 +51198,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -51103,7 +51225,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -51131,7 +51253,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 10496
+      "offset": 41984
      },
      {
       "buf": "conv_q"
@@ -51143,7 +51265,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -51183,13 +51305,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 10496
+      "offset": 41984
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -51198,22 +51320,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.54.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -51221,23 +51343,23 @@
     ]
    },
    {
-    "label": "l54.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l54.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -52290,16 +52412,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -52317,7 +52439,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -52345,7 +52467,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 10752
+      "offset": 43008
      },
      {
       "buf": "conv_q"
@@ -52357,7 +52479,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -52397,13 +52519,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 10752
+      "offset": 43008
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -52412,22 +52534,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.56.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -52435,23 +52557,23 @@
     ]
    },
    {
-    "label": "l56.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l56.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -52902,16 +53024,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -52929,7 +53051,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -52957,7 +53079,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 11008
+      "offset": 44032
      },
      {
       "buf": "conv_q"
@@ -52969,7 +53091,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -53009,13 +53131,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 11008
+      "offset": 44032
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -53024,22 +53146,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.57.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -53047,23 +53169,23 @@
     ]
    },
    {
-    "label": "l57.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l57.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -53514,16 +53636,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -53541,7 +53663,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -53569,7 +53691,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 11264
+      "offset": 45056
      },
      {
       "buf": "conv_q"
@@ -53581,7 +53703,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -53621,13 +53743,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 11264
+      "offset": 45056
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -53636,22 +53758,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.58.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -53659,23 +53781,23 @@
     ]
    },
    {
-    "label": "l58.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l58.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -54728,16 +54850,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -54755,7 +54877,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -54783,7 +54905,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 11520
+      "offset": 46080
      },
      {
       "buf": "conv_q"
@@ -54795,7 +54917,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -54835,13 +54957,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 11520
+      "offset": 46080
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -54850,22 +54972,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.60.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -54873,23 +54995,23 @@
     ]
    },
    {
-    "label": "l60.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l60.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -55340,16 +55462,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -55367,7 +55489,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -55395,7 +55517,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 11776
+      "offset": 47104
      },
      {
       "buf": "conv_q"
@@ -55407,7 +55529,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -55447,13 +55569,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 11776
+      "offset": 47104
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -55462,22 +55584,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.61.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -55485,23 +55607,23 @@
     ]
    },
    {
-    "label": "l61.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l61.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -55952,16 +56074,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -55979,7 +56101,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -56007,7 +56129,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 12032
+      "offset": 48128
      },
      {
       "buf": "conv_q"
@@ -56019,7 +56141,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -56059,13 +56181,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 12032
+      "offset": 48128
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -56074,22 +56196,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.62.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -56097,23 +56219,23 @@
     ]
    },
    {
-    "label": "l62.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l62.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -57166,16 +57288,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -57193,7 +57315,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -57221,7 +57343,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 12288
+      "offset": 49152
      },
      {
       "buf": "conv_q"
@@ -57233,7 +57355,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -57273,13 +57395,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 12288
+      "offset": 49152
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -57288,22 +57410,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.64.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -57311,23 +57433,23 @@
     ]
    },
    {
-    "label": "l64.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l64.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -57778,16 +57900,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -57805,7 +57927,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -57833,7 +57955,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 12544
+      "offset": 50176
      },
      {
       "buf": "conv_q"
@@ -57845,7 +57967,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -57885,13 +58007,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 12544
+      "offset": 50176
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -57900,22 +58022,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.65.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -57923,23 +58045,23 @@
     ]
    },
    {
-    "label": "l65.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l65.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -58390,16 +58512,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -58417,7 +58539,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -58445,7 +58567,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 12800
+      "offset": 51200
      },
      {
       "buf": "conv_q"
@@ -58457,7 +58579,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -58497,13 +58619,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 12800
+      "offset": 51200
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -58512,22 +58634,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.66.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -58535,23 +58657,23 @@
     ]
    },
    {
-    "label": "l66.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l66.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -59604,16 +59726,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -59631,7 +59753,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -59659,7 +59781,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 13056
+      "offset": 52224
      },
      {
       "buf": "conv_q"
@@ -59671,7 +59793,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -59711,13 +59833,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 13056
+      "offset": 52224
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -59726,22 +59848,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.68.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -59749,23 +59871,23 @@
     ]
    },
    {
-    "label": "l68.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l68.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -60216,16 +60338,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -60243,7 +60365,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -60271,7 +60393,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 13312
+      "offset": 53248
      },
      {
       "buf": "conv_q"
@@ -60283,7 +60405,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -60323,13 +60445,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 13312
+      "offset": 53248
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -60338,22 +60460,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.69.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -60361,23 +60483,23 @@
     ]
    },
    {
-    "label": "l69.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l69.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -60828,16 +60950,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -60855,7 +60977,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -60883,7 +61005,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 13568
+      "offset": 54272
      },
      {
       "buf": "conv_q"
@@ -60895,7 +61017,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -60935,13 +61057,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 13568
+      "offset": 54272
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -60950,22 +61072,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.70.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -60973,23 +61095,23 @@
     ]
    },
    {
-    "label": "l70.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l70.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -62042,16 +62164,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -62069,7 +62191,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -62097,7 +62219,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 13824
+      "offset": 55296
      },
      {
       "buf": "conv_q"
@@ -62109,7 +62231,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -62149,13 +62271,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 13824
+      "offset": 55296
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -62164,22 +62286,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.72.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -62187,23 +62309,23 @@
     ]
    },
    {
-    "label": "l72.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l72.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -62654,16 +62776,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -62681,7 +62803,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -62709,7 +62831,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 14080
+      "offset": 56320
      },
      {
       "buf": "conv_q"
@@ -62721,7 +62843,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -62761,13 +62883,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 14080
+      "offset": 56320
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -62776,22 +62898,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.73.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -62799,23 +62921,23 @@
     ]
    },
    {
-    "label": "l73.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l73.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -63266,16 +63388,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -63293,7 +63415,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -63321,7 +63443,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 14336
+      "offset": 57344
      },
      {
       "buf": "conv_q"
@@ -63333,7 +63455,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -63373,13 +63495,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 14336
+      "offset": 57344
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -63388,22 +63510,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.74.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -63411,23 +63533,23 @@
     ]
    },
    {
-    "label": "l74.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l74.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -64480,16 +64602,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -64507,7 +64629,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -64535,7 +64657,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 14592
+      "offset": 58368
      },
      {
       "buf": "conv_q"
@@ -64547,7 +64669,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -64587,13 +64709,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 14592
+      "offset": 58368
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -64602,22 +64724,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.76.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -64625,23 +64747,23 @@
     ]
    },
    {
-    "label": "l76.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l76.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -65092,16 +65214,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -65119,7 +65241,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -65147,7 +65269,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 14848
+      "offset": 59392
      },
      {
       "buf": "conv_q"
@@ -65159,7 +65281,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -65199,13 +65321,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 14848
+      "offset": 59392
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -65214,22 +65336,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.77.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -65237,23 +65359,23 @@
     ]
    },
    {
-    "label": "l77.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l77.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -65704,16 +65826,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -65731,7 +65853,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -65759,7 +65881,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 15104
+      "offset": 60416
      },
      {
       "buf": "conv_q"
@@ -65771,7 +65893,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -65811,13 +65933,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 15104
+      "offset": 60416
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -65826,22 +65948,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.78.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -65849,23 +65971,23 @@
     ]
    },
    {
-    "label": "l78.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l78.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -66918,16 +67040,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -66945,7 +67067,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -66973,7 +67095,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 15360
+      "offset": 61440
      },
      {
       "buf": "conv_q"
@@ -66985,7 +67107,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -67025,13 +67147,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 15360
+      "offset": 61440
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -67040,22 +67162,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.80.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -67063,23 +67185,23 @@
     ]
    },
    {
-    "label": "l80.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l80.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -67530,16 +67652,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -67557,7 +67679,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -67585,7 +67707,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 15616
+      "offset": 62464
      },
      {
       "buf": "conv_q"
@@ -67597,7 +67719,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -67637,13 +67759,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 15616
+      "offset": 62464
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -67652,22 +67774,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.81.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -67675,23 +67797,23 @@
     ]
    },
    {
-    "label": "l81.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l81.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -68142,16 +68264,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -68169,7 +68291,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -68197,7 +68319,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 15872
+      "offset": 63488
      },
      {
       "buf": "conv_q"
@@ -68209,7 +68331,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -68249,13 +68371,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 15872
+      "offset": 63488
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -68264,22 +68386,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.82.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -68287,23 +68409,23 @@
     ]
    },
    {
-    "label": "l82.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l82.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -69356,16 +69478,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -69383,7 +69505,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -69411,7 +69533,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 16128
+      "offset": 64512
      },
      {
       "buf": "conv_q"
@@ -69423,7 +69545,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -69463,13 +69585,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 16128
+      "offset": 64512
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -69478,22 +69600,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.84.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -69501,23 +69623,23 @@
     ]
    },
    {
-    "label": "l84.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l84.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -69968,16 +70090,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -69995,7 +70117,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -70023,7 +70145,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 16384
+      "offset": 65536
      },
      {
       "buf": "conv_q"
@@ -70035,7 +70157,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -70075,13 +70197,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 16384
+      "offset": 65536
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -70090,22 +70212,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.85.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -70113,23 +70235,23 @@
     ]
    },
    {
-    "label": "l85.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l85.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -70580,16 +70702,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -70607,7 +70729,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -70635,7 +70757,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 16640
+      "offset": 66560
      },
      {
       "buf": "conv_q"
@@ -70647,7 +70769,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -70687,13 +70809,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 16640
+      "offset": 66560
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -70702,22 +70824,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.86.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -70725,23 +70847,23 @@
     ]
    },
    {
-    "label": "l86.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l86.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -71794,16 +71916,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -71821,7 +71943,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -71849,7 +71971,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 16896
+      "offset": 67584
      },
      {
       "buf": "conv_q"
@@ -71861,7 +71983,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -71901,13 +72023,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 16896
+      "offset": 67584
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -71916,22 +72038,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.88.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -71939,23 +72061,23 @@
     ]
    },
    {
-    "label": "l88.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l88.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -72406,16 +72528,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -72433,7 +72555,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -72461,7 +72583,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 17152
+      "offset": 68608
      },
      {
       "buf": "conv_q"
@@ -72473,7 +72595,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -72513,13 +72635,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 17152
+      "offset": 68608
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -72528,22 +72650,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.89.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -72551,23 +72673,23 @@
     ]
    },
    {
-    "label": "l89.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l89.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
@@ -73018,16 +73140,16 @@
       "buf": "kda_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
-      "i32": 49152
+      "i32": 12288
      },
      {
       "i32": 7168
      },
      {
-      "i32": 49152
+      "i32": 12288
      }
     ]
    },
@@ -73045,7 +73167,7 @@
       "buf": "wsm_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 256
@@ -73073,7 +73195,7 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 17408
+      "offset": 69632
      },
      {
       "buf": "conv_q"
@@ -73085,7 +73207,7 @@
       "buf": "conv_v"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -73125,13 +73247,13 @@
      },
      {
       "buf": "kda.line_index",
-      "offset": 17408
+      "offset": 69632
      },
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      }
     ]
    },
@@ -73140,22 +73262,22 @@
     "op": "gemm_f32",
     "args": [
      {
-      "buf": "gated"
+      "buf": "gated_kda"
      },
      {
       "buf": "layers.90.w_o"
      },
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
-      "var": "tokens"
+      "var": "rows"
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
@@ -73163,23 +73285,23 @@
     ]
    },
    {
-    "label": "l90.gather_attn",
-    "op": "tp_allgather_f32",
+    "label": "l90.reduce_attn",
+    "op": "tp_allreduce_f32",
     "args": [
      {
-      "buf": "hidden_partial"
+      "buf": "o_partial"
      },
      {
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym"
+      "buf": "tp_sym_ar"
      },
      {
-      "buf": "tp_peers"
+      "buf": "tp_peers_ar"
      },
      {
-      "buf": "tp_epochs"
+      "buf": "tp_epochs_ar"
      },
      {
       "buf": "tp_err"
