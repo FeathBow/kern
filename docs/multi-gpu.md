@@ -36,7 +36,12 @@ decode 切头不切 latent 读），pegainfer 已把 TP 从设计里去掉。ker
 2. **CP 作为 per-sequence 的弹性数据 lane**（一条序列的 context 分段住在多个
    rank；whale 长 prefill 是一个 gang，与 decode lane 在同一 EP superstep 共存；
    P/D 不分离，靠 lane 混合）；
-3. TP 只给小 dense 模型垫底，不驱动设计。
+3. TP 只给小 dense 模型垫底，不驱动设计。**（2026-09-03 修正：这条说重了。**
+   attention-TP 仍然不买——切头不切 latent 读；但 K3 decode 每步的另一半是权重读
+   （EP32 每 rank 147 GiB ≈ 30 ms 地板，`agent-workload.md` §2 重算表），tray 内
+   dense（含 KDA）TP4 把它压到 ~18 ms，是量级上的收益。最终形态：**attention DP +
+   dense/KDA tray 内 TP4 + expert 跨 tray EP**，manifest 用下文"TP × EP 组合"的两个
+   组表达。）
 
 **统一抽象：段的可结合 partial + merge。** softmax attention 的 partial 是
 (O, LSE)，merge 是 online-softmax；线性注意力（KDA）的 partial 是仿射包 (M, D)，

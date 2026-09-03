@@ -1,6 +1,6 @@
 # Agent workload：AgentX（Claude Code）trace 分析与对 NVL72 部署的含义
 
-状态：2026-09-01。数据 = InferenceX（SemiAnalysis）AgentX 回放集，真实 Claude Code
+状态：2026-09-01；§2 成本口径 2026-09-03 按时间重算（见表下说明）。数据 = InferenceX（SemiAnalysis）AgentX 回放集，真实 Claude Code
 会话的匿名 trace（prompt/代码/工具载荷剥离，保留每请求 token 数、64-token 块链哈希、
 子 agent 分支、时间戳）。本地副本与分析脚本：
 本地存档 `bench-results/2026-09-01-agentx-traces/`（不在仓库）（`analyze.py`、`analysis-full.txt`、
@@ -51,6 +51,25 @@ KV 读 13.8 KB/token。dense+MoE 按 ~64 GFLOP/token（K2 量级，K3 待定）�
 | KV 读：decode 侧 / prefill 侧 | 420 PB / 0.3 PB（1400 : 1） |
 | 合计 275 EFLOP ÷ (72 GPU × 1.5 PF) | 2548 s → **≤ 42k 输出 tok/s 整机上限**，同时对应 **~143k extend（prefill）tok/s**（3.4:1）；按峰值算，实际打 6 折 |
 
+**这张表是 FLOP 口径，decode 侧两个分母都已被实测推翻（2026-09-03 重算）**：decode
+attention 是带宽绑定（`dcp-bench.md` B1：0.27 µs/ktok/层，219k ctx 每 session 每步
+1.4 ms），dense + MoE 在 decode 时是**权重带宽**绑定、与 token 数无关——EP32 下每 rank
+每步读 dense 105 GiB + 28 个 expert 42 GiB = 147 GiB ≈ 24 ms，再加 EP dispatch/combine
+5–7 ms，是每步 ~30 ms 的固定地板（E2b 实测 EP4 pruned B=1 步时 29.3 ms：dense 105 +
+expert 84 GiB，同一个数）。按 FLOP 算它几乎为零，按时间算它是一半。按时间重算，
+EP32、219k ctx、fp8 latent，每 rank 每步：
+
+| B（每 rank 行数） | attention 1.4 ms × B | 权重读 + EP 同步 | attention 占比 | 步时 |
+|---:|---:|---:|---:|---:|
+| 4 | 6 ms | 30 ms | 17% | 36 ms |
+| 16 | 22 ms | 30 ms | 43% | 52 ms |
+| 64 | 90 ms | 30 ms | 75% | 120 ms |
+
+全集折算（B=16）：decode attention ≈ 55 GPU·h、权重读 ≈ 55 GPU·h、extend attention
+≈ 10（93 EFLOP 按 3 PF fp8）、KDA ≈ 4——attention 约一半，不是九成；要到 89% 得
+B ≈ 100，那时步时 170 ms，TPOT 早破了。（dense 105 GiB 是导出文件的实际大小，
+`kern-k3/full/dense/`；expert 每层每 rank 0.46 GiB@EP32 同样量自文件。）
+
 口径核对：vLLM TP8×EP8 冷 128k 4.48 s = 29k prefill tok/s / 8 卡，×9 = 260k tok/s 整机。
 本模型算冷 128k 为 20 PFLOP / 8 卡 = 1.7 s（vLLM 效率 ~40%），不矛盾；差别在
 **每个 extend token 对 220k 前缀的 attention（0.32 TFLOP）是冷 128k 平均每 token
@@ -60,8 +79,13 @@ KV 读 13.8 KB/token。dense+MoE 按 ~64 GFLOP/token（K2 量级，K3 待定）�
 
 三个推论：
 
-1. **attention 是全部成本的 89%，两侧各半。** 减少每 token attention 代价的模型侧改动
-   （稀疏/压缩 attention）比任何系统优化都大。
+1. ~~attention 是全部成本的 89%~~ **attention 的份额是 B 的函数，TPOT 允许的 B 下约一半**
+   （上表）。另一半是每步固定的权重读，这一半是系统能动的：tray 内把 dense（含 KDA）
+   按 TP4 分片，每 rank 每步从 147 GiB 降到 26 + 42 = 68 GiB，地板 30 → ~18 ms，B=16
+   时步从 52 到 40 ms，或者固定 52 ms 的步下 B 从 16 涨到 24（每 rank 并发 +50%）。
+   attention 仍留 DP：TP2 切头后一对卡各读整条 latent，attention 项 22 → 44 ms，换回
+   dense 省的 8.5 ms，净亏（吸收式 MLA 每个头组都要读全部 latent）。模型侧的稀疏 /
+   压缩 attention 仍然值钱，但只砍一半，不是九成。
 2. ~~MLA 吸收式 decode 在 GB300 上是算力绑定~~ **已证伪**（`dcp-bench.md` B1）：
    b=1 时 786 TF/s、4 TB/s，是带宽/占用绑定，每层 0.27 µs/ktok。纸面 362 FLOP/B
    没兑现，因为一条 session 只有 96 行 query，GEMM 打不满。所以 decode attention
@@ -100,7 +124,8 @@ KV 读 13.8 KB/token。dense+MoE 按 ~64 GFLOP/token（K2 量级，K3 待定）�
 
 ## 4. 待验证
 
-- K3 的 MLA 层是否有稀疏 attention（决定 89% 那块能不能砍）。
-- decode attention 的实测 FLOP/B（吸收式 96 头是否真的算力绑定；FP8 KV 改变比值）。
+- K3 的 MLA 层是否有稀疏 attention（决定 attention 那一半能不能砍）。
+- ~~decode attention 的实测 FLOP/B~~ 已测（`dcp-bench.md` B1，带宽绑定）；待测的是
+  dense TP4 的实际地板（allreduce 93 层 × 2 次、KDA 分片后的 state 布局）。
 - 真实 arrival：trace 是每会话相对时间，整机并发要靠回放器给到达率；AgentX 的回放
   脚本（aiperf `--public-dataset semianalysis_cc_traces_weka_with_subagents`）可直接用。
