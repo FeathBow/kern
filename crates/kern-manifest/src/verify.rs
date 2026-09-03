@@ -507,10 +507,9 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
                     LaunchArg::Pack { pack } => {
                         match param {
                             ParamType::Bytes(n) if *n == pack.size => {}
-                            ParamType::Bytes(n) => errs.push(format!(
-                                "{actx}: pack of {} bytes bound to a `bytes<{n}>` param",
-                                pack.size
-                            )),
+                            ParamType::Bytes(n) => {
+                                errs.push(format!("{actx}: pack of {} bytes bound to a `bytes<{n}>` param", pack.size))
+                            }
                             _ => errs.push(format!("{actx}: a pack binds only to a `bytes<n>` param, not `{param}`")),
                         }
                         for e in pack.check(|i| op.params.get(i).map(|p| p.size_bytes() as u32)) {
@@ -553,7 +552,10 @@ pub fn verify(m: &Manifest) -> Result<(), VerifyErrors> {
                                 FieldSrc::Rank { rank } => {
                                     group_ctx(rank, &mut errs, &mut used_groups, &fctx);
                                 }
-                                FieldSrc::I32 { .. } | FieldSrc::I64 { .. } | FieldSrc::F32 { .. } | FieldSrc::U8 { .. } => {}
+                                FieldSrc::I32 { .. }
+                                | FieldSrc::I64 { .. }
+                                | FieldSrc::F32 { .. }
+                                | FieldSrc::U8 { .. } => {}
                             }
                         }
                     }

@@ -827,7 +827,11 @@ impl Field {
         self.width.or(match &self.src {
             FieldSrc::Param { .. } => None,
             FieldSrc::Scratch { .. } | FieldSrc::I64 { .. } => Some(8),
-            FieldSrc::I32 { .. } | FieldSrc::F32 { .. } | FieldSrc::Var { .. } | FieldSrc::Expr { .. } | FieldSrc::Rank { .. } => Some(4),
+            FieldSrc::I32 { .. }
+            | FieldSrc::F32 { .. }
+            | FieldSrc::Var { .. }
+            | FieldSrc::Expr { .. }
+            | FieldSrc::Rank { .. } => Some(4),
             FieldSrc::U8 { .. } => Some(1),
         })
     }

@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use cudarc::driver::{result as cu, sys, CudaStream};
-use kern_manifest::types::{Arg, Call, Dim, Expr, FieldSrc, LaunchArg, Manifest, Op, Pack, ParamType, TensorMap, TmaDType};
+use kern_manifest::types::{
+    Arg, Call, Dim, Expr, FieldSrc, LaunchArg, Manifest, Op, Pack, ParamType, TensorMap, TmaDType,
+};
 use std::os::raw::c_void;
 
 use crate::cubin::{param_sizes, LoadedModule, MulticastScan};
@@ -501,7 +503,11 @@ fn pack_plan(
         let width = f.width.unwrap_or(natural) as usize;
         let at = f.at as usize;
         if width == 0 || width > 8 || at + width > pack.size as usize {
-            bail!(Manifest, "launch #{li}: pack field #{k}: {width} bytes at {at} do not fit the {} byte image", pack.size);
+            bail!(
+                Manifest,
+                "launch #{li}: pack field #{k}: {width} bytes at {at} do not fit the {} byte image",
+                pack.size
+            );
         }
         fields.push((at, width, slot));
     }
@@ -513,7 +519,11 @@ fn pack_plan(
 fn span_footprint(t: &TensorMap) -> Option<u64> {
     match t.dims.last() {
         Some(0) => {
-            let inner = TensorMap { dims: t.dims[..t.dims.len() - 1].to_vec(), strides: t.strides[..t.strides.len() - 1].to_vec(), ..t.clone() };
+            let inner = TensorMap {
+                dims: t.dims[..t.dims.len() - 1].to_vec(),
+                strides: t.strides[..t.strides.len() - 1].to_vec(),
+                ..t.clone()
+            };
             inner.footprint()
         }
         _ => t.footprint(),
