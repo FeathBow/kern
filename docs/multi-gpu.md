@@ -176,21 +176,28 @@ sh_down / w_dn 切列，down 的 partial 走 allreduce，每层一次（lat_up �
 B=8 mixed、fork 38/40 + 2 excused；4 行、8 行时 step 13 选到参考的 top-3（参考
 margin 3 ULP），12 / 16 / 32 行不翻——cuBLAS 按 m 选核加上求和顺序变了。
 
-**93 层 EP4×TP4 对 12.9k oracle**（`k3-ep4-tp4.json`，`--check-last 64` 口径，E2b 同
-fixture）：
-
-| 每 rank B | tray 行 | exact | 步时 | EP4 同 B（E2b） |
-|---:|---:|---:|---:|---:|
-| 1 | 4 | 108/128 | **23.07 ms** | 111/128，29.3 ms |
-| 8 mixed | 32 | 113/128 | 35.56 ms | 110/128，35.3 ms |
-| 16 | 64 | 107/128 | 47.93 ms | —（B=32 48.3） |
-
+**93 层 EP4×TP4**（`k3-ep4-tp4.json`）。一致性对 12.9k oracle（`--check-last 64`，E2b 同
+fixture）：B=1 108/128（EP4 111/128）、B=8 mixed 113/128（EP4 110/128）、B=16 107/128；
 不一致的 token 逐个 detokenize 全是同义替换 / 标点 / 编造指标里的数字（" at"↔" is"、
-"uted"↔"used"、" framing"↔" own"），没有乱码；行间无串扰，collective 无超时。B=1
-省下的 6 ms 是权重读（每 rank 147 → ~75 GiB）；B=8 起 one-shot LL allreduce 的回读
-成本（[32 行, 7168] f32 一次 ~60 µs、[64 行] ~150 µs，每步 161 次）把省下的时间吃回
-去了，B=16 单 collective 就占 ~20 ms。下一块先换协议（LL128 或 two-shot），再谈
-≤ 20 / ≤ 42 ms。
+"uted"↔"used"、" framing"↔" own"），没有乱码；行间无串扰，collective 无超时。步时
+分短上下文（40 步 fixture，E2b 的 29.3 / 35.3 / 48.3 是这个口径）和 12.9k 上下文：
+
+| 每 rank B | tray 行 | EP4 短 ctx | **EP4×TP4 短 ctx** | EP4 12.9k | EP4×TP4 12.9k |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 4 | 29.3 | **20.8** | 31.5 | 23.1 |
+| 8 | 32 | 35.3 | **25.5** | 42.3 | 35.6 |
+| 16 | 64 | ~40（B=32 48.3） | **31.9** | — | 47.9 |
+
+TP4 在每个 B 上省 8.5–10 ms，就是每 rank 权重读 147 → ~75 GiB 的差；collective 按单测
+数字算每步 B=1 ≈ 1.4 ms（161 次 allreduce × 5.2 + 116 次 gather × 4.5 µs）、B=16 ≈ 4.7 ms。
+还复制着的权重：MLA 24 层的 wfu / w_q_b / w_kv_b / w_o ≈ 10.8 GB（≈ 1.35 ms/步）、
+LM head 2.35 GB、lat_down / lat_up 1.35 GB。
+
+顺带量到的、比 E5 剩下的 0.8 ms 大得多的事：**12.9k 上下文每行每步多 ~1 ms**（B=1
++2.3、B=8 +10、B=16 +16 ms，EP4 与 TP4 一样），是 MLA decode 核（cluster-8 split-KV）
+在多行长上下文下的效率：每行每步读 357 MB latent 用 1 ms ≈ 360 GB/s，不到 HBM 的
+5%。agent 负载的 ctx p50 是 219k（agent-workload.md），按这个斜率一行一步 17 ms——
+这是下一个该动的核，记进 roadmap。
 
 ### GPU 自提交
 
