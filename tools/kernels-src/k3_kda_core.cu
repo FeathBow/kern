@@ -72,11 +72,18 @@
 //        -o target/cubins/k3_kda_core.cubin tools/kernels-src/k3_kda_core.cu
 #include <cuda_bf16.h>
 
+// HEADS is the heads this rank holds: 96 whole, or a tray-group shard
+// (`-DHEADS=24` for TP4, docs/multi-gpu.md "最终形态"); the per-head weights
+// and the state line are then that rank's slice, the wsm partial keeps its
+// whole-model layout (beta at column h, f_a at WSM_FA).
+#ifndef HEADS
 #define HEADS 96
+#endif
 #define KD 128
-#define INNER 12288
-#define KDA_FUSED 49152
+#define INNER (HEADS * KD)
+#define KDA_FUSED (4 * INNER)
 #define WSM 256
+#define WSM_FA 96
 #define LB (-5.0f)
 #define RMS_EPS 1e-5f
 #define L2_EPS 1e-6f
@@ -178,7 +185,7 @@ extern "C" __global__ __launch_bounds__(128) void kern_k3_kda_core(
 
   // ---- beta, f_a -> f_b projection, the decay gate ----
   const float beta = sigmoidf_(__bfloat162float(__float2bfloat16(wsm_partial[(size_t)b * WSM + h])));
-  sh_flow[d + ((d >> 3) << 2)] = __bfloat162float(__float2bfloat16(wsm_partial[(size_t)b * WSM + HEADS + d]));
+  sh_flow[d + ((d >> 3) << 2)] = __bfloat162float(__float2bfloat16(wsm_partial[(size_t)b * WSM + WSM_FA + d]));
   __syncthreads();
 
   // ga[d] = sum_j flow[j] * w_f_b[base+d, j].  This head's 128x128 bf16 tile is

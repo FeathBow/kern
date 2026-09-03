@@ -63,10 +63,15 @@
 #define K2_VEC 4
 #endif
 
-#define K2_INNER 12288
-#define K2_KDA_FUSED 49152
-#define K2_REC_BYTES 6291456LL
-#define K2_WIN_BYTES 73728LL
+// HEADS: this rank's heads (96 whole, `-DHEADS=24` for a TP4 shard); the
+// partial, the taps and the window are that many heads wide.
+#ifndef HEADS
+#define HEADS 96
+#endif
+#define K2_INNER (HEADS * 128)
+#define K2_KDA_FUSED (4 * K2_INNER)
+#define K2_REC_BYTES ((long long)HEADS * 128 * 128 * 4)
+#define K2_WIN_BYTES ((long long)3 * K2_INNER * 2)
 
 #if K2_VEC == 8
 typedef uint4 k2_hvec;
