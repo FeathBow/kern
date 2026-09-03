@@ -28,6 +28,15 @@
 //! token for token. `--mixed`: row 0 feeds the fixture, rows 1.. feed a
 //! seeded random prompt that is first run alone (B = 1); the batch rows
 //! must reproduce that solo run — rows do not leak into each other.
+//! `--fork S` branches two children off row 0 after step S
+//! (`Runtime::fork`: pages shared, the page in progress and the KDA state
+//! copied). The twin keeps feeding the fixture and must match row 0 token
+//! for token inside the same batch; the stray feeds random tokens from
+//! there, so row 0 staying the fixture's proves the children write their
+//! own pages. The stray is also held to a from-scratch run of its tokens
+//! (reported, not judged: the rows around it differ, and that is a
+//! near-tie's difference). Every reference batch forks the same way, so
+//! rows meet the same batch sizes in both runs (the K2 gate).
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -257,6 +266,15 @@ impl Batch {
         Ok(())
     }
 
+    /// A child of row `row` from the batch's position: one more row, the
+    /// tables restaged.
+    fn fork(&mut self, rt: &mut Runtime, row: usize, tokens_per_row: usize) -> anyhow::Result<()> {
+        anyhow::ensure!(self.leases.len() < self.seqs_max, "no row for a fork: {} rows", self.seqs_max);
+        let child = rt.fork(&mut self.leases[row], self.pos, tokens_per_row)?;
+        self.leases.push(child);
+        self.stage_tables(rt)
+    }
+
     fn stage(&self, rt: &mut Runtime, toks: &[i64]) -> anyhow::Result<BTreeMap<String, u64>> {
         let b = self.leases.len();
         assert_eq!(toks.len(), b);
@@ -279,7 +297,10 @@ fn le_bytes_i32(v: &[i32]) -> Vec<u8> {
 
 /// Run `feeds` (one token list per row, all the same length) as a batch;
 /// returns each row's sampled tokens (`steps + free` of them) and, with
-/// `iters > 0`, the replay time.
+/// `iters > 0`, the replay time. `fork` = (step, feed): after that many
+/// steps two children of row 0 join as the last rows, the twin feeding
+/// row 0's tokens and the stray `feed[step..]`; their tokens before the
+/// fork are empty.
 fn run_batch(
     rt: &mut Runtime,
     feeds: &[Vec<i64>],
@@ -287,23 +308,33 @@ fn run_batch(
     graph: bool,
     iters: usize,
     free: usize,
+    fork: Option<(usize, &[i64])>,
 ) -> anyhow::Result<(Vec<Vec<i64>>, Option<f64>)> {
     let rows = feeds.len();
     let steps = feeds[0].len();
     let mut batch = Batch::new(rt, rows, tokens_per_row)?;
     let mut out: Vec<Vec<i64>> = vec![Vec::with_capacity(steps + free); rows];
-    let mut captured = false;
     let mut env = BTreeMap::new();
     // After the scripted feed, `free` more steps run each row on its own
     // argmax (a greedy continuation, for reading the text back).
     for step in 0..steps + free {
+        if fork.is_some_and(|(at, _)| at == step) {
+            for _ in 0..2 {
+                batch.fork(rt, 0, tokens_per_row)?;
+                out.push(Vec::with_capacity(steps + free - step));
+            }
+        }
+        let feed = |r: usize| match fork {
+            Some((_, stray)) if r == rows + 1 => stray[step],
+            Some(_) if r == rows => feeds[0][step],
+            _ => feeds[r][step],
+        };
         let toks: Vec<i64> =
-            (0..rows).map(|r| if step < steps { feeds[r][step] } else { *out[r].last().unwrap() }).collect();
+            (0..out.len()).map(|r| if step < steps { feed(r) } else { *out[r].last().unwrap() }).collect();
         env = batch.stage(rt, &toks)?;
         if graph {
-            if !captured {
+            if !rt.is_captured("decode", &env) {
                 rt.capture("decode", &env)?;
-                captured = true;
             }
             rt.run_captured("decode", &env)?;
         } else {
@@ -316,7 +347,7 @@ fn run_batch(
         }
     }
     let ms = if iters > 0 {
-        if !captured {
+        if !rt.is_captured("decode", &env) {
             rt.capture("decode", &env)?;
         }
         Some(rt.time_captured("decode", &env, iters)? as f64)
@@ -354,6 +385,7 @@ fn run_rank(
     distinct: bool,
     seed: u64,
     free: usize,
+    fork: Option<usize>,
     rendezvous: &dyn Fn(&mut Runtime) -> kern_runtime::Result<()>,
 ) -> anyhow::Result<Outcome> {
     let manifest = kern_manifest::types::Manifest::from_json(json)?;
@@ -363,7 +395,7 @@ fn run_rank(
         s => anyhow::bail!("unexpected block_table shape {s:?}"),
     };
     let per_row = per_row as usize;
-    let capacity = (per_row * seqs.max(1)) as u64;
+    let capacity = (per_row * (seqs.max(1) + 2 * fork.is_some() as usize)) as u64;
     let mut rt = Runtime::load(json, kernels, gpu, Some(capacity), Some(topo))?;
     let maps: Vec<memmap2::Mmap> = files
         .iter()
@@ -416,11 +448,27 @@ fn run_rank(
                 continue;
             }
             let copies = vec![feeds[r].clone(); seqs];
-            let (t, _) = run_batch(&mut rt, &copies, per_row, graph, 0, 0)?;
+            let shape = fork.map(|at| (at, feeds[r].as_slice()));
+            let (t, _) = run_batch(&mut rt, &copies, per_row, graph, 0, 0, shape)?;
             solo[r] = Some(t.into_iter().next().unwrap());
         }
     }
-    let (tokens, ms) = run_batch(&mut rt, &feeds, per_row, graph, iters, free)?;
+    // The stray child: the fixture up to the fork, random after it. Every
+    // reference batch forks the same way at the same step, so a row meets
+    // the same batch sizes (the same kernels) in both runs.
+    let stray: Option<Vec<i64>> = fork.map(|at| {
+        let mut f = golden.feed[..at].to_vec();
+        f.extend(random_feed(steps - at, vocab, seed + 97));
+        f
+    });
+    let stray_solo = match (&stray, fork) {
+        (Some(f), Some(at)) => {
+            let (t, _) = run_batch(&mut rt, &vec![f.clone(); seqs], per_row, graph, 0, 0, Some((at, f.as_slice())))?;
+            Some(t.into_iter().next().unwrap())
+        }
+        _ => None,
+    };
+    let (tokens, ms) = run_batch(&mut rt, &feeds, per_row, graph, iters, free, fork.zip(stray.as_deref()))?;
     out.step_ms = ms;
     out.tokens = tokens[0][..steps].to_vec();
     out.free = tokens[0][steps..].to_vec();
@@ -453,6 +501,28 @@ fn run_rank(
             ));
         }
     }
+    if let (Some(at), Some(want)) = (fork, &stray_solo) {
+        let twin = &tokens[seqs][..steps - at];
+        match (0..steps - at).find(|&i| twin[i] != tokens[0][at + i]) {
+            Some(i) => out.failures.push(format!(
+                "the twin forked at step {at} diverges from row 0 at step {}: got {}, row 0 has {}",
+                at + i,
+                twin[i],
+                tokens[0][at + i]
+            )),
+            None => println!("  fork at step {at}: the twin's {} tokens match row 0's", steps - at),
+        }
+        let stray = &tokens[seqs + 1][..steps - at];
+        match (0..steps - at).find(|&i| stray[i] != want[at + i]) {
+            Some(i) => println!(
+                "  the stray forked at step {at} leaves its from-scratch run at step {} ({} of {} match)",
+                at + i,
+                i,
+                steps - at
+            ),
+            None => println!("  the stray's {} tokens match its from-scratch run", steps - at),
+        }
+    }
     Ok(out)
 }
 
@@ -473,6 +543,7 @@ fn main() {
     let mut distinct = false;
     let mut seed = 1u64;
     let mut free = 0usize;
+    let mut fork: Option<usize> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut v = || args.next().expect("value");
@@ -493,6 +564,7 @@ fn main() {
             "--distinct" => distinct = true,
             "--seed" => seed = v().parse().unwrap(),
             "--free" => free = v().parse().unwrap(),
+            "--fork" => fork = Some(v().parse().unwrap()),
             _ => panic!("unknown arg {a}"),
         }
     }
@@ -586,6 +658,7 @@ fn main() {
                 distinct,
                 seed,
                 free,
+                fork,
                 &rendezvous,
             );
             results.lock().unwrap()[local] = Some(r.map_err(|e| format!("{e:#}")));
