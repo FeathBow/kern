@@ -169,6 +169,29 @@ B=8 2.176 → **1.633 ms**——3 个 KDA 层的投影权重每卡少读 3/4，�
 collective 的开销。随之改的契约：manifest 的 seq slot 数跟 `rows` 界走（每卡持有
 tray 批每一行的 state 分片），否则 4 卡各租 4B 行时 pool 一开始就在 remap。
 
+第三块（tray07，shared expert / dense FFN 按列切）：wsh / wgu 的 gate、up 各切行，
+sh_down / w_dn 切列，down 的 partial 走 allreduce，每层一次（lat_up 复制不切：它的
+输入是 `routed_latent_norm` 的整行，K 切要 manifest 表达 rank 相关的 buffer 偏移，
+而它每步只读 675 MB，1%）。4 层 B=1 1.420 → **1.188 ms**、B=8 1.633 → **1.422 ms**；
+B=8 mixed、fork 38/40 + 2 excused；4 行、8 行时 step 13 选到参考的 top-3（参考
+margin 3 ULP），12 / 16 / 32 行不翻——cuBLAS 按 m 选核加上求和顺序变了。
+
+**93 层 EP4×TP4 对 12.9k oracle**（`k3-ep4-tp4.json`，`--check-last 64` 口径，E2b 同
+fixture）：
+
+| 每 rank B | tray 行 | exact | 步时 | EP4 同 B（E2b） |
+|---:|---:|---:|---:|---:|
+| 1 | 4 | 108/128 | **23.07 ms** | 111/128，29.3 ms |
+| 8 mixed | 32 | 113/128 | 35.56 ms | 110/128，35.3 ms |
+| 16 | 64 | 107/128 | 47.93 ms | —（B=32 48.3） |
+
+不一致的 token 逐个 detokenize 全是同义替换 / 标点 / 编造指标里的数字（" at"↔" is"、
+"uted"↔"used"、" framing"↔" own"），没有乱码；行间无串扰，collective 无超时。B=1
+省下的 6 ms 是权重读（每 rank 147 → ~75 GiB）；B=8 起 one-shot LL allreduce 的回读
+成本（[32 行, 7168] f32 一次 ~60 µs、[64 行] ~150 µs，每步 161 次）把省下的时间吃回
+去了，B=16 单 collective 就占 ~20 ms。下一块先换协议（LL128 或 two-shot），再谈
+≤ 20 / ≤ 42 ms。
+
 ### GPU 自提交
 
 `cudaGraphInstantiateFlagDeviceLaunch` + 图尾 kernel
