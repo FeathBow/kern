@@ -93,11 +93,14 @@ pub struct Manifest {
 
 impl Manifest {
     /// Sequence slots the runtime provisions for every `bytes_per_seq`
-    /// state: the `seqs` bound (1 without the var), plus one so a batched
+    /// state: the rows a step addresses — the `rows` bound when the model
+    /// runs a group's batch (every rank holds a slice of every row's state),
+    /// else the `seqs` bound, 1 without either — plus one so a batched
     /// caller can hold a padding lease, plus slot 0, which is never leased
     /// — kernels may treat line index 0 as the null line.
     pub fn seq_slots(&self) -> u64 {
-        self.vars.get("seqs").map_or(1, |v| v.max.max(1)) + 2
+        let rows = self.vars.get("rows").or(self.vars.get("seqs"));
+        rows.map_or(1, |v| v.max.max(1)) + 2
     }
 
     /// Size of a declared topology group, if any.
