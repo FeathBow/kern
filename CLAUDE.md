@@ -11,7 +11,8 @@ the design is wrong, not the model.
 `docs/` is the design record (mostly Chinese); code, comments and commit
 messages are English. `docs/manifest.md`, `runtime.md`, `serve.md`,
 `spec-decode.md`, `attest.md` are the contracts; `docs/roadmap.md` is what is
-being built and the gate that closes each item.
+being built and the gate that closes each item; `docs/lessons.md` is what went
+wrong before and the rule each incident left behind — read it before a gate.
 
 Only judgment lives in this file. Anything a machine can check (formatting,
 the schema golden, lints) belongs in CI, not here.
