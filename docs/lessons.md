@@ -3,6 +3,28 @@
 设计写在 runtime.md / serve.md / multi-gpu.md 里；这里只记那些"不写下来下次还会
 再踩一遍"的事，以及它们落到了哪条规则上。
 
+## 2026-09-03，E5 tray 内 TP
+
+**`asm volatile` 上的 `"memory"` clobber 把整条链路串行化。** LL collective 的 16 B
+槽用内联 PTX 收发，加了 memory clobber 之后每个 pack 都是 load → 3 store → load，
+B=16 的 allreduce 只有链路的三分之一。去掉 clobber（flag 随数据走，顺序由 volatile
+访问自身保证）、一次轮询所有源，25 µs。规则：**collective 先测只发不收**，发的时间
+就是链路上限，其余都是回读协议的代价，别在错的一半上优化。
+
+**弱 load 看不到 peer 的写。** `ld.global.cg` 轮询 peer 写的槽永远"没到"，超时；
+`ld.volatile`（sys scope）才是内存模型承诺的路径。gpu-scope 在 GB300 上也能看到且
+更快，但没有承诺，不用。
+
+**tp 组的每个 rank 必须跑一模一样的 launch 序列。** k3_golden 的参考跑（每个 distinct
+feed 的复制批、stray 的 from-scratch 批）和 fork 都要在组里每个 rank 上做同样的次数，
+不然 collective 在某个 rank 上等一个不会来的 epoch，超时报 err。规则：harness 里
+"这个 rank 要不要跑"永远由组共有的量决定（feeds 数、fork 步），不看 rank 号。
+
+**每卡持有 tray 批每一行的 state，slot 数就得跟行界走。** KDA 按头切后一张卡的 state
+是 4B 行 × 24 头，pool 按 `seqs` 界开 slot，四卡各租 4B 行时第一步就 `lease denied:
+remapping`。`Manifest::seq_slots` 改为跟 `rows` 界（没有 `rows` 时才是 `seqs`）。
+规则：slot 数的来源是 line table 的宽度界，不是 batch 的序列数。
+
 ## 2026-09-03，K2 fork + K3 host 层
 
 **拷贝流不能让计算流等。** 第一版 wake 让 compute stream 的下一次 launch 等 transfer

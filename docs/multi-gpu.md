@@ -160,6 +160,15 @@ in payload、poison 模式、多缓冲），没用它的代码。
 批逐 token 一致；`--fork 12` 双子行正确；步时 4 层 B=1 1.653 → 1.723 ms、B=8
 1.951 → 2.176 ms（7 次 all-gather + 未分片的 trunk 跑 4B 行）。
 
+第二块（tray07，同一 fixture，KDA 按头切）：`tools/shard_k3_tp.py` 把每个 KDA 层的
+wbig / wsm / w_f_b / cw / dt_bias / a_log / w_o 按 24 头一卡切开，KDA 核由 `HEADS`
+宏出 24 头变体（`k3_kda_core+HEADS=24.cubin`），每 rank 的 KDA state 行是 4B 行 ×
+24 头；o_proj 的 partial 走 allreduce。fixture 37/40 + 3 excused 不变，混合行、
+四卡复制批、`--fork 12`（每卡都 fork）都过；步时 4 层 B=1 1.723 → **1.420 ms**、
+B=8 2.176 → **1.633 ms**——3 个 KDA 层的投影权重每卡少读 3/4，已经盖过了
+collective 的开销。随之改的契约：manifest 的 seq slot 数跟 `rows` 界走（每卡持有
+tray 批每一行的 state 分片），否则 4 卡各租 4B 行时 pool 一开始就在 remap。
+
 ### GPU 自提交
 
 `cudaGraphInstantiateFlagDeviceLaunch` + 图尾 kernel
