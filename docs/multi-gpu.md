@@ -40,8 +40,7 @@ decode 切头不切 latent 读），pegainfer 已把 TP 从设计里去掉。ker
    attention-TP 仍然不买——切头不切 latent 读；但 K3 decode 每步的另一半是权重读
    （EP32 每 rank 147 GiB ≈ 30 ms 地板，`agent-workload.md` §2 重算表），tray 内
    dense（含 KDA）TP4 把它压到 ~18 ms，是量级上的收益。最终形态：**attention DP +
-   dense/KDA tray 内 TP4 + expert 跨 tray EP**，manifest 用下文"TP × EP 组合"的两个
-   组表达。）
+   dense/KDA tray 内 TP4 + expert 跨 tray EP**，逐张量的切法见下文"最终形态"。）
 
 **统一抽象：段的可结合 partial + merge。** softmax attention 的 partial 是
 (O, LSE)，merge 是 online-softmax；线性注意力（KDA）的 partial 是仿射包 (M, D)，
@@ -235,7 +234,7 @@ verifier 因此只需检查 device-launch 的图约束（全 kernel/memcpy/memse
 - 权重按 rank 切在导出时做（`tools/export_weights.py` 出 8 份），manifest
   的 GEMM 形状是切后的；每层两个 `allreduce` call。
 - KV 按 head 切，每 rank 自己的 state；lease 决策只在 leader，block_table
-  写给每个 rank。
+  写给每个 rank。（只对小 dense 模型；K3 的 MLA latent 不能按头切，见"最终形态"。）
 - 图：每 rank 自己的图（不用跨设备图——它不能 device launch，且 fork/join
   只在同进程有意义）。
 - decode 用 one-shot allreduce（延迟主导），prefill 用 reduce-scatter +
@@ -262,6 +261,36 @@ manifest 声明多个组（`tp: 8, ep: 32`），peer buffer 各自指定 `group`
 loader 给每个组里本 rank 的 index 和成员。attention TP + experts EP 就是
 allreduce 用 tp 组、dispatch 用 ep 组，同一份 manifest。组的成员映射
 （哪 8 个全局 rank 是一个 TP 组）是 caller 的部署决策，manifest 不含。
+
+### 最终形态（2026-09-03 定）
+
+一句话：**tray 是一个 batch，权重按头切，只有 MLA 的 KV 按行归各卡。** 逐张量：
+
+| 东西 | 切法 | 为什么 |
+|---|---|---|
+| dense 投影、shared expert、dense FFN | TP4，tray 内按列 / 行切 | 权重每步必读，切四份就少读四分之三 |
+| KDA（69 层）投影 + 每 session 的递推 state | TP4 按头切，state 也按头分在四卡 | 线性注意力没有 KV cache，一个头的 state 只有拥有它的卡读写，TP 不多读一个字节 |
+| MLA（24 层）的 attention | 不切头，按行分：每卡管自己那批 session 的 latent | 吸收式 MLA 所有头共用一条 latent，切头 = 四卡各读整条，翻倍 |
+| MLA 的 q / kv / o 投影 | 第一版复制不切（24 层，占 dense 少数） | 切头要在 attention 前后各加一次 all-to-all；量了再决定 |
+| routed experts | EP32 跨 tray | 不变 |
+
+行怎么走：四卡的行在 tray 内 all-gather 一次，之后 dense、KDA、shared expert 都在
+4B 行上算、权重按头切；到 MLA attention 按行拆回各卡（reduce-scatter），各读各的
+latent，完了再 gather；MoE dispatch 也是各卡送自己的行。一步 24 个 MLA 层各一对
+gather / scatter，每次几百 KB，延迟主导，合计 < 1 ms。同构没破：四卡跑同一个
+manifest、同一条 launch 列表，区别只在 rank 索引到的数据——哪些头、哪些 expert、
+哪些行，和今天 EP 下"每卡不同的 28 个 expert"是同一种不同。
+
+账（EP32、B=16/rank、219k ctx）：每 rank 每步权重读 147 → 26 + 42 = 68 GiB，
+地板 ~30 → ~18 ms，步 52 → ~40 ms，或固定步时下 B 16 → 24。
+
+代价：一个 session 的 KDA state 分在四张卡上，checkpoint / park / wake / fork 变成
+tray 级对象（四卡各存各的那份，同一把 `Lease` 编号）；runtime 已是一 tray 一进程，
+是自然的推广。collective 不进 `crates/`：和 E1 的 dispatch 一样，是读 peer 数组的
+kernel。
+
+CP 只管长 prefill 时谁算哪段新 token，与这张表无关（K4 / K5 另定）；上面"修正"
+第 2 条的 context 分段条带留作待决。
 
 ### Prefill
 
@@ -333,6 +362,8 @@ rank 死 → 组内所有图在 flag 上永久 spin。**所有跨 rank 等待都
 8. **MoE 通信 = DeepGEMM MegaMoE**（pegainfer 的 AOT fork，一层一个 launch），源码级
    对比见 `moe-comm-survey.md`。TRT one-sided 作为 fallback 的事以后再说；不自写，NCCL
    不作为 extern 保留。
+10. **decode 分片形态 = tray 一个 batch，dense / KDA 权重按头 TP4，MLA KV 按行归各卡，
+   expert EP32**（2026-09-03，见"最终形态"）。attention-TP 不做；P 池不做。
 9. **K3 decode 核来源 = pegainfer 认证核集，不从 vLLM 挖。** vLLM 的 K3 路径
    （fused_kda_decode / flashinfer-trtllm MLA / DeepGEMM / torch.compile）拆不出可
    AOT 的核；kern 的 93 层 EP4 program（E2）逐行对照 pegainfer `k3_step`，正确性以
