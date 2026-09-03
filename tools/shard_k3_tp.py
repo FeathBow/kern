@@ -15,9 +15,13 @@ manifests of tools/gen_k3_decode.py load in place of `dense/l{i}`:
                           whole-model layout (beta at column h, f_a at 96)
     w_f_b   [INNER, 128]  rows;   cw [3, 4, INNER], dt_bias [INNER]  last axis
     a_log   [HEADS]       slice;  w_o [H, INNER]  columns
-  everything else (norms, scoring weights, gamma_o, the MoE / dense MLP
-  tensors) is copied whole for now; the MLP shards come with their step.
-  MLA layers are the whole file, linked.
+  every layer — the shared expert (or layer 0's dense FFN), gate / up rows
+  and down columns [r*I/R, (r+1)*I/R) of each:
+    wsh  [2*SHARED, H]  -> [2*SHARED/R, H]   sh_down [H, SHARED]  -> [H, SHARED/R]
+    wgu  [2*DENSE_I, H] -> [2*DENSE_I/R, H]  w_dn    [H, DENSE_I] -> [H, DENSE_I/R]
+  everything else (norms, scoring weights, gamma_o, the MLA projections,
+  the router, lat_down / lat_up, the routed experts' own files) is copied
+  whole. Existing output files are rewritten.
 
 Pure Python on the safetensors bytes (no torch / numpy on the trays):
 bf16 rows are copied as bytes, the strided `w_o` columns row by row.
@@ -31,7 +35,7 @@ import sys
 import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from gen_k3_decode import HEADS, HEAD_DIM, INNER, WSM, MLA_LAYERS, LAYERS, H, is_mla  # noqa: E402
+from gen_k3_decode import HEADS, HEAD_DIM, INNER, WSM, SHARED, DENSE_I, LAYERS, H, is_mla  # noqa: E402
 
 ITEM = {"BF16": 2, "F32": 4, "I32": 4, "U8": 1}
 
@@ -99,14 +103,32 @@ def last_axis(t, lo, hi):
     return dt2, list(shape[:-1]) + [hi - lo], out
 
 
+def gate_up(t, inter, lo, hi):
+    """Rows lo..hi of the gate half and of the up half of a [2*inter, H]."""
+    dt, shape, _ = t
+    assert shape[0] == 2 * inter, (shape, inter)
+    g, u = rows(t, lo, hi), rows(t, inter + lo, inter + hi)
+    return dt, [2 * (hi - lo)] + list(shape[1:]), g[2] + u[2]
+
+
 def shard_layer(tensors, i, r, tp):
     """Rank r's copy of layer i (name -> (dtype, shape, bytes))."""
-    hl = HEADS // tp
-    h0, h1 = r * hl, (r + 1) * hl
-    d0, d1 = h0 * HEAD_DIM, h1 * HEAD_DIM
     p = f"layers.{i}."
     out = dict(tensors)
     t = lambda n: tensors[p + n]
+    if i == 0:
+        dn = DENSE_I // tp
+        out[p + "wgu"] = gate_up(t("wgu"), DENSE_I, r * dn, (r + 1) * dn)
+        out[p + "w_dn"] = cols(t("w_dn"), r * dn, (r + 1) * dn)
+    else:
+        sh = SHARED // tp
+        out[p + "wsh"] = gate_up(t("wsh"), SHARED, r * sh, (r + 1) * sh)
+        out[p + "sh_down"] = cols(t("sh_down"), r * sh, (r + 1) * sh)
+    if is_mla(i):
+        return out
+    hl = HEADS // tp
+    h0, h1 = r * hl, (r + 1) * hl
+    d0, d1 = h0 * HEAD_DIM, h1 * HEAD_DIM
     wbig = t("wbig")
     assert wbig[1] == [4 * INNER, H]
     segs = [rows(wbig, s * INNER + d0, s * INNER + d1) for s in range(4)]
@@ -132,25 +154,19 @@ def main():
     ap.add_argument("--tp", type=int, default=4)
     ap.add_argument("--layers", type=int, default=LAYERS)
     a = ap.parse_args()
-    assert HEADS % a.tp == 0
+    assert HEADS % a.tp == 0 and SHARED % a.tp == 0 and DENSE_I % a.tp == 0
     root = pathlib.Path(a.weights)
     t0 = time.time()
     for r in range(a.tp):
         (root / f"dense-tp{a.tp}" / f"r{r}").mkdir(parents=True, exist_ok=True)
     for i in range(a.layers):
         src = root / "dense" / f"l{i}.safetensors"
-        if is_mla(i):
-            for r in range(a.tp):
-                dst = root / f"dense-tp{a.tp}" / f"r{r}" / f"l{i}.safetensors"
-                if not dst.exists():
-                    dst.symlink_to(pathlib.Path("..") / ".." / "dense" / src.name)
-            continue
         hdr, data = read(src)
         tensors = {n: (m["dtype"], m["shape"], data[m["data_offsets"][0] : m["data_offsets"][1]]) for n, m in hdr.items()}
         for r in range(a.tp):
             dst = root / f"dense-tp{a.tp}" / f"r{r}" / f"l{i}.safetensors"
-            if dst.exists():
-                continue
+            if dst.is_symlink():
+                dst.unlink()
             write(dst, shard_layer(tensors, i, r, a.tp))
         print(f"layer {i} sharded ({time.time() - t0:.0f}s)", flush=True)
     print(f"done: {a.layers} layers, tp{a.tp}, {time.time() - t0:.0f}s")

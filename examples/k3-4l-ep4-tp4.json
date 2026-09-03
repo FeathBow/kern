@@ -51,7 +51,7 @@
    "dtype": "i32",
    "shape": [
     "seqs",
-    256
+    2
    ],
    "kind": "input",
    "domain": {
@@ -421,7 +421,7 @@
    "dtype": "f32",
    "shape": [
     "rows",
-    12288
+    3072
    ],
    "kind": "workspace"
   },
@@ -429,7 +429,7 @@
    "dtype": "bf16",
    "shape": [
     "rows",
-    6144
+    1536
    ],
    "kind": "workspace"
   },
@@ -445,7 +445,7 @@
    "dtype": "f32",
    "shape": [
     "rows",
-    67584
+    16896
    ],
    "kind": "workspace"
   },
@@ -453,7 +453,15 @@
    "dtype": "bf16",
    "shape": [
     "rows",
-    33792
+    8448
+   ],
+   "kind": "workspace"
+  },
+  "mlp_all": {
+   "dtype": "f32",
+   "shape": [
+    "rows",
+    7168
    ],
    "kind": "workspace"
   },
@@ -551,7 +559,7 @@
   "layers.0.wgu": {
    "dtype": "bf16",
    "shape": [
-    67584,
+    16896,
     7168
    ],
    "kind": "weight"
@@ -560,7 +568,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    33792
+    8448
    ],
    "kind": "weight"
   },
@@ -702,7 +710,7 @@
   "layers.1.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -711,7 +719,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -881,7 +889,7 @@
   "layers.2.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -890,7 +898,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -1051,7 +1059,7 @@
   "layers.3.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -1060,7 +1068,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -1732,7 +1740,7 @@
         "param": 3
        },
        {
-        "i32": 256
+        "i32": 2
        },
        {
         "i64": 36864
@@ -2697,7 +2705,7 @@
     ]
    }
   },
-  "land_situ_n33792": {
+  "land_situ_n8448": {
    "params": [
     "in buffer<f32>",
     "out buffer<bf16>",
@@ -2721,7 +2729,7 @@
       ],
       "grid": [
        "rows",
-       33,
+       9,
        1
       ],
       "args": [
@@ -2732,7 +2740,7 @@
         "param": 1
        },
        {
-        "i32": 33792
+        "i32": 8448
        },
        {
         "param": 2
@@ -2795,7 +2803,7 @@
     ]
    }
   },
-  "land_situ_n6144": {
+  "land_situ_n1536": {
    "params": [
     "in buffer<f32>",
     "out buffer<bf16>",
@@ -2819,7 +2827,7 @@
       ],
       "grid": [
        "rows",
-       6,
+       2,
        1
       ],
       "args": [
@@ -2830,7 +2838,7 @@
         "param": 1
        },
        {
-        "i32": 6144
+        "i32": 1536
        },
        {
         "param": 2
@@ -3121,19 +3129,19 @@
       "var": "rows"
      },
      {
-      "i32": 67584
+      "i32": 16896
      },
      {
       "i32": 7168
      },
      {
-      "i32": 67584
+      "i32": 16896
      }
     ]
    },
    {
     "label": "l0.situ",
-    "op": "land_situ_n33792",
+    "op": "land_situ_n8448",
     "args": [
      {
       "buf": "dense_partial"
@@ -3166,10 +3174,40 @@
       "i32": 7168
      },
      {
-      "i32": 33792
+      "i32": 8448
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l0.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "routed_partial"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -3178,10 +3216,10 @@
     "op": "land_add2",
     "args": [
      {
-      "buf": "routed_partial"
+      "buf": "mlp_all"
      },
      {
-      "buf": "routed_partial"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -3724,19 +3762,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l1.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -3769,10 +3807,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l1.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -3784,7 +3852,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -4327,19 +4395,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l2.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -4372,10 +4440,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l2.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -4387,7 +4485,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -4917,19 +5015,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l3.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -4962,10 +5060,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l3.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -4977,7 +5105,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"

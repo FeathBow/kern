@@ -24,11 +24,12 @@ outputs are all-gathered (tools/kernels-src/peer_collective.cu) and the
 rest runs on `rows`. The KDA layers are head-sharded: every rank holds
 HEADS / R heads of every row (weights from tools/shard_k3_tp.py, kernels
 built for that width, the state line that many heads long), runs them on
-all `rows`, and the o_proj partial is all-reduced. The rest of the dense
-trunk is still computed R times over, once per rank (the same weight read
-as once at decode); the MLP shards come next. The caller sets `rows` = R *
-`tokens` every run (kern does not relate vars) and leases every row's KDA
-line on every rank.
+all `rows`, and the o_proj partial is all-reduced. The dense FFN and the
+shared expert are column-sharded the same way (gate / up rows, down
+columns, the down partial all-reduced). Replicated on every rank: the
+norms and scoring, the MLA projections, lat_down / lat_up, the router,
+the LM head. The caller sets `rows` = R * `tokens` every run (kern does
+not relate vars) and leases every row's KDA line on every rank.
 
 The kernels are kern's own (docs/k3-kernel-abi.md, tools/kernels-src/k3_*.cu):
 B is a runtime argument, every launch takes one row per block.x, and the
@@ -132,6 +133,8 @@ def build(layers, ranks, max_ctx, seqs_max, tp=1):
     inner_l, fused_l = hl * HEAD_DIM, 4 * hl * HEAD_DIM
     line_l = hl * HEAD_DIM * HEAD_DIM * 4 + 3 * (3 * inner_l * 2)
     kda_defs = {"HEADS": hl} if tp > 1 else None
+    # This rank's columns of the shared expert and the dense FFN.
+    sh_l, dn_l = SHARED // tp, DENSE_I // tp
     # In a tray batch the KDA layers run on every row (their state is
     # head-sharded, every rank holds a slice of every row's); alone, rows
     # and tokens are the same number.
@@ -329,11 +332,13 @@ def build(layers, ranks, max_ctx, seqs_max, tp=1):
         work(n, LATENT)
     work("routed_latent_norm", LATENT, var=R)
     work("routed_partial", H, "f32", var=R)
-    work("shared_partial", 2 * SHARED, "f32", var=R)
-    work("shared_act", SHARED, var=R)
+    work("shared_partial", 2 * sh_l, "f32", var=R)
+    work("shared_act", sh_l, var=R)
     work("shared_partial2", H, "f32", var=R)
-    work("dense_partial", 2 * DENSE_I, "f32", var=R)
-    work("dense_act", DENSE_I, var=R)
+    work("dense_partial", 2 * dn_l, "f32", var=R)
+    work("dense_act", dn_l, var=R)
+    if tp > 1:
+        work("mlp_all", H, "f32", var=R)
     work("logit_partial", V, "f32", var=R)
 
     # ---- program
@@ -420,11 +425,17 @@ def build(layers, ranks, max_ctx, seqs_max, tp=1):
         step(L + "res_mlp", "land_add_attnres_rms", attn_out, b("hidden"), b("blocks"), w("sw_mlp"),
              w("gamma_post"), b("prefix2"), b("normed"), i32(nb_mlp), i32(int(snapshot)), RB)
 
+        # The dense FFN and the shared expert are column-sharded across the
+        # tray (gate/up rows, down columns): the down projection's output is
+        # a partial the group sums. lat_up stays replicated: its input is
+        # a row of `routed_latent_norm`, and a K-split would need a
+        # rank-dependent offset into it.
         if i == 0:
-            gemm(L + "wgu", b("normed"), w("wgu"), b("dense_partial"), 2 * DENSE_I, H, m=RB)
-            land_situ(L + "situ", b("dense_partial"), b("dense_act"), DENSE_I)
-            gemm(L + "w_dn", b("dense_act"), w("w_dn"), b("routed_partial"), H, DENSE_I, m=RB)
-            step(L + "hidden", "land_add2", b("routed_partial"), b("routed_partial"), b("prefix2"), b("hidden"), i32(0), RB)
+            gemm(L + "wgu", b("normed"), w("wgu"), b("dense_partial"), 2 * dn_l, H, m=RB)
+            land_situ(L + "situ", b("dense_partial"), b("dense_act"), dn_l)
+            gemm(L + "w_dn", b("dense_act"), w("w_dn"), b("routed_partial"), H, dn_l, m=RB)
+            mlp = reduced(L + "reduce_mlp", b("routed_partial"), b("mlp_all")) if tp > 1 else b("routed_partial")
+            step(L + "hidden", "land_add2", mlp, mlp, b("prefix2"), b("hidden"), i32(0), RB)
         else:
             gemm(L + "router", b("normed"), w("w_router"), b("router_partial"), EXPERTS, H)
             step(L + "topk", "router_topk", b("router_partial"), w("bias"), w("rs"), b("topk_idx"), b("topk_weight"), B)
@@ -435,10 +446,11 @@ def build(layers, ranks, max_ctx, seqs_max, tp=1):
             routed = gathered(L + "gather_moe", b("routed_latent"), b("routed_latent_all"), "bf16", LATENT * 2)
             step(L + "lat_norm", "rms", routed, w("gamma_lat"), b("routed_latent_norm"), i32(LATENT), RB)
             gemm(L + "lat_up", b("routed_latent_norm"), w("w_lat_up"), b("routed_partial"), H, LATENT, m=RB)
-            gemm(L + "wsh", b("normed"), w("wsh"), b("shared_partial"), 2 * SHARED, H, m=RB)
-            land_situ(L + "shared_situ", b("shared_partial"), b("shared_act"), SHARED)
-            gemm(L + "sh_down", b("shared_act"), w("sh_down"), b("shared_partial2"), H, SHARED, m=RB)
-            step(L + "hidden", "land_add2", b("routed_partial"), b("shared_partial2"), b("prefix2"), b("hidden"), i32(1), RB)
+            gemm(L + "wsh", b("normed"), w("wsh"), b("shared_partial"), 2 * sh_l, H, m=RB)
+            land_situ(L + "shared_situ", b("shared_partial"), b("shared_act"), sh_l)
+            gemm(L + "sh_down", b("shared_act"), w("sh_down"), b("shared_partial2"), H, sh_l, m=RB)
+            shared = reduced(L + "reduce_mlp", b("shared_partial2"), b("mlp_all")) if tp > 1 else b("shared_partial2")
+            step(L + "hidden", "land_add2", b("routed_partial"), shared, b("prefix2"), b("hidden"), i32(1), RB)
 
         # weights
         weight(f"layers.{i}.gamma_in", [H])
@@ -463,8 +475,8 @@ def build(layers, ranks, max_ctx, seqs_max, tp=1):
             weight(f"layers.{i}.gamma_o", [HEAD_DIM], "f32")
         weight(f"layers.{i}.w_o", [H, INNER if is_mla(i) else inner_l])
         if i == 0:
-            weight(f"layers.{i}.wgu", [2 * DENSE_I, H])
-            weight(f"layers.{i}.w_dn", [H, DENSE_I])
+            weight(f"layers.{i}.wgu", [2 * dn_l, H])
+            weight(f"layers.{i}.w_dn", [H, dn_l])
         else:
             weight(f"layers.{i}.w_router", [EXPERTS, H])
             weight(f"layers.{i}.bias", [EXPERTS], "f32")
@@ -472,8 +484,8 @@ def build(layers, ranks, max_ctx, seqs_max, tp=1):
             weight(f"layers.{i}.w_lat_down", [LATENT, H])
             weight(f"layers.{i}.w_lat_up", [H, LATENT])
             weight(f"layers.{i}.gamma_lat", [LATENT])
-            weight(f"layers.{i}.wsh", [2 * SHARED, H])
-            weight(f"layers.{i}.sh_down", [H, SHARED])
+            weight(f"layers.{i}.wsh", [2 * sh_l, H])
+            weight(f"layers.{i}.sh_down", [H, sh_l])
             for n, d in mp["weights"].items():
                 buffers[f"layers.{i}.{n}"] = dict(d)
 

@@ -421,7 +421,7 @@
    "dtype": "f32",
    "shape": [
     "rows",
-    12288
+    3072
    ],
    "kind": "workspace"
   },
@@ -429,7 +429,7 @@
    "dtype": "bf16",
    "shape": [
     "rows",
-    6144
+    1536
    ],
    "kind": "workspace"
   },
@@ -445,7 +445,7 @@
    "dtype": "f32",
    "shape": [
     "rows",
-    67584
+    16896
    ],
    "kind": "workspace"
   },
@@ -453,7 +453,15 @@
    "dtype": "bf16",
    "shape": [
     "rows",
-    33792
+    8448
+   ],
+   "kind": "workspace"
+  },
+  "mlp_all": {
+   "dtype": "f32",
+   "shape": [
+    "rows",
+    7168
    ],
    "kind": "workspace"
   },
@@ -551,7 +559,7 @@
   "layers.0.wgu": {
    "dtype": "bf16",
    "shape": [
-    67584,
+    16896,
     7168
    ],
    "kind": "weight"
@@ -560,7 +568,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    33792
+    8448
    ],
    "kind": "weight"
   },
@@ -702,7 +710,7 @@
   "layers.1.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -711,7 +719,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -881,7 +889,7 @@
   "layers.2.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -890,7 +898,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -1051,7 +1059,7 @@
   "layers.3.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -1060,7 +1068,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -1230,7 +1238,7 @@
   "layers.4.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -1239,7 +1247,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -1409,7 +1417,7 @@
   "layers.5.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -1418,7 +1426,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -1588,7 +1596,7 @@
   "layers.6.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -1597,7 +1605,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -1758,7 +1766,7 @@
   "layers.7.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -1767,7 +1775,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -1937,7 +1945,7 @@
   "layers.8.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -1946,7 +1954,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -2116,7 +2124,7 @@
   "layers.9.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -2125,7 +2133,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -2295,7 +2303,7 @@
   "layers.10.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -2304,7 +2312,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -2465,7 +2473,7 @@
   "layers.11.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -2474,7 +2482,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -2644,7 +2652,7 @@
   "layers.12.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -2653,7 +2661,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -2823,7 +2831,7 @@
   "layers.13.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -2832,7 +2840,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -3002,7 +3010,7 @@
   "layers.14.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -3011,7 +3019,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -3172,7 +3180,7 @@
   "layers.15.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -3181,7 +3189,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -3351,7 +3359,7 @@
   "layers.16.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -3360,7 +3368,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -3530,7 +3538,7 @@
   "layers.17.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -3539,7 +3547,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -3709,7 +3717,7 @@
   "layers.18.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -3718,7 +3726,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -3879,7 +3887,7 @@
   "layers.19.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -3888,7 +3896,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -4058,7 +4066,7 @@
   "layers.20.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -4067,7 +4075,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -4237,7 +4245,7 @@
   "layers.21.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -4246,7 +4254,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -4416,7 +4424,7 @@
   "layers.22.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -4425,7 +4433,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -4586,7 +4594,7 @@
   "layers.23.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -4595,7 +4603,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -4765,7 +4773,7 @@
   "layers.24.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -4774,7 +4782,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -4944,7 +4952,7 @@
   "layers.25.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -4953,7 +4961,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -5123,7 +5131,7 @@
   "layers.26.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -5132,7 +5140,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -5293,7 +5301,7 @@
   "layers.27.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -5302,7 +5310,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -5472,7 +5480,7 @@
   "layers.28.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -5481,7 +5489,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -5651,7 +5659,7 @@
   "layers.29.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -5660,7 +5668,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -5830,7 +5838,7 @@
   "layers.30.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -5839,7 +5847,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -6000,7 +6008,7 @@
   "layers.31.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -6009,7 +6017,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -6179,7 +6187,7 @@
   "layers.32.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -6188,7 +6196,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -6358,7 +6366,7 @@
   "layers.33.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -6367,7 +6375,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -6537,7 +6545,7 @@
   "layers.34.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -6546,7 +6554,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -6707,7 +6715,7 @@
   "layers.35.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -6716,7 +6724,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -6886,7 +6894,7 @@
   "layers.36.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -6895,7 +6903,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -7065,7 +7073,7 @@
   "layers.37.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -7074,7 +7082,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -7244,7 +7252,7 @@
   "layers.38.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -7253,7 +7261,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -7414,7 +7422,7 @@
   "layers.39.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -7423,7 +7431,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -7593,7 +7601,7 @@
   "layers.40.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -7602,7 +7610,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -7772,7 +7780,7 @@
   "layers.41.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -7781,7 +7789,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -7951,7 +7959,7 @@
   "layers.42.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -7960,7 +7968,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -8121,7 +8129,7 @@
   "layers.43.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -8130,7 +8138,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -8300,7 +8308,7 @@
   "layers.44.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -8309,7 +8317,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -8479,7 +8487,7 @@
   "layers.45.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -8488,7 +8496,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -8658,7 +8666,7 @@
   "layers.46.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -8667,7 +8675,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -8828,7 +8836,7 @@
   "layers.47.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -8837,7 +8845,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -9007,7 +9015,7 @@
   "layers.48.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -9016,7 +9024,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -9186,7 +9194,7 @@
   "layers.49.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -9195,7 +9203,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -9365,7 +9373,7 @@
   "layers.50.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -9374,7 +9382,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -9535,7 +9543,7 @@
   "layers.51.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -9544,7 +9552,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -9714,7 +9722,7 @@
   "layers.52.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -9723,7 +9731,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -9893,7 +9901,7 @@
   "layers.53.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -9902,7 +9910,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -10072,7 +10080,7 @@
   "layers.54.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -10081,7 +10089,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -10242,7 +10250,7 @@
   "layers.55.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -10251,7 +10259,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -10421,7 +10429,7 @@
   "layers.56.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -10430,7 +10438,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -10600,7 +10608,7 @@
   "layers.57.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -10609,7 +10617,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -10779,7 +10787,7 @@
   "layers.58.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -10788,7 +10796,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -10949,7 +10957,7 @@
   "layers.59.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -10958,7 +10966,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -11128,7 +11136,7 @@
   "layers.60.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -11137,7 +11145,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -11307,7 +11315,7 @@
   "layers.61.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -11316,7 +11324,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -11486,7 +11494,7 @@
   "layers.62.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -11495,7 +11503,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -11656,7 +11664,7 @@
   "layers.63.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -11665,7 +11673,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -11835,7 +11843,7 @@
   "layers.64.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -11844,7 +11852,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -12014,7 +12022,7 @@
   "layers.65.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -12023,7 +12031,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -12193,7 +12201,7 @@
   "layers.66.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -12202,7 +12210,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -12363,7 +12371,7 @@
   "layers.67.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -12372,7 +12380,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -12542,7 +12550,7 @@
   "layers.68.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -12551,7 +12559,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -12721,7 +12729,7 @@
   "layers.69.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -12730,7 +12738,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -12900,7 +12908,7 @@
   "layers.70.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -12909,7 +12917,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -13070,7 +13078,7 @@
   "layers.71.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -13079,7 +13087,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -13249,7 +13257,7 @@
   "layers.72.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -13258,7 +13266,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -13428,7 +13436,7 @@
   "layers.73.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -13437,7 +13445,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -13607,7 +13615,7 @@
   "layers.74.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -13616,7 +13624,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -13777,7 +13785,7 @@
   "layers.75.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -13786,7 +13794,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -13956,7 +13964,7 @@
   "layers.76.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -13965,7 +13973,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -14135,7 +14143,7 @@
   "layers.77.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -14144,7 +14152,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -14314,7 +14322,7 @@
   "layers.78.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -14323,7 +14331,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -14484,7 +14492,7 @@
   "layers.79.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -14493,7 +14501,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -14663,7 +14671,7 @@
   "layers.80.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -14672,7 +14680,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -14842,7 +14850,7 @@
   "layers.81.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -14851,7 +14859,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -15021,7 +15029,7 @@
   "layers.82.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -15030,7 +15038,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -15191,7 +15199,7 @@
   "layers.83.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -15200,7 +15208,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -15370,7 +15378,7 @@
   "layers.84.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -15379,7 +15387,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -15549,7 +15557,7 @@
   "layers.85.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -15558,7 +15566,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -15728,7 +15736,7 @@
   "layers.86.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -15737,7 +15745,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -15898,7 +15906,7 @@
   "layers.87.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -15907,7 +15915,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -16077,7 +16085,7 @@
   "layers.88.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -16086,7 +16094,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -16256,7 +16264,7 @@
   "layers.89.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -16265,7 +16273,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -16435,7 +16443,7 @@
   "layers.90.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -16444,7 +16452,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -16605,7 +16613,7 @@
   "layers.91.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -16614,7 +16622,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -16775,7 +16783,7 @@
   "layers.92.wsh": {
    "dtype": "bf16",
    "shape": [
-    12288,
+    3072,
     7168
    ],
    "kind": "weight"
@@ -16784,7 +16792,7 @@
    "dtype": "bf16",
    "shape": [
     7168,
-    6144
+    1536
    ],
    "kind": "weight"
   },
@@ -18345,7 +18353,7 @@
     ]
    }
   },
-  "land_situ_n33792": {
+  "land_situ_n8448": {
    "params": [
     "in buffer<f32>",
     "out buffer<bf16>",
@@ -18369,7 +18377,7 @@
       ],
       "grid": [
        "rows",
-       33,
+       9,
        1
       ],
       "args": [
@@ -18380,7 +18388,7 @@
         "param": 1
        },
        {
-        "i32": 33792
+        "i32": 8448
        },
        {
         "param": 2
@@ -18443,7 +18451,7 @@
     ]
    }
   },
-  "land_situ_n6144": {
+  "land_situ_n1536": {
    "params": [
     "in buffer<f32>",
     "out buffer<bf16>",
@@ -18467,7 +18475,7 @@
       ],
       "grid": [
        "rows",
-       6,
+       2,
        1
       ],
       "args": [
@@ -18478,7 +18486,7 @@
         "param": 1
        },
        {
-        "i32": 6144
+        "i32": 1536
        },
        {
         "param": 2
@@ -18772,19 +18780,19 @@
       "var": "rows"
      },
      {
-      "i32": 67584
+      "i32": 16896
      },
      {
       "i32": 7168
      },
      {
-      "i32": 67584
+      "i32": 16896
      }
     ]
    },
    {
     "label": "l0.situ",
-    "op": "land_situ_n33792",
+    "op": "land_situ_n8448",
     "args": [
      {
       "buf": "dense_partial"
@@ -18817,10 +18825,40 @@
       "i32": 7168
      },
      {
-      "i32": 33792
+      "i32": 8448
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l0.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "routed_partial"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -18829,10 +18867,10 @@
     "op": "land_add2",
     "args": [
      {
-      "buf": "routed_partial"
+      "buf": "mlp_all"
      },
      {
-      "buf": "routed_partial"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -19384,19 +19422,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l1.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -19429,10 +19467,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l1.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -19444,7 +19512,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -19996,19 +20064,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l2.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -20041,10 +20109,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l2.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -20056,7 +20154,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -20598,19 +20696,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l3.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -20643,10 +20741,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l3.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -20658,7 +20786,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -21210,19 +21338,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l4.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -21255,10 +21383,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l4.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -21270,7 +21428,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -21822,19 +21980,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l5.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -21867,10 +22025,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l5.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -21882,7 +22070,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -22434,19 +22622,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l6.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -22479,10 +22667,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l6.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -22494,7 +22712,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -23036,19 +23254,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l7.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -23081,10 +23299,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l7.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -23096,7 +23344,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -23648,19 +23896,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l8.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -23693,10 +23941,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l8.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -23708,7 +23986,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -24260,19 +24538,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l9.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -24305,10 +24583,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l9.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -24320,7 +24628,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -24872,19 +25180,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l10.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -24917,10 +25225,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l10.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -24932,7 +25270,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -25474,19 +25812,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l11.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -25519,10 +25857,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l11.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -25534,7 +25902,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -26086,19 +26454,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l12.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -26131,10 +26499,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l12.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -26146,7 +26544,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -26698,19 +27096,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l13.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -26743,10 +27141,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l13.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -26758,7 +27186,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -27310,19 +27738,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l14.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -27355,10 +27783,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l14.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -27370,7 +27828,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -27912,19 +28370,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l15.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -27957,10 +28415,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l15.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -27972,7 +28460,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -28524,19 +29012,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l16.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -28569,10 +29057,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l16.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -28584,7 +29102,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -29136,19 +29654,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l17.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -29181,10 +29699,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l17.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -29196,7 +29744,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -29748,19 +30296,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l18.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -29793,10 +30341,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l18.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -29808,7 +30386,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -30350,19 +30928,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l19.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -30395,10 +30973,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l19.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -30410,7 +31018,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -30962,19 +31570,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l20.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -31007,10 +31615,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l20.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -31022,7 +31660,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -31574,19 +32212,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l21.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -31619,10 +32257,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l21.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -31634,7 +32302,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -32186,19 +32854,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l22.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -32231,10 +32899,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l22.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -32246,7 +32944,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -32788,19 +33486,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l23.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -32833,10 +33531,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l23.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -32848,7 +33576,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -33400,19 +34128,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l24.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -33445,10 +34173,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l24.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -33460,7 +34218,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -34012,19 +34770,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l25.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -34057,10 +34815,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l25.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -34072,7 +34860,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -34624,19 +35412,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l26.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -34669,10 +35457,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l26.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -34684,7 +35502,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -35226,19 +36044,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l27.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -35271,10 +36089,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l27.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -35286,7 +36134,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -35838,19 +36686,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l28.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -35883,10 +36731,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l28.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -35898,7 +36776,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -36450,19 +37328,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l29.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -36495,10 +37373,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l29.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -36510,7 +37418,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -37062,19 +37970,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l30.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -37107,10 +38015,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l30.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -37122,7 +38060,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -37664,19 +38602,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l31.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -37709,10 +38647,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l31.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -37724,7 +38692,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -38276,19 +39244,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l32.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -38321,10 +39289,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l32.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -38336,7 +39334,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -38888,19 +39886,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l33.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -38933,10 +39931,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l33.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -38948,7 +39976,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -39500,19 +40528,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l34.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -39545,10 +40573,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l34.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -39560,7 +40618,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -40102,19 +41160,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l35.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -40147,10 +41205,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l35.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -40162,7 +41250,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -40714,19 +41802,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l36.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -40759,10 +41847,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l36.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -40774,7 +41892,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -41326,19 +42444,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l37.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -41371,10 +42489,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l37.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -41386,7 +42534,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -41938,19 +43086,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l38.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -41983,10 +43131,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l38.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -41998,7 +43176,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -42540,19 +43718,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l39.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -42585,10 +43763,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l39.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -42600,7 +43808,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -43152,19 +44360,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l40.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -43197,10 +44405,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l40.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -43212,7 +44450,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -43764,19 +45002,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l41.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -43809,10 +45047,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l41.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -43824,7 +45092,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -44376,19 +45644,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l42.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -44421,10 +45689,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l42.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -44436,7 +45734,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -44978,19 +46276,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l43.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -45023,10 +46321,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l43.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -45038,7 +46366,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -45590,19 +46918,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l44.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -45635,10 +46963,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l44.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -45650,7 +47008,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -46202,19 +47560,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l45.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -46247,10 +47605,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l45.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -46262,7 +47650,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -46814,19 +48202,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l46.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -46859,10 +48247,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l46.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -46874,7 +48292,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -47416,19 +48834,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l47.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -47461,10 +48879,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l47.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -47476,7 +48924,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -48028,19 +49476,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l48.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -48073,10 +49521,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l48.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -48088,7 +49566,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -48640,19 +50118,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l49.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -48685,10 +50163,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l49.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -48700,7 +50208,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -49252,19 +50760,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l50.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -49297,10 +50805,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l50.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -49312,7 +50850,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -49854,19 +51392,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l51.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -49899,10 +51437,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l51.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -49914,7 +51482,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -50466,19 +52034,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l52.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -50511,10 +52079,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l52.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -50526,7 +52124,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -51078,19 +52676,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l53.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -51123,10 +52721,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l53.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -51138,7 +52766,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -51690,19 +53318,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l54.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -51735,10 +53363,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l54.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -51750,7 +53408,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -52292,19 +53950,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l55.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -52337,10 +53995,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l55.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -52352,7 +54040,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -52904,19 +54592,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l56.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -52949,10 +54637,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l56.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -52964,7 +54682,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -53516,19 +55234,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l57.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -53561,10 +55279,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l57.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -53576,7 +55324,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -54128,19 +55876,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l58.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -54173,10 +55921,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l58.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -54188,7 +55966,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -54730,19 +56508,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l59.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -54775,10 +56553,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l59.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -54790,7 +56598,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -55342,19 +57150,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l60.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -55387,10 +57195,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l60.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -55402,7 +57240,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -55954,19 +57792,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l61.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -55999,10 +57837,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l61.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -56014,7 +57882,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -56566,19 +58434,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l62.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -56611,10 +58479,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l62.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -56626,7 +58524,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -57168,19 +59066,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l63.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -57213,10 +59111,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l63.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -57228,7 +59156,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -57780,19 +59708,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l64.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -57825,10 +59753,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l64.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -57840,7 +59798,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -58392,19 +60350,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l65.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -58437,10 +60395,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l65.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -58452,7 +60440,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -59004,19 +60992,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l66.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -59049,10 +61037,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l66.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -59064,7 +61082,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -59606,19 +61624,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l67.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -59651,10 +61669,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l67.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -59666,7 +61714,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -60218,19 +62266,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l68.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -60263,10 +62311,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l68.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -60278,7 +62356,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -60830,19 +62908,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l69.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -60875,10 +62953,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l69.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -60890,7 +62998,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -61442,19 +63550,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l70.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -61487,10 +63595,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l70.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -61502,7 +63640,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -62044,19 +64182,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l71.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -62089,10 +64227,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l71.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -62104,7 +64272,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -62656,19 +64824,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l72.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -62701,10 +64869,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l72.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -62716,7 +64914,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -63268,19 +65466,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l73.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -63313,10 +65511,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l73.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -63328,7 +65556,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -63880,19 +66108,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l74.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -63925,10 +66153,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l74.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -63940,7 +66198,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -64482,19 +66740,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l75.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -64527,10 +66785,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l75.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -64542,7 +66830,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -65094,19 +67382,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l76.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -65139,10 +67427,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l76.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -65154,7 +67472,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -65706,19 +68024,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l77.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -65751,10 +68069,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l77.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -65766,7 +68114,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -66318,19 +68666,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l78.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -66363,10 +68711,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l78.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -66378,7 +68756,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -66920,19 +69298,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l79.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -66965,10 +69343,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l79.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -66980,7 +69388,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -67532,19 +69940,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l80.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -67577,10 +69985,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l80.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -67592,7 +70030,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -68144,19 +70582,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l81.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -68189,10 +70627,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l81.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -68204,7 +70672,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -68756,19 +71224,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l82.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -68801,10 +71269,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l82.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -68816,7 +71314,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -69358,19 +71856,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l83.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -69403,10 +71901,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l83.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -69418,7 +71946,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -69970,19 +72498,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l84.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -70015,10 +72543,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l84.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -70030,7 +72588,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -70582,19 +73140,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l85.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -70627,10 +73185,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l85.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -70642,7 +73230,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -71194,19 +73782,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l86.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -71239,10 +73827,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l86.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -71254,7 +73872,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -71796,19 +74414,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l87.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -71841,10 +74459,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l87.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -71856,7 +74504,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -72408,19 +75056,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l88.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -72453,10 +75101,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l88.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -72468,7 +75146,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -73020,19 +75698,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l89.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -73065,10 +75743,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l89.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -73080,7 +75788,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -73632,19 +76340,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l90.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -73677,10 +76385,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l90.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -73692,7 +76430,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -74234,19 +76972,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l91.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -74279,10 +77017,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l91.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -74294,7 +77062,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
@@ -74836,19 +77604,19 @@
       "var": "rows"
      },
      {
-      "i32": 12288
+      "i32": 3072
      },
      {
       "i32": 7168
      },
      {
-      "i32": 12288
+      "i32": 3072
      }
     ]
    },
    {
     "label": "l92.shared_situ",
-    "op": "land_situ_n6144",
+    "op": "land_situ_n1536",
     "args": [
      {
       "buf": "shared_partial"
@@ -74881,10 +77649,40 @@
       "i32": 7168
      },
      {
-      "i32": 6144
+      "i32": 1536
      },
      {
       "i32": 7168
+     }
+    ]
+   },
+   {
+    "label": "l92.reduce_mlp",
+    "op": "tp_allreduce_f32",
+    "args": [
+     {
+      "buf": "shared_partial2"
+     },
+     {
+      "buf": "mlp_all"
+     },
+     {
+      "buf": "tp_sym_ar"
+     },
+     {
+      "buf": "tp_peers_ar"
+     },
+     {
+      "buf": "tp_epochs_ar"
+     },
+     {
+      "buf": "tp_err"
+     },
+     {
+      "rank": "tp"
+     },
+     {
+      "var": "tokens"
      }
     ]
    },
@@ -74896,7 +77694,7 @@
       "buf": "routed_partial"
      },
      {
-      "buf": "shared_partial2"
+      "buf": "mlp_all"
      },
      {
       "buf": "prefix2"
