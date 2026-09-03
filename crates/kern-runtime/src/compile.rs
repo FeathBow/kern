@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use cudarc::driver::{result as cu, sys, CudaStream};
-use kern_manifest::types::{Arg, Call, Dim, Expr, LaunchArg, Manifest, Op, ParamType, TensorMap, TmaDType};
+use kern_manifest::types::{Arg, Call, Dim, Expr, FieldSrc, LaunchArg, Manifest, Op, Pack, ParamType, TensorMap, TmaDType};
 use std::os::raw::c_void;
 
 use crate::cubin::{param_sizes, LoadedModule, MulticastScan};
@@ -62,6 +62,32 @@ pub(crate) enum Slot {
     Expr(CExpr),
     /// A TMA descriptor encoded at load, passed by value (128 bytes).
     TensorMap(Arc<TmaBlob>),
+    /// A byte aggregate assembled per run from its fields.
+    Pack(Arc<PackPlan>),
+}
+
+/// A `bytes<n>` param's image: `(offset, width, value)` per field, the rest
+/// zero. Pointer and literal fields are finished at load; var-dependent
+/// fields are evaluated per run.
+pub(crate) struct PackPlan {
+    pub(crate) size: usize,
+    pub(crate) fields: Vec<(usize, usize, Slot)>,
+}
+
+impl PackPlan {
+    /// The image for one run: every field's low `width` bytes, little-endian, at its offset.
+    pub(crate) fn image(&self, env: &[u64]) -> Result<Vec<u8>> {
+        let mut out = vec![0u8; self.size];
+        for (at, width, slot) in &self.fields {
+            let v = match slot {
+                Slot::Const(rv) => rv.val,
+                Slot::Expr(e) => e.eval(env)?,
+                Slot::TensorMap(_) | Slot::Pack(_) => bail!(Manifest, "a pack field cannot be a tensormap or a pack"),
+            };
+            out[*at..*at + *width].copy_from_slice(&v.to_le_bytes()[..*width]);
+        }
+        Ok(out)
+    }
 }
 
 /// A `CUtensorMap` image; the launch ABI copies it into param space.
@@ -330,6 +356,7 @@ fn compile_call(
             ParamType::Buf { .. } | ParamType::State { .. } => Slot::Const(pointer_arg(arg, buffers, states)?),
             ParamType::Scalar(_) => scalar_arg(arg, vars, rank_env.ranks)?,
             ParamType::TensorMap => bail!(Manifest, "interface params cannot be tensormaps"),
+            ParamType::Bytes(_) => bail!(Manifest, "interface params cannot be byte aggregates"),
         });
         peer.push(matches!(arg, Arg::Buf { buf, .. } if rank_env.peer_buffers.contains(buf)));
     }
@@ -341,6 +368,13 @@ fn compile_call(
             match la {
                 LaunchArg::Param { param } | LaunchArg::TensorMap { tensormap: TensorMap { param, .. } } => {
                     touches_peer |= peer.get(*param).copied().unwrap_or(false);
+                }
+                LaunchArg::Pack { pack } => {
+                    for f in &pack.fields {
+                        if let FieldSrc::Param { param } = f.src {
+                            touches_peer |= peer.get(param).copied().unwrap_or(false);
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -363,9 +397,12 @@ fn compile_call(
                     let Some(Slot::Const(rv)) = vals.get(t.param) else {
                         bail!(Manifest, "launch #{li}: tensormap over interface param #{} which is not a pointer", t.param);
                     };
-                    let (Some(buf), Some(fp)) = (c.args.get(t.param), t.footprint()) else {
+                    let Some(buf) = c.args.get(t.param) else {
                         bail!(Manifest, "launch #{li}: malformed tensormap over interface param #{}", t.param);
                     };
+                    let fp = span_footprint(t).ok_or_else(|| {
+                        Error::Manifest(format!("launch #{li}: malformed tensormap over interface param #{}", t.param))
+                    })?;
                     if fp > rv.bytes {
                         bail!(
                             Manifest,
@@ -374,10 +411,11 @@ fn compile_call(
                             rv.bytes
                         );
                     }
-                    Slot::TensorMap(Arc::new(encode_tensor_map(t, rv.val).map_err(|e| {
+                    Slot::TensorMap(Arc::new(encode_tensor_map(t, *rv).map_err(|e| {
                         Error::Cuda(format!("launch #{li}: tensormap over interface param #{}: {e}", t.param))
                     })?))
                 }
+                LaunchArg::Pack { pack } => Slot::Pack(Arc::new(pack_plan(pack, &vals, op, rop, rank_env.ranks, vars, li)?)),
             });
         }
         let kind = match imp {
@@ -429,6 +467,57 @@ fn compile_call(
         launches.push(Launch { kind, slots, ctx: format!("{cctx} launch #{li} (`{}`)", l.entry()) });
     }
     Ok(())
+}
+
+/// Lower a pack's fields against the op's lowered interface values.
+fn pack_plan(
+    pack: &Pack,
+    vals: &[Slot],
+    op: &Op,
+    rop: &ResolvedOp,
+    ranks: &BTreeMap<String, u64>,
+    vars: &BTreeMap<&str, usize>,
+    li: usize,
+) -> Result<PackPlan> {
+    let mut fields = Vec::with_capacity(pack.fields.len());
+    for (k, f) in pack.fields.iter().enumerate() {
+        let (slot, natural) = match &f.src {
+            FieldSrc::Param { param } => match (vals.get(*param), op.params.get(*param)) {
+                (Some(s), Some(p)) => (s.clone(), p.size_bytes() as u32),
+                _ => bail!(Manifest, "launch #{li}: pack field #{k}: interface param #{param} out of range"),
+            },
+            FieldSrc::Scratch { scratch } => match rop.scratch.get(scratch) {
+                Some(b) => (Slot::Const(RVal { val: b.ptr, bytes: b.bytes }), 8),
+                None => bail!(Manifest, "launch #{li}: pack field #{k}: unknown scratch `{scratch}`"),
+            },
+            FieldSrc::I32 { i32: v } => (lit(*v as u32 as u64), 4),
+            FieldSrc::I64 { i64: v } => (lit(*v as u64), 8),
+            FieldSrc::F32 { f32: v } => (lit(v.to_bits() as u64), 4),
+            FieldSrc::U8 { u8: v } => (lit(*v as u64), 1),
+            FieldSrc::Var { var } => (Slot::Expr(CExpr::Var(var_index(vars, var)?)), 4),
+            FieldSrc::Expr { expr } => (Slot::Expr(compile_expr(expr, vars)?), 4),
+            FieldSrc::Rank { rank } => (lit(rank_index(ranks, rank)?), 4),
+        };
+        let width = f.width.unwrap_or(natural) as usize;
+        let at = f.at as usize;
+        if width == 0 || width > 8 || at + width > pack.size as usize {
+            bail!(Manifest, "launch #{li}: pack field #{k}: {width} bytes at {at} do not fit the {} byte image", pack.size);
+        }
+        fields.push((at, width, slot));
+    }
+    Ok(PackPlan { size: pack.size as usize, fields })
+}
+
+/// Bytes a tensormap addresses from its base; a spanning outermost dim
+/// counts once (the runtime extends it to the buffer at encode time).
+fn span_footprint(t: &TensorMap) -> Option<u64> {
+    match t.dims.last() {
+        Some(0) => {
+            let inner = TensorMap { dims: t.dims[..t.dims.len() - 1].to_vec(), strides: t.strides[..t.strides.len() - 1].to_vec(), ..t.clone() };
+            inner.footprint()
+        }
+        _ => t.footprint(),
+    }
 }
 
 /// Lower a buffer/state arg to its finished pointer value.
@@ -500,10 +589,11 @@ fn var_index(vars: &BTreeMap<&str, usize>, var: &str) -> Result<usize> {
 
 /// `cuTensorMapEncodeTiled` for a manifest tensormap at a finished device
 /// address. Interleave none, element strides 1.
-fn encode_tensor_map(t: &TensorMap, ptr: u64) -> Result<TmaBlob> {
+fn encode_tensor_map(t: &TensorMap, rv: RVal) -> Result<TmaBlob> {
     use sys::CUtensorMapDataType as Dt;
     use sys::CUtensorMapL2promotion as L2;
     use sys::CUtensorMapSwizzle as Sw;
+    let ptr = rv.val;
     if !ptr.is_multiple_of(16) {
         bail!(Manifest, "device address {ptr:#x} is not 16-byte aligned");
     }
@@ -539,7 +629,13 @@ fn encode_tensor_map(t: &TensorMap, ptr: u64) -> Result<TmaBlob> {
         sys::CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
     };
     let rank = t.dims.len() as u32;
-    let dims: Vec<u64> = t.dims.clone();
+    let mut dims: Vec<u64> = t.dims.clone();
+    if dims.last() == Some(&0) {
+        // Span: as many outermost slices as the buffer holds past the base.
+        let inner = span_footprint(t).unwrap_or(0);
+        let stride = *t.strides.last().unwrap_or(&1);
+        dims[rank as usize - 1] = (rv.bytes.saturating_sub(inner)) / stride + 1;
+    }
     let strides: Vec<u64> = t.strides.clone();
     let boxes: Vec<u32> = t.box_.clone();
     let elem_strides: Vec<u32> = vec![1; t.dims.len()];
@@ -565,4 +661,42 @@ fn encode_tensor_map(t: &TensorMap, ptr: u64) -> Result<TmaBlob> {
     )?;
     let bytes: [u8; 128] = unsafe { std::mem::transmute(map.opaque) };
     Ok(TmaBlob(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pack_image_places_fields_and_zeroes_the_rest() {
+        let plan = PackPlan {
+            size: 24,
+            fields: vec![
+                (0, 8, Slot::Const(RVal { val: 0xf767e4600400, bytes: 0 })),
+                (8, 4, Slot::Const(RVal { val: 512, bytes: 0 })),
+                (12, 4, Slot::Expr(CExpr::Var(0))),
+                (16, 8, Slot::Expr(CExpr::Mul(Box::new(CExpr::Var(0)), 512))),
+            ],
+        };
+        let img = plan.image(&[3]).unwrap();
+        assert_eq!(&img[..8], &0xf767e4600400u64.to_le_bytes());
+        assert_eq!((&img[8..12], &img[12..16]), (&512u32.to_le_bytes()[..], &3u32.to_le_bytes()[..]));
+        assert_eq!(&img[16..24], &1536u64.to_le_bytes());
+        assert_eq!(plan.image(&[7]).unwrap()[12], 7);
+    }
+
+    #[test]
+    fn span_footprint_counts_the_inner_slice_once() {
+        let t = TensorMap {
+            param: 0,
+            dtype: TmaDType::Bf16,
+            dims: vec![512, 64, 0],
+            strides: vec![1152, 73728],
+            box_: vec![64, 64, 1],
+            swizzle: 128,
+            l2_promotion: 0,
+            oob_nan: false,
+        };
+        assert_eq!((span_footprint(&t), t.footprint()), (Some(1024 + 63 * 1152), None));
+    }
 }

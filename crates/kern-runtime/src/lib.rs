@@ -54,7 +54,7 @@ use cudarc::driver::{sys, CudaContext, CudaStream, PinnedHostSlice};
 use kern_manifest::types::{BufferKind, Manifest, Provision, State};
 
 pub use chunks::{Kind, Remap};
-use compile::{CompiledProgram, Launch, LaunchKind, RVal, Slot, TmaBlob};
+use compile::{CompiledProgram, Launch, LaunchKind, RVal, Slot};
 pub use device::PeerHandle;
 use device::{
     alloc, alloc_vmm, chunk_granularity, copy_2d, gemm_bf16_tn, gemm_bf16_tn_f32, Arena, Blas, DeviceBuf, Mapper,
@@ -1413,15 +1413,16 @@ impl Runtime {
         // compute, everything else was finished at load. Tensor maps ride
         // along as pointers to their 128-byte images.
         let mut vals = Vec::with_capacity(l.slots.len());
-        let mut maps: Vec<Option<&TmaBlob>> = Vec::with_capacity(l.slots.len());
+        let mut images: Vec<Option<Vec<u8>>> = Vec::with_capacity(l.slots.len());
         for s in &l.slots {
             let (v, m) = match s {
                 Slot::Const(rv) => (*rv, None),
                 Slot::Expr(e) => (RVal { val: e.eval(env)?, bytes: 0 }, None),
-                Slot::TensorMap(b) => (RVal { val: 0, bytes: 0 }, Some(&**b)),
+                Slot::TensorMap(b) => (RVal { val: 0, bytes: 0 }, Some(b.0.to_vec())),
+                Slot::Pack(p) => (RVal { val: 0, bytes: 0 }, Some(p.image(env)?)),
             };
             vals.push(v);
-            maps.push(m);
+            images.push(m);
         }
         match &l.kind {
             LaunchKind::Gemm { beta } => gemm_bf16_tn(&self.blt, &self.stream, &vals, *beta),
@@ -1434,13 +1435,13 @@ impl Runtime {
                 };
                 // Every scalar/pointer slot staged as a little-endian u64;
                 // the launch ABI reads the low `size_bytes()` of each slot.
-                // A tensormap slot points at its image instead.
+                // A tensormap or pack slot points at its image instead.
                 let raw: Vec<u64> = vals.iter().map(|r| r.val).collect();
                 let mut params: Vec<*mut c_void> = raw
                     .iter()
-                    .zip(&maps)
+                    .zip(&images)
                     .map(|(s, m)| match m {
-                        Some(b) => b.0.as_ptr() as *mut c_void,
+                        Some(b) => b.as_ptr() as *mut c_void,
                         None => s as *const u64 as *mut c_void,
                     })
                     .collect();

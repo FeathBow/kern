@@ -106,13 +106,26 @@ def fold_constants(m):
         _materialize(op)
         keep = [i for i in range(len(params)) if i not in folded]
         renumber = {old: new for new, old in enumerate(keep)}
+        def fold(a, keep_keys=()):
+            # a launch arg or a pack field: a folded param becomes the call's literal
+            # (a pack field keeps its offset/width), any other param is renumbered
+            if "param" not in a:
+                return a
+            if a["param"] in folded:
+                return {**{k: a[k] for k in keep_keys if k in a}, **folded[a["param"]]}
+            return {**a, "param": renumber[a["param"]]}
+
         for launch in op["impl"]["launches"]:
-            launch["args"] = [
-                folded[a["param"]] if "param" in a and a["param"] in folded
-                else {"param": renumber[a["param"]]} if "param" in a
-                else a
-                for a in launch["args"]
-            ]
+            args = []
+            for a in launch["args"]:
+                if "tensormap" in a:
+                    a = {"tensormap": {**a["tensormap"], "param": renumber[a["tensormap"]["param"]]}}
+                elif "pack" in a:
+                    a = {"pack": {**a["pack"], "fields": [fold(f, ("at", "width")) for f in a["pack"]["fields"]]}}
+                else:
+                    a = fold(a)
+                args.append(a)
+            launch["args"] = args
         op["params"] = [params[i] for i in keep]
         for c in calls:
             c["args"] = [c["args"][i] for i in keep]

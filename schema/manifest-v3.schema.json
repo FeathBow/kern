@@ -449,6 +449,148 @@
       ],
       "type": "object"
     },
+    "Field": {
+      "anyOf": [
+        {
+          "description": "The op's interface param: a pointer (with the call's offset) or a scalar.",
+          "properties": {
+            "param": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "param"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A scratch buffer's pointer.",
+          "properties": {
+            "scratch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "scratch"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A literal `i32`.",
+          "properties": {
+            "i32": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "i32"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A literal `i64`.",
+          "properties": {
+            "i64": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "i64"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A literal `f32`.",
+          "properties": {
+            "f32": {
+              "format": "float",
+              "type": "number"
+            }
+          },
+          "required": [
+            "f32"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A literal `u8`.",
+          "properties": {
+            "u8": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "u8"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The current value of a var.",
+          "properties": {
+            "var": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "var"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The value of a var expression.",
+          "properties": {
+            "expr": {
+              "$ref": "#/$defs/Expr"
+            }
+          },
+          "required": [
+            "expr"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "This rank's index in the named topology group.",
+          "properties": {
+            "rank": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "rank"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "One field of a `pack`: a byte offset plus where the value comes from, e.g. `{\"at\": 8, \"var\": \"tokens\"}`.",
+      "properties": {
+        "at": {
+          "description": "Byte offset of the field in the image.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "width": {
+          "description": "Field width in bytes; defaults to the source's own width (8 for a\npointer or i64, 4 for i32 / f32 / var / expr, 1 for u8).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "at"
+      ],
+      "type": "object"
+    },
     "Impl": {
       "additionalProperties": false,
       "description": "An op implementation: private scratch buffers and one or more launches in order.",
@@ -683,6 +825,19 @@
             "tensormap"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "An aggregate assembled from fields at byte offsets, for a `bytes<n>` param.",
+          "properties": {
+            "pack": {
+              "$ref": "#/$defs/Pack"
+            }
+          },
+          "required": [
+            "pack"
+          ],
+          "type": "object"
         }
       ],
       "description": "A launch argument: a forwarded op param, a scratch buffer, a literal, or this rank's index in a group, e.g. `{\"param\": 0}`, `{\"scratch\": \"pmax\"}`, `{\"i32\": 64}`, `{\"rank\": \"ep\"}`."
@@ -728,9 +883,33 @@
       ],
       "type": "object"
     },
+    "Pack": {
+      "additionalProperties": false,
+      "description": "An aggregate param image, e.g. `{\"size\": 24, \"fields\": [{\"at\": 0, \"param\": 3}, {\"at\": 8, \"i32\": 64}, {\"at\": 12, \"var\": \"tokens\"}]}`:\nthe bytes a kernel compiled from a struct-taking language (CUTLASS, the CuTe DSL) reads as one parameter.\n\nBytes no field covers are zero. A pointer field carries the bound buffer's\naddress (offset honoured), a scalar field its value in the field's width.",
+      "properties": {
+        "fields": {
+          "description": "The fields, each at its byte offset.",
+          "items": {
+            "$ref": "#/$defs/Field"
+          },
+          "type": "array"
+        },
+        "size": {
+          "description": "Image size in bytes; equals the `bytes<n>` of the param it binds to.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "size",
+        "fields"
+      ],
+      "type": "object"
+    },
     "ParamType": {
-      "description": "One parameter: a scalar (`\"i32\"`, `\"i64\"`, `\"f32\"`, `\"u8\"`), a directional pointer (`\"in buffer<bf16>\"`, `\"out buffer<f32>\"`, `\"inout state\"`), or a launch-private `\"tensormap\"` (128-byte TMA descriptor).",
-      "pattern": "^(i32|i64|f32|u8|tensormap|(in|out|inout) (state|buffer<(bf16|f16|f32|fp8e4m3|i32|u32|i64|u64|u8)>))$",
+      "description": "One parameter: a scalar (`\"i32\"`, `\"i64\"`, `\"f32\"`, `\"u8\"`), a directional pointer (`\"in buffer<bf16>\"`, `\"out buffer<f32>\"`, `\"inout state\"`), or a launch-private `\"tensormap\"` (128-byte TMA descriptor) or `\"bytes<n>\"` (an n-byte aggregate filled by a `pack` launch arg).",
+      "pattern": "^(i32|i64|f32|u8|tensormap|bytes<[1-9][0-9]*>|(in|out|inout) (state|buffer<(bf16|f16|f32|fp8e4m3|i32|u32|i64|u64|u8)>))$",
       "type": "string"
     },
     "Scratch": {
@@ -804,7 +983,7 @@
     },
     "TensorMap": {
       "additionalProperties": false,
-      "description": "A tiled TMA descriptor (`cuTensorMapEncodeTiled`) over the buffer bound to interface param `param`, e.g. `{\"param\": 5, \"dtype\": \"u8\", \"dims\": [3584, 1024], \"strides\": [3584], \"box\": [128, 96], \"swizzle\": 128}`.\n\n`dims` are in elements, innermost first; `strides` are the byte strides of\n`dims[1..]`; `box` is the smem tile in elements. Element strides are 1.",
+      "description": "A tiled TMA descriptor (`cuTensorMapEncodeTiled`) over the buffer bound to interface param `param`, e.g. `{\"param\": 5, \"dtype\": \"u8\", \"dims\": [3584, 1024], \"strides\": [3584], \"box\": [128, 96], \"swizzle\": 128}`.\n\n`dims` are in elements, innermost first; `strides` are the byte strides of\n`dims[1..]`; `box` is the smem tile in elements. Element strides are 1.\nThe outermost dim may be 0: the descriptor then spans as many of that dim\nas the bound buffer holds past the call's offset (a paged cache whose\npage count is the runtime's, not the manifest's).",
       "properties": {
         "box": {
           "description": "Box (smem tile) extent per dimension in elements, each 1..=256.",
@@ -816,7 +995,7 @@
           "type": "array"
         },
         "dims": {
-          "description": "Global extent per dimension in elements, innermost first (1 to 5 dims).",
+          "description": "Global extent per dimension in elements, innermost first (1 to 5 dims); the outermost may be 0 (span the buffer).",
           "items": {
             "format": "uint64",
             "minimum": 0,

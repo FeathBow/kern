@@ -498,6 +498,9 @@ pub enum ParamType {
     /// A 128-byte TMA descriptor (`CUtensorMap`) passed by value, launch-private:
     /// wired with a `{"tensormap": {...}}` launch arg over an interface buffer.
     TensorMap,
+    /// An aggregate of `n` bytes passed by value (a kernel whose ABI takes
+    /// structs), launch-private: wired with a `{"pack": {...}}` launch arg.
+    Bytes(u32),
 }
 
 impl ParamType {
@@ -507,6 +510,7 @@ impl ParamType {
         match self {
             ParamType::Buf { .. } | ParamType::State { .. } => 8,
             ParamType::TensorMap => 128,
+            ParamType::Bytes(n) => n as u64,
             ParamType::Scalar(ScalarType::I64) => 8,
             ParamType::Scalar(ScalarType::U8) => 1,
             ParamType::Scalar(_) => 4,
@@ -517,7 +521,7 @@ impl ParamType {
     pub fn dir(self) -> Option<Dir> {
         match self {
             ParamType::Buf { dir, .. } | ParamType::State { dir } => Some(dir),
-            ParamType::Scalar(_) | ParamType::TensorMap => None,
+            ParamType::Scalar(_) | ParamType::TensorMap | ParamType::Bytes(_) => None,
         }
     }
 }
@@ -534,6 +538,12 @@ impl FromStr for ParamType {
             "u8" => return Ok(ParamType::Scalar(ScalarType::U8)),
             "tensormap" => return Ok(ParamType::TensorMap),
             _ => {}
+        }
+        if let Some(n) = s.strip_prefix("bytes<").and_then(|r| r.strip_suffix('>')) {
+            return match n.parse::<u32>() {
+                Ok(n) if n > 0 => Ok(ParamType::Bytes(n)),
+                _ => Err(format!("invalid byte count in param type `{s}`")),
+            };
         }
         let (dir_s, rest) = s.split_once(' ').ok_or_else(|| format!("invalid param type `{s}`"))?;
         let dir = match dir_s {
@@ -561,6 +571,7 @@ impl fmt::Display for ParamType {
             ParamType::State { dir } => write!(f, "{dir} state"),
             ParamType::Scalar(st) => write!(f, "{st}"),
             ParamType::TensorMap => write!(f, "tensormap"),
+            ParamType::Bytes(n) => write!(f, "bytes<{n}>"),
         }
     }
 }
@@ -574,9 +585,10 @@ impl schemars::JsonSchema for ParamType {
         schemars::json_schema!({
             "description": "One parameter: a scalar (`\"i32\"`, `\"i64\"`, `\"f32\"`, `\"u8\"`), \
                 a directional pointer (`\"in buffer<bf16>\"`, `\"out buffer<f32>\"`, \
-                `\"inout state\"`), or a launch-private `\"tensormap\"` (128-byte TMA descriptor).",
+                `\"inout state\"`), or a launch-private `\"tensormap\"` (128-byte TMA descriptor) \
+                or `\"bytes<n>\"` (an n-byte aggregate filled by a `pack` launch arg).",
             "type": "string",
-            "pattern": "^(i32|i64|f32|u8|tensormap|(in|out|inout) (state|buffer<(bf16|f16|f32|fp8e4m3|i32|u32|i64|u64|u8)>))$",
+            "pattern": "^(i32|i64|f32|u8|tensormap|bytes<[1-9][0-9]*>|(in|out|inout) (state|buffer<(bf16|f16|f32|fp8e4m3|i32|u32|i64|u64|u8)>))$",
         })
     }
 }
@@ -752,12 +764,114 @@ pub enum LaunchArg {
     Rank { rank: String },
     /// A TMA descriptor over an interface buffer, encoded at load time.
     TensorMap { tensormap: TensorMap },
+    /// An aggregate assembled from fields at byte offsets, for a `bytes<n>` param.
+    Pack { pack: Pack },
+}
+
+/// An aggregate param image, e.g. `{"size": 24, "fields": [{"at": 0, "param": 3}, {"at": 8, "i32": 64}, {"at": 12, "var": "tokens"}]}`:
+/// the bytes a kernel compiled from a struct-taking language (CUTLASS, the CuTe DSL) reads as one parameter.
+///
+/// Bytes no field covers are zero. A pointer field carries the bound buffer's
+/// address (offset honoured), a scalar field its value in the field's width.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Pack {
+    /// Image size in bytes; equals the `bytes<n>` of the param it binds to.
+    pub size: u32,
+    /// The fields, each at its byte offset.
+    pub fields: Vec<Field>,
+}
+
+/// One field of a `pack`: a byte offset plus where the value comes from, e.g. `{"at": 8, "var": "tokens"}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct Field {
+    /// Byte offset of the field in the image.
+    pub at: u32,
+    /// Field width in bytes; defaults to the source's own width (8 for a
+    /// pointer or i64, 4 for i32 / f32 / var / expr, 1 for u8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    /// Where the value comes from.
+    #[serde(flatten)]
+    pub src: FieldSrc,
+}
+
+/// The value of a pack field, e.g. `{"param": 3}` (the bound buffer's pointer or the scalar's value), `{"var": "tokens"}`, `{"i64": 4608}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum FieldSrc {
+    /// The op's interface param: a pointer (with the call's offset) or a scalar.
+    Param { param: usize },
+    /// A scratch buffer's pointer.
+    Scratch { scratch: String },
+    /// A literal `i32`.
+    I32 { i32: i32 },
+    /// A literal `i64`.
+    I64 { i64: i64 },
+    /// A literal `f32`.
+    F32 { f32: f32 },
+    /// A literal `u8`.
+    U8 { u8: u8 },
+    /// The current value of a var.
+    Var { var: String },
+    /// The value of a var expression.
+    Expr { expr: Expr },
+    /// This rank's index in the named topology group.
+    Rank { rank: String },
+}
+
+impl Field {
+    /// The field's width: explicit, else the source's natural width
+    /// (`None` for a param source, whose width is the param's).
+    pub fn natural_width(&self) -> Option<u32> {
+        self.width.or(match &self.src {
+            FieldSrc::Param { .. } => None,
+            FieldSrc::Scratch { .. } | FieldSrc::I64 { .. } => Some(8),
+            FieldSrc::I32 { .. } | FieldSrc::F32 { .. } | FieldSrc::Var { .. } | FieldSrc::Expr { .. } | FieldSrc::Rank { .. } => Some(4),
+            FieldSrc::U8 { .. } => Some(1),
+        })
+    }
+}
+
+impl Pack {
+    /// Structural diagnostics: every field inside the image and no two
+    /// overlapping. `width_of` supplies a param field's width.
+    pub fn check(&self, width_of: impl Fn(usize) -> Option<u32>) -> Vec<String> {
+        let mut errs = Vec::new();
+        let mut spans: Vec<(u32, u32, usize)> = Vec::new();
+        for (i, f) in self.fields.iter().enumerate() {
+            let w = match f.natural_width().or_else(|| match &f.src {
+                FieldSrc::Param { param } => width_of(*param),
+                _ => None,
+            }) {
+                Some(w) if w > 0 => w,
+                _ => {
+                    errs.push(format!("field #{i}: width unknown"));
+                    continue;
+                }
+            };
+            match f.at.checked_add(w) {
+                Some(end) if end <= self.size => spans.push((f.at, end, i)),
+                _ => errs.push(format!("field #{i} at {} spans {w} bytes, past the {} byte image", f.at, self.size)),
+            }
+        }
+        spans.sort_unstable();
+        for w in spans.windows(2) {
+            if w[1].0 < w[0].1 {
+                errs.push(format!("field #{} overlaps field #{}", w[1].2, w[0].2));
+            }
+        }
+        errs
+    }
 }
 
 /// A tiled TMA descriptor (`cuTensorMapEncodeTiled`) over the buffer bound to interface param `param`, e.g. `{"param": 5, "dtype": "u8", "dims": [3584, 1024], "strides": [3584], "box": [128, 96], "swizzle": 128}`.
 ///
 /// `dims` are in elements, innermost first; `strides` are the byte strides of
 /// `dims[1..]`; `box` is the smem tile in elements. Element strides are 1.
+/// The outermost dim may be 0: the descriptor then spans as many of that dim
+/// as the bound buffer holds past the call's offset (a paged cache whose
+/// page count is the runtime's, not the manifest's).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TensorMap {
@@ -765,7 +879,7 @@ pub struct TensorMap {
     pub param: usize,
     /// Element type as TMA sees it; `u4` is 16 packed nibbles per 8 bytes (`CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B`).
     pub dtype: TmaDType,
-    /// Global extent per dimension in elements, innermost first (1 to 5 dims).
+    /// Global extent per dimension in elements, innermost first (1 to 5 dims); the outermost may be 0 (span the buffer).
     pub dims: Vec<u64>,
     /// Byte stride of each dimension after the first (`dims.len() - 1` entries, multiples of 16).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -834,8 +948,11 @@ impl TensorMap {
         if self.box_.len() != n {
             errs.push(format!("box has {} entries, expected {n}", self.box_.len()));
         }
-        if let Some((i, _)) = self.dims.iter().enumerate().find(|(_, &d)| d == 0) {
-            errs.push(format!("dims[{i}] is 0"));
+        if let Some((i, _)) = self.dims[..n - 1].iter().enumerate().find(|(_, &d)| d == 0) {
+            errs.push(format!("dims[{i}] is 0; only the outermost dim may span the buffer"));
+        }
+        if n == 1 && self.dims[0] == 0 {
+            errs.push("dims[0] is 0".into());
         }
         if let Some((i, &b)) = self.box_.iter().enumerate().find(|(_, &b)| !(1..=256).contains(&b)) {
             errs.push(format!("box[{i}] = {b}, must be 1..=256"));
@@ -892,6 +1009,7 @@ impl fmt::Display for LaunchArg {
             LaunchArg::TensorMap { tensormap } => {
                 write!(f, "tensormap over interface param #{}", tensormap.param)
             }
+            LaunchArg::Pack { pack } => write!(f, "pack of {} bytes", pack.size),
         }
     }
 }
@@ -939,7 +1057,7 @@ impl RegistryRef {
 }
 
 /// A scalar expression: a constant, a var name, `{"ceil_div": [e, c]}` or `{"mul": [e, c]}`, e.g. `{"ceil_div": ["tokens", 128]}`.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum Expr {
     /// A constant, e.g. `64`.
