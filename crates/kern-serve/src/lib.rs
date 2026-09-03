@@ -4,20 +4,22 @@
 //! crates underneath: completions, chat completions, streaming, chat
 //! templates, stop strings). This crate contributes the engine behind it:
 //! `scheduler::KernScheduler`, the pegainfer `Scheduler` contract over a
-//! `kern_runtime::Runtime` (KV pages are the runtime's leases). The crate's
-//! public surface is [`serve`] and its option structs.
+//! `tray::Tray` — one `kern_runtime::Runtime` per GPU, driven in lockstep
+//! (KV pages are the runtimes' leases). The crate's public surface is
+//! [`serve`] and its option structs.
 
 #![deny(unsafe_code)]
 
 pub mod logline;
 mod scheduler;
+mod tray;
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::Args;
-use kern_runtime::Runtime;
+use kern_runtime::Topology;
 use pegainfer_frontend::engine::{
     drive, scheduler_pair, Engine, EngineInfo, KvCapacity, LaunchedEngine, LiveScheduler,
 };
@@ -25,11 +27,13 @@ use pegainfer_frontend::vllm;
 use tracing::info;
 
 use scheduler::{KernScheduler, Policy};
+use tray::Tray;
 
 /// The manifest and its artifacts (from kern.toml's target or flags).
 pub struct Artifacts {
     pub manifest: PathBuf,
     pub kernels: PathBuf,
+    /// Weight files; see [`rank_weights`] for `{group}` and `*`.
     pub weights: Vec<PathBuf>,
 }
 
@@ -55,14 +59,16 @@ pub struct ServeOpts {
     #[arg(long, default_value_t = 8000)]
     pub port: u16,
 
-    /// CUDA device ordinal
-    #[arg(long)]
-    pub gpu: Option<usize>,
+    /// CUDA device ordinals, one per rank of the tray, in rank order (a
+    /// manifest with a topology needs every group's members; `tp` groups
+    /// are consecutive ranks). Default: kern.toml's `gpu`, else 0
+    #[arg(long, value_delimiter = ',')]
+    pub gpus: Vec<usize>,
 
-    /// KV pool in tokens (rounded down to the page); every request reserves
-    /// its worst case `prompt + max_tokens` at admission. Default: whatever
-    /// device memory is left once weights, activations and scratch are
-    /// allocated, less 1 GiB
+    /// KV pool in tokens per rank (rounded down to the page); every request
+    /// reserves its worst case `prompt + max_tokens` at admission. Default:
+    /// whatever device memory is left once weights, activations and scratch
+    /// are allocated, less 1 GiB
     #[arg(long)]
     pub capacity: Option<u64>,
 
@@ -74,7 +80,8 @@ pub struct ServeOpts {
     #[arg(long, default_value_t = 2048)]
     pub prefill_budget: usize,
 
-    /// Cap on concurrently running sequences (≤ the manifest's `seqs` bound)
+    /// Cap on concurrently running sequences per rank (≤ the manifest's
+    /// `seqs` bound)
     #[arg(long, default_value_t = 256)]
     pub max_seqs: usize,
 
@@ -92,9 +99,10 @@ pub struct ServeOpts {
     #[arg(long, value_delimiter = ',')]
     pub stop_tokens: Vec<u32>,
 
-    /// Pinned host memory (GiB) for checkpoints parked off the device: a
-    /// lease short of pages or slots parks the coldest checkpoint there
-    /// instead of dropping it, and a prompt hitting one wakes it (0: off)
+    /// Pinned host memory (GiB) per rank for snapshots parked off the
+    /// device: a lease short of pages or slots parks the coldest snapshot
+    /// there instead of dropping it, and a prompt hitting one wakes it
+    /// (0: off)
     #[arg(long, default_value_t = 0.0)]
     pub host_gib: f64,
 }
@@ -119,8 +127,44 @@ fn hf_stop_tokens(model_path: &Path) -> Vec<u32> {
     out
 }
 
+/// One rank's weight files from the target's list: every `{group}` in a
+/// path is the rank's index in that topology group (`{ep}`, `{tp}`), and
+/// a `*` in a file name matches that directory's files around it, in name
+/// order. A manifest sharded per rank names its shards this way once for
+/// every rank.
+fn rank_weights(paths: &[PathBuf], topo: &Topology) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    for p in paths {
+        let mut s = p.to_string_lossy().into_owned();
+        for (g, r) in &topo.groups {
+            s = s.replace(&format!("{{{g}}}"), &r.index.to_string());
+        }
+        if let Some(open) = s.find('{') {
+            let close = s[open..].find('}').map_or(s.len(), |c| open + c + 1);
+            bail!("weights path {s}: `{}` is not a group of the manifest's topology", &s[open..close]);
+        }
+        let p = PathBuf::from(&s);
+        let Some((pre, post)) = p.file_name().and_then(|f| f.to_str()).and_then(|f| f.split_once('*')) else {
+            out.push(p);
+            continue;
+        };
+        let dir = p.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .with_context(|| format!("weights {s}: listing {}", dir.display()))?
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter(|f| f.len() >= pre.len() + post.len() && f.starts_with(pre) && f.ends_with(post))
+            .collect();
+        if names.is_empty() {
+            bail!("weights {s}: nothing matches");
+        }
+        names.sort_unstable();
+        out.extend(names.into_iter().map(|f| dir.join(f)));
+    }
+    Ok(out)
+}
+
 pub fn serve(o: ServeOpts, art: Artifacts, d: Defaults) -> Result<()> {
-    let gpu = o.gpu.or(d.gpu).unwrap_or(0);
+    let gpus = if o.gpus.is_empty() { vec![d.gpu.unwrap_or(0)] } else { o.gpus.clone() };
     let capacity = o.capacity.or(d.capacity);
     let chunk = o.chunk.or(d.chunk).unwrap_or(512) as usize;
     let mut stop_tokens = hf_stop_tokens(&o.model_path);
@@ -143,10 +187,11 @@ pub fn serve(o: ServeOpts, art: Artifacts, d: Defaults) -> Result<()> {
             .unwrap_or_else(|| "kern".to_owned())
     });
 
-    // The scheduler thread owns the runtime for its whole life: load there,
+    // The scheduler thread owns the tray for its whole life: load there,
     // report readiness, then drive.
     let (handle, backend) = scheduler_pair();
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<scheduler::Facts>>();
+    let host_bytes = (o.host_gib * (1u64 << 30) as f64) as u64;
     let policy = Policy {
         chunk,
         prefill_budget: o.prefill_budget,
@@ -154,25 +199,17 @@ pub fn serve(o: ServeOpts, art: Artifacts, d: Defaults) -> Result<()> {
         max_seqs: o.max_seqs,
         stop_tokens,
         spec: o.spec,
-        host_bytes: (o.host_gib * (1u64 << 30) as f64) as u64,
+        host_bytes,
     };
     let join = std::thread::Builder::new()
         .name("kern-scheduler".into())
         .spawn(move || {
             let load = || -> Result<KernScheduler> {
                 let t0 = Instant::now();
-                let mut rt = Runtime::load(&manifest_json, &art.kernels, gpu, capacity, None)?;
-                info!(model = %rt.manifest.model, modules = rt.module_count(), load_s = logline::secs(t0.elapsed()), "manifest verified");
-                let t0 = Instant::now();
-                let blobs = art
-                    .weights
-                    .iter()
-                    .map(|p| std::fs::read(p).with_context(|| format!("reading weights {}", p.display())))
-                    .collect::<Result<Vec<_>>>()?;
-                rt.load_weights(&blobs.iter().map(Vec::as_slice).collect::<Vec<_>>())?;
-                drop(blobs);
-                info!(load_s = logline::secs(t0.elapsed()), "weights bound");
-                KernScheduler::new(rt, policy)
+                let weights_of = |topo: &Topology| rank_weights(&art.weights, topo);
+                let tray = Tray::load(&manifest_json, &art.kernels, &gpus, capacity, &weights_of, host_bytes)?;
+                info!(model = %tray.manifest().model, gpus = ?gpus, load_s = logline::secs(t0.elapsed()), "tray loaded");
+                KernScheduler::new(tray, policy)
             };
             match load() {
                 Ok(sched) => {
@@ -208,4 +245,36 @@ pub fn serve(o: ServeOpts, art: Artifacts, d: Defaults) -> Result<()> {
         let shutdown = vllm::shutdown_token_from_ctrl_c();
         vllm::serve_with_engine_count(engine, &o.model_path, vec![served_name], o.port, None, 1, shutdown).await
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kern_runtime::GroupRank;
+
+    #[test]
+    fn rank_weights_substitute_groups_and_expand_stars() {
+        let dir = std::env::temp_dir().join(format!("kern-serve-weights-{}", std::process::id()));
+        let shard = dir.join("dense-tp4").join("r2");
+        std::fs::create_dir_all(&shard).unwrap();
+        for f in ["l10.safetensors", "l1.safetensors", "l0.safetensors", "notes.txt"] {
+            std::fs::write(shard.join(f), b"").unwrap();
+        }
+        let mut topo = Topology::one("ep", 3, 4);
+        topo.groups.insert("tp".into(), GroupRank { index: 2, size: 4 });
+        let paths = [dir.join("bookends.safetensors"), dir.join("dense-tp4/r{tp}/l*.safetensors")];
+        let got = rank_weights(&paths, &topo).unwrap();
+        // Name order, not layer order: the runtime binds by tensor name.
+        let want = [
+            dir.join("bookends.safetensors"),
+            shard.join("l0.safetensors"),
+            shard.join("l1.safetensors"),
+            shard.join("l10.safetensors"),
+        ];
+        assert_eq!(got, want);
+        let e = rank_weights(&[dir.join("experts/ep{world}-r{ep}.safetensors")], &topo).unwrap_err();
+        assert!(e.to_string().contains("`{world}` is not a group"), "{e}");
+        let e = rank_weights(&[shard.join("x*.safetensors")], &topo).unwrap_err();
+        assert!(e.to_string().contains("nothing matches"), "{e}");
+    }
 }

@@ -53,7 +53,10 @@ capacity 向下对齐到 manifest 里 `index_into` 该 state 的最大页单位�
 `Runtime::lease(tokens)` 一次租下 KV 页和每个 per-seq state 的一个 slot
 （租时在 stream 上清零），`Lease::seq_line(table, r)` 给出 line 表的项（宽表
 `[lines, seqs, w]` 的格宽由 `seq_width` 给出，caller 决定 line 落在哪一项）；
-租约 drop 时一起归还。
+租约 drop 时一起归还。`Runtime::lease_slot()` 只租 slot 不租页：TP 下一行的
+KDA state 按头分在组里每张卡上、MLA 页只在 owner 卡，peer 卡上这一行就是一个
+slot-only 的 `Lease`（`paged() == false`，不能 `slot(pos)`），它的 checkpoint /
+retire / fork / restore / park / wake 只搬 slot、长度由调用方说（E5 tray 级）。
 
 **checkpoint（K1）**：`Runtime::checkpoint(&mut lease, len)` 把序列前 `len` 个
 token 留成 `Checkpoint`——页进共享链（一页一个引用计数节点，一条序列每页一个
@@ -86,12 +89,14 @@ state），纯 KV 模型可以分在任何位置。和 `lease_from` 是同一套
 DRAM（GB300 上约 100 ms/GiB，只做一次），分配前把线程的 NUMA 策略绑到这张卡所在的
 节点（sysfs 的 `numa_node` + `set_mempolicy`，分完恢复默认）：一个 GB300 tray 两颗
 Grace 各挂两张卡，本地 DRAM 拷贝 180 / 197 GiB/s（park / wake），跨到另一颗 CPU 的
-只有 115 / 117——同一个 6 GB 唤醒 31 ms 与 52 ms 的差别就在这里；`Runtime::park(checkpoint) -> Result<Parked,
-Checkpoint>` 把 checkpoint 的页和 slot 拷到 host（放不下时把 checkpoint 原样退回，调用方
-淘汰点什么再试），runtime 攥着这个 checkpoint 直到拷贝落地，页和 slot 才回池，前缀一直
-可查；`Runtime::wake(&parked, len, tokens) -> Waking` 租一条新序列并把前 `len` 个 token
+只有 115 / 117——同一个 6 GB 唤醒 31 ms 与 52 ms 的差别就在这里；park 分两步：`Runtime::room(checkpoint) -> Result<Room, Checkpoint>`
+只在 host 块上找地方（放不下时把 checkpoint 原样退回，调用方淘汰点什么再试；`Room`
+drop 即退地），`Runtime::park(room) -> Parked` 才拷页和 slot——分开是为了 tray 级的
+park 能先在四张卡上都找到地方再动一个字节（半途失败的 park 无法撤销）；runtime 攥着
+这个 checkpoint 直到拷贝落地，页和 slot 才回池，前缀一直可查；`Runtime::wake(&parked, len, tokens) -> Waking` 租一条新序列并把前 `len` 个 token
 的页（和 slot）拷回来，`Runtime::awake(waking) -> Result<Lease, Waking>` 不阻塞地问拷贝
-落地没有，落地了才给出 `Lease`——没有 `Lease` 就没有程序能读到还在路上的页，这是类型
+落地没有，落地了才给出 `Lease`（`Runtime::landed(&waking)` 只问不拿，tray 用它先看齐
+四张卡再一起 awake）——没有 `Lease` 就没有程序能读到还在路上的页，这是类型
 保证的，不靠 compute stream 等事件（`Waking` 提前 drop 会等拷贝完再还页）。host 上
 的页也是链（`host.rs`，一页一个节点，按它拷自的 device 节点编号索引），同一 session
 下一轮再 park 只拷新增的页；一页在 host 上是所有分页 state 的该页首尾相接，slot 同理，
@@ -100,7 +105,9 @@ Checkpoint>` 把 checkpoint 的页和 slot 拷到 host（放不下时把 checkpo
 之后开始，compute stream 从不等它，decode 步不排在拷贝后面。`Prefix` 表按
 `Tier::{Resident, Parked}` 分层：`lookup` 先挑 resident；纯 KV 的 checkpoint 链在表里
 是一个随页增长的条目（每个深度都登记），所以 parked 的条目部分命中时只醒需要的页；
-`coldest(tier)` / `park(id, |cp| rt.park(cp))` / `remove(id)` 是调用方腾地方的三个动作。实测
+`coldest(tier)` / `park(id, |cp| ...)` / `remove(id)` 是调用方腾地方的三个动作；表对它
+存的东西是泛型的（`Prefix<R, P>`，`R: Kept`、`P: Kept` 只要求 `tokens()` / `has_slot()`），
+单卡存 `Checkpoint` / `Parked`，kern-serve 的 tray 存四张卡的元组。实测
 （tray08 GB300 单卡，2026-09-03，`crates/kern-runtime/examples/park_wake.rs`，写入
 按位置的 pattern、park、清零、wake、逐字节比对）：qwen3.8-27b 形状 98k token =
 125 页 × 49 MiB + 147 MiB slot = 6.12 GiB，park 34 ms（180 GiB/s）、wake 31 ms

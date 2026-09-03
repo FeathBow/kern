@@ -2,7 +2,7 @@
 //! shapes: every byte comes back, and how long each way takes.
 //!
 //!   cargo run --release -p kern-runtime --example park_wake -- \
-//!       --manifest examples/qwen3.8-27b.json --kernels kernels-qwen38 [--gpu 0] [--tokens 98000] [--host-gib 16]
+//!       --manifest examples/qwen3.8-27b.json --kernels kernels-qwen38 [--gpu 0] [--tokens 98000] [--wake 98000] [--every-page] [--host-gib 16]
 //!
 //! Leases `tokens`, fills its pages and its slot with a pattern keyed by
 //! position, checkpoints it, parks the checkpoint (timed to the transfer
@@ -27,6 +27,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut gpu = 0usize;
     let mut tokens = 98_000usize;
     let mut host_gib = 16u64;
+    let mut wake_at: Option<usize> = None;
+    let mut every_page = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut v = || args.next().expect("value");
@@ -36,6 +38,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--gpu" => gpu = v().parse()?,
             "--tokens" => tokens = v().parse()?,
             "--host-gib" => host_gib = v().parse()?,
+            "--wake" => wake_at = Some(v().parse()?),
+            "--every-page" => every_page = true,
             _ => return Err(format!("unknown arg {a}").into()),
         }
     }
@@ -71,12 +75,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let gib = bytes as f64 / (1u64 << 30) as f64;
     println!("{tokens} tokens: {pages} pages of {unit}, {gib:.2} GiB of state written");
+    // A serving scheduler checkpoints a stateless sequence page by page,
+    // so the chain it parks is one node per page.
+    if every_page {
+        for k in 1..pages {
+            drop(rt.checkpoint(&mut lease, k * unit)?);
+        }
+    }
     let cp = rt.checkpoint(&mut lease, tokens)?;
     drop(lease);
     rt.synchronize()?;
 
     let t = Instant::now();
-    let Ok(parked) = rt.park(cp)? else { return Err("the host tier is too small for this checkpoint".into()) };
+    let Ok(room) = rt.room(cp)? else { return Err("the host tier is too small for this checkpoint".into()) };
+    let parked = rt.park(room)?;
     let issued = t.elapsed();
     rt.synchronize()?;
     let park = t.elapsed();
@@ -90,7 +102,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     rt.zero_states()?;
 
     let t = Instant::now();
-    let mut waking = rt.wake(&parked, tokens, tokens + 1)?;
+    // A prompt hitting part of a parked checkpoint wakes that part alone.
+    let wake_at = wake_at.unwrap_or(tokens);
+    let wake_pages = wake_at.div_ceil(unit);
+    let mut waking = rt.wake(&parked, wake_at, tokens + 1)?;
     let issued = t.elapsed();
     let woken = loop {
         match rt.awake(waking)? {
@@ -111,7 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (si, (name, page_bytes, slot_bytes)) in states.iter().enumerate() {
         let base = (si as u64) << 48;
         if *page_bytes > 0 {
-            for (k, &page) in woken.page_ids()[..pages].iter().enumerate() {
+            for (k, &page) in woken.page_ids()[..wake_pages].iter().enumerate() {
                 let off = page as usize * *page_bytes as usize;
                 let got = rt.read_state_at(name, off, *page_bytes as usize)?;
                 if got != pattern(base + k as u64 * page_bytes, *page_bytes as usize) {
@@ -122,7 +137,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        if let (true, Some(slot)) = (*slot_bytes > 0, woken.seq_slot()) {
+        if let (true, Some(slot), true) = (*slot_bytes > 0, woken.seq_slot(), wake_at == tokens) {
             let got = rt.read_state_at(name, slot as usize * *slot_bytes as usize, *slot_bytes as usize)?;
             if got != pattern(base + (1 << 40), *slot_bytes as usize) {
                 bad += 1;

@@ -18,6 +18,10 @@
 //! `cuFuncGetParamInfo` layout matches the manifest's declared params — the
 //! phase-2 ABI check doubles as instance selection.
 //!
+//! Every entry point binds the runtime's CUDA context to the calling
+//! thread first, so one thread may drive several runtimes (a tray) and a
+//! runtime may be loaded on one thread and driven from another.
+//!
 //! A manifest with a `topology` is SPMD: every rank loads it with its own
 //! [`Topology`] (index per group). States and `export` buffers are
 //! virtual-memory allocations with fabric handles; [`Runtime::export_handles`]
@@ -64,7 +68,7 @@ use error::{bail, cuda_check};
 pub use error::{Error, Result};
 pub use host::{Host, Parked};
 pub use pages::{page_unit, Checkpoint, Copies, Denied, Lease, Pool, Pooled};
-pub use prefix::{Chain, Hit, Prefix, Tier};
+pub use prefix::{Chain, Hit, Kept, Prefix, Tier};
 
 /// The host tier's block is handed out in these units.
 const HOST_GRAIN: u64 = 1 << 16;
@@ -154,6 +158,7 @@ pub struct Runtime {
 
 impl Drop for Runtime {
     fn drop(&mut self) {
+        let _ = self.ctx.bind_to_thread();
         for exec in self.graphs.values() {
             unsafe { sys::cuGraphExecDestroy(*exec) };
         }
@@ -269,6 +274,22 @@ fn landed(ev: sys::CUevent) -> Result<bool> {
         sys::CUresult::CUDA_SUCCESS => Ok(true),
         sys::CUresult::CUDA_ERROR_NOT_READY => Ok(false),
         r => cuda_check(r, "cuEventQuery").map(|_| true),
+    }
+}
+
+/// A checkpoint with host room found for it and nothing copied yet: what
+/// [`Runtime::room`] hands out and [`Runtime::park`] spends. Dropping it
+/// frees the room and drops the checkpoint.
+pub struct Room {
+    cp: Checkpoint,
+    parked: Parked,
+    plan: host::Park,
+}
+
+impl Room {
+    /// Give the room back and keep the checkpoint.
+    pub fn into_checkpoint(self) -> Checkpoint {
+        self.cp
     }
 }
 
@@ -534,6 +555,7 @@ impl Runtime {
     /// Fabric handles for every `export` buffer and every state that has
     /// one, by name: what the other ranks pass to [`Runtime::import_peers`].
     pub fn export_handles(&self) -> Result<BTreeMap<String, PeerHandle>> {
+        self.ctx.bind_to_thread()?;
         let mut out = BTreeMap::new();
         for (name, b) in &self.buffers {
             if self.manifest.buffers[name].export {
@@ -561,6 +583,7 @@ impl Runtime {
     /// [`Runtime::export_handles`] returned (this rank's own entry may be
     /// anything: its local addresses are used). Synchronous.
     pub fn import_peers(&mut self, group: &str, members: &[BTreeMap<String, PeerHandle>]) -> Result<()> {
+        self.ctx.bind_to_thread()?;
         let Some(&me) = self.ranks.get(group) else {
             bail!(Api, "no topology group `{group}`");
         };
@@ -650,6 +673,7 @@ impl Runtime {
     /// (a target and a draft artifact, say); each weight must come from
     /// exactly one of them.
     pub fn load_weights(&mut self, blobs: &[&[u8]]) -> Result<()> {
+        self.ctx.bind_to_thread()?;
         let sts = blobs
             .iter()
             .map(|b| safetensors::SafeTensors::deserialize(b))
@@ -713,6 +737,7 @@ impl Runtime {
     }
 
     pub fn write_input_at(&mut self, name: &str, data: &[u8], env: &BTreeMap<String, u64>) -> Result<()> {
+        self.ctx.bind_to_thread()?;
         let Some(b) = self.manifest.buffers.get(name) else {
             bail!(Api, "no buffer `{name}`");
         };
@@ -735,6 +760,7 @@ impl Runtime {
     }
 
     pub fn read_output(&self, name: &str) -> Result<Vec<u8>> {
+        self.ctx.bind_to_thread()?;
         let Some(b) = self.manifest.buffers.get(name) else {
             bail!(Api, "no buffer `{name}`");
         };
@@ -753,8 +779,29 @@ impl Runtime {
     /// sequence; the slot is zeroed on the stream (a fresh sequence's
     /// recurrent state), and everything returns when the lease drops.
     pub fn lease(&mut self, tokens: usize) -> Result<Lease> {
+        self.ctx.bind_to_thread()?;
         self.poll()?;
         let lease = match self.pool.lease(tokens) {
+            Ok(l) => l,
+            Err(d) => return self.denied(d),
+        };
+        for (name, st) in &self.manifest.states {
+            let Some(range) = lease.seq_bytes(st.bytes_per_seq).filter(|_| st.is_per_seq()) else { continue };
+            let s = self.states.get_mut(name).unwrap();
+            let mut view = s.view(range)?;
+            self.stream.memset_zeros(&mut view)?;
+        }
+        Ok(lease)
+    }
+
+    /// A slot in each per-sequence state and no pages, zeroed on the
+    /// stream: this rank's share of a sequence whose positions live on
+    /// another rank (a tensor-parallel peer holds a slice of every row's
+    /// recurrent state). Empty when the manifest has no per-sequence state.
+    pub fn lease_slot(&mut self) -> Result<Lease> {
+        self.ctx.bind_to_thread()?;
+        self.poll()?;
+        let lease = match self.pool.lease_slot() {
             Ok(l) => l,
             Err(d) => return self.denied(d),
         };
@@ -771,6 +818,7 @@ impl Runtime {
     /// sequence keeps running past: pages shared, the per-sequence state
     /// copied into a fresh slot ([`Error::Denied`] when none is free).
     pub fn checkpoint(&mut self, lease: &mut Lease, len: usize) -> Result<Checkpoint> {
+        self.ctx.bind_to_thread()?;
         self.poll()?;
         let (cp, copies) = match self.pool.checkpoint(lease, len) {
             Ok(x) => x,
@@ -793,6 +841,7 @@ impl Runtime {
     /// length, or any whole number of its pages when it holds no state.
     /// [`Error::Denied`] as for [`Runtime::lease`].
     pub fn lease_from(&mut self, cp: &Checkpoint, len: usize, tokens: usize) -> Result<Lease> {
+        self.ctx.bind_to_thread()?;
         self.poll()?;
         let (lease, copies) = match self.pool.restore(cp, len, tokens) {
             Ok(x) => x,
@@ -808,6 +857,7 @@ impl Runtime {
     /// recurrent state `len` is the parent's position — the state is the
     /// parent's as of now. The lease names positions from `len` on.
     pub fn fork(&mut self, parent: &mut Lease, len: usize, tokens: usize) -> Result<Lease> {
+        self.ctx.bind_to_thread()?;
         self.poll()?;
         let (lease, copies) = match self.pool.fork(parent, len, tokens) {
             Ok(x) => x,
@@ -822,6 +872,7 @@ impl Runtime {
     /// Reserve `bytes` of page-locked host memory for parked checkpoints
     /// (once; ~100 ms per GiB on GB300).
     pub fn reserve_host(&mut self, bytes: u64) -> Result<()> {
+        self.ctx.bind_to_thread()?;
         if self.host.is_some() {
             bail!(Api, "the host tier is reserved already");
         }
@@ -857,35 +908,47 @@ impl Runtime {
         (page, slot, offsets)
     }
 
-    /// Copy `cp`'s pages and slot to the host tier: the pages not parked
-    /// already (an earlier turn of the same session shares them there).
-    /// The checkpoint is held until the copies, on the transfer stream,
-    /// have landed; then its device pages and slot return. `Err(cp)`
-    /// hands it back when the block cannot hold it.
-    pub fn park(&mut self, cp: Checkpoint) -> Result<std::result::Result<Parked, Checkpoint>> {
+    /// Host room for `cp` — its pages not parked already (an earlier turn
+    /// of the same session shares them there) and its slot — with nothing
+    /// copied yet: the first half of a park, so a caller parking several
+    /// checkpoints as one unit can find room for all of them before any
+    /// byte moves. `Err(cp)` hands the checkpoint back when the block
+    /// cannot hold it. Dropping a [`Room`] frees the room and the
+    /// checkpoint with it; [`Room::into_checkpoint`] keeps the checkpoint.
+    pub fn room(&mut self, cp: Checkpoint) -> Result<std::result::Result<Room, Checkpoint>> {
+        self.ctx.bind_to_thread()?;
         self.poll()?;
         let Some((host, _)) = &self.host else {
             bail!(Api, "no host tier: reserve_host first");
         };
         let (page_bytes, slot_bytes, _) = self.host_layout();
-        let (parked, plan) =
-            match host.park(&cp.nodes(), page_bytes, cp.seq_slot().map(|s| (s, slot_bytes)), cp.tokens()) {
-                Ok(x) => x,
-                Err(Denied::HostFull) => return Ok(Err(cp)),
-                Err(d) => return Err(Error::Denied(d)),
-            };
+        match host.park(&cp.nodes(), page_bytes, cp.seq_slot().map(|s| (s, slot_bytes)), cp.tokens()) {
+            Ok((parked, plan)) => Ok(Ok(Room { cp, parked, plan })),
+            Err(Denied::HostFull) => Ok(Err(cp)),
+            Err(d) => Err(Error::Denied(d)),
+        }
+    }
+
+    /// Copy a checkpoint into the room found for it. The checkpoint is
+    /// held until the copies, on the transfer stream, have landed; then
+    /// its device pages and slot return.
+    pub fn park(&mut self, room: Room) -> Result<Parked> {
+        self.ctx.bind_to_thread()?;
+        let Room { cp, parked, plan } = room;
         self.transfer(&plan.pages, plan.slot, true)?;
         self.parking.push((cp, record(&self.xfer)?));
-        Ok(Ok(parked))
+        Ok(parked)
     }
 
     /// A sequence continuing from the first `len` tokens of a parked
     /// checkpoint with room for `tokens`: fresh pages with those tokens'
     /// pages copied back in, a fresh slot with its state when `len` is the
-    /// whole checkpoint (a parked state is usable at its length only). The
-    /// copies run on the transfer stream; [`Runtime::awake`] hands out the
-    /// lease once they have landed.
+    /// whole checkpoint (a parked state is usable at its length only). A
+    /// slot-only checkpoint wakes to a slot-only lease. The copies run on
+    /// the transfer stream; [`Runtime::awake`] hands out the lease once
+    /// they have landed.
     pub fn wake(&mut self, p: &Parked, len: usize, tokens: usize) -> Result<Waking> {
+        self.ctx.bind_to_thread()?;
         self.poll()?;
         if self.host.is_none() {
             bail!(Api, "no host tier: reserve_host first");
@@ -894,20 +957,27 @@ impl Runtime {
         if len == 0 || len > p.tokens() || (len != p.tokens() && (p.has_slot() || !len.is_multiple_of(unit))) {
             bail!(Api, "waking {len} tokens of a parked checkpoint of {} ({p:?})", p.tokens());
         }
-        let lease = match self.pool.wake(len, tokens) {
+        let lease = match if p.paged() { self.pool.wake(len, tokens) } else { self.pool.wake_slot(len) } {
             Ok(l) => l,
             Err(d) => return self.denied(d),
         };
-        let n = len.div_ceil(unit);
+        let n = if p.paged() { len.div_ceil(unit) } else { 0 };
         let pairs: Vec<(i32, u64)> = lease.page_ids()[..n].iter().copied().zip(p.pages(n)).collect();
         let slot = if len == p.tokens() { lease.seq_slot().zip(p.slot()) } else { None };
         self.transfer(&pairs, slot, false)?;
         Ok(Waking { lease: Some(lease), event: record(&self.xfer)? })
     }
 
+    /// Whether a wake's copies have landed. Does not block.
+    pub fn landed(&self, w: &Waking) -> Result<bool> {
+        self.ctx.bind_to_thread()?;
+        landed(w.event)
+    }
+
     /// The lease of a wake whose copies have landed; `Err(w)` while they
     /// are still in flight. Does not block.
     pub fn awake(&self, mut w: Waking) -> Result<std::result::Result<Lease, Waking>> {
+        self.ctx.bind_to_thread()?;
         if !landed(w.event)? {
             return Ok(Err(w));
         }
@@ -1111,6 +1181,7 @@ impl Runtime {
 
     /// Whole allocation of any buffer, regardless of class.
     pub fn read_buffer(&self, name: &str) -> Result<Vec<u8>> {
+        self.ctx.bind_to_thread()?;
         let Some(b) = self.buffers.get(name) else {
             bail!(Api, "no buffer `{name}`");
         };
@@ -1120,6 +1191,7 @@ impl Runtime {
     /// The first `bytes` of any buffer (the live prefix at a var value
     /// below the allocation bound).
     pub fn read_buffer_prefix(&self, name: &str, bytes: usize) -> Result<Vec<u8>> {
+        self.ctx.bind_to_thread()?;
         let Some(b) = self.buffers.get(name) else {
             bail!(Api, "no buffer `{name}`");
         };
@@ -1132,6 +1204,7 @@ impl Runtime {
 
     /// Overwrite a prefix of any buffer, regardless of class (synchronous).
     pub fn write_buffer(&mut self, name: &str, data: &[u8]) -> Result<()> {
+        self.ctx.bind_to_thread()?;
         let Some(b) = self.buffers.get_mut(name) else {
             bail!(Api, "no buffer `{name}`");
         };
@@ -1148,6 +1221,7 @@ impl Runtime {
     /// (synchronous). States are opaque to the runtime; this is how a
     /// harness puts a state back to a snapshot before replaying a cut.
     pub fn write_state_at(&mut self, name: &str, offset: usize, data: &[u8]) -> Result<()> {
+        self.ctx.bind_to_thread()?;
         self.whole_state(name)?;
         let Some(s) = self.states.get_mut(name) else {
             bail!(Api, "no state `{name}`");
@@ -1165,6 +1239,7 @@ impl Runtime {
     /// Zero every state (synchronous): a fresh sequence from position 0,
     /// the way the runtime was loaded.
     pub fn zero_states(&mut self) -> Result<()> {
+        self.ctx.bind_to_thread()?;
         for name in self.manifest.states.keys() {
             self.whole_state(name)?;
         }
@@ -1178,6 +1253,7 @@ impl Runtime {
 
     /// `len` bytes of a state from `offset` (synchronous).
     pub fn read_state_at(&self, name: &str, offset: usize, len: usize) -> Result<Vec<u8>> {
+        self.ctx.bind_to_thread()?;
         self.whole_state(name)?;
         let Some(s) = self.states.get(name) else {
             bail!(Api, "no state `{name}`");
@@ -1190,6 +1266,7 @@ impl Runtime {
 
     /// Wait for everything enqueued on both streams.
     pub fn synchronize(&self) -> Result<()> {
+        self.ctx.bind_to_thread()?;
         self.stream.synchronize()?;
         self.xfer.synchronize()?;
         Ok(())
@@ -1197,6 +1274,7 @@ impl Runtime {
 
     /// Whole allocation of a state.
     pub fn read_state(&self, name: &str) -> Result<Vec<u8>> {
+        self.ctx.bind_to_thread()?;
         self.whole_state(name)?;
         let Some(s) = self.states.get(name) else {
             bail!(Api, "no state `{name}`");

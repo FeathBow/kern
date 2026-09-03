@@ -26,6 +26,9 @@ pegainfer-frontend = { git = "https://github.com/pegainfer-project/pegainfer", r
 
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+# Weights are mapped, not read: a tray's ranks share the page cache and
+# no rank holds a copy of its shard in DRAM.
+memmap2 = "0.9"
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing = "0.1"

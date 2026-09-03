@@ -54,12 +54,43 @@ pub struct Hit {
     pub tier: Tier,
 }
 
-enum Held {
-    Resident(Checkpoint),
-    Parked(Parked),
+/// What the table needs to know of what it keeps: a resident checkpoint,
+/// a parked one, or a caller's bundle of several (a tensor-parallel
+/// tray's per-rank checkpoints of one sequence).
+pub trait Kept {
+    /// Tokens held; never 0.
+    fn tokens(&self) -> usize;
+    /// Whether a recurrent state is held, which pins the entry to its
+    /// exact length.
+    fn has_slot(&self) -> bool;
 }
 
-impl Held {
+impl Kept for Checkpoint {
+    fn tokens(&self) -> usize {
+        Checkpoint::tokens(self)
+    }
+
+    fn has_slot(&self) -> bool {
+        self.seq_slot().is_some()
+    }
+}
+
+impl Kept for Parked {
+    fn tokens(&self) -> usize {
+        Parked::tokens(self)
+    }
+
+    fn has_slot(&self) -> bool {
+        Parked::has_slot(self)
+    }
+}
+
+enum Held<R, P> {
+    Resident(R),
+    Parked(P),
+}
+
+impl<R: Kept, P: Kept> Held<R, P> {
     fn tier(&self) -> Tier {
         match self {
             Held::Resident(_) => Tier::Resident,
@@ -69,14 +100,14 @@ impl Held {
 
     fn has_slot(&self) -> bool {
         match self {
-            Held::Resident(c) => c.seq_slot().is_some(),
+            Held::Resident(c) => c.has_slot(),
             Held::Parked(p) => p.has_slot(),
         }
     }
 }
 
-struct Entry {
-    held: Held,
+struct Entry<R, P> {
+    held: Held<R, P>,
     key: Key,
     /// `heads[d]` covers the first `d` pages, for every depth a pages-only
     /// entry is registered at; empty for one with a slot.
@@ -84,7 +115,7 @@ struct Entry {
     used: u64,
 }
 
-impl Entry {
+impl<R, P> Entry<R, P> {
     /// The (depth, chain) buckets this entry sits in.
     fn buckets(&self) -> Vec<(usize, u64)> {
         if self.heads.is_empty() {
@@ -95,9 +126,9 @@ impl Entry {
     }
 }
 
-pub struct Prefix {
+pub struct Prefix<R = Checkpoint, P = Parked> {
     unit: usize,
-    entries: BTreeMap<u64, Entry>,
+    entries: BTreeMap<u64, Entry<R, P>>,
     /// (depth, chain through it) → entries usable there.
     at_depth: BTreeMap<(usize, u64), Vec<u64>>,
     /// Recency stamp → entry, the eviction order.
@@ -195,9 +226,9 @@ impl Chain {
     }
 }
 
-impl Prefix {
+impl<R: Kept, P: Kept> Prefix<R, P> {
     /// A table over sequences paged in `unit` tokens.
-    pub fn new(unit: usize) -> Prefix {
+    pub fn new(unit: usize) -> Prefix<R, P> {
         assert!(unit >= 1);
         Prefix { unit, entries: BTreeMap::new(), at_depth: BTreeMap::new(), lru: BTreeMap::new(), next_id: 0, clock: 0 }
     }
@@ -236,14 +267,14 @@ impl Prefix {
     /// of `chain`. The same tokens are here already: the new one is dropped
     /// and the old one counts as used. One page past a resident pages-only
     /// entry on the same chain: that entry grows.
-    pub fn insert(&mut self, chain: &Chain, checkpoint: Checkpoint) -> u64 {
+    pub fn insert(&mut self, chain: &Chain, checkpoint: R) -> u64 {
         assert_eq!(chain.unit, self.unit, "chain unit and table unit differ");
         let key = chain.key(checkpoint.tokens()).expect("checkpoint length is on the chain");
         if let Some(id) = self.exact((key.depth, key.chain), key) {
             self.touch(id);
             return id;
         }
-        let slot = checkpoint.seq_slot().is_some();
+        let slot = checkpoint.has_slot();
         if !slot && key.tail_len == 0 && key.depth >= 1 {
             let below = (key.depth - 1, chain.heads[key.depth - 1]);
             let grows = self.at_depth.get(&below).and_then(|ids| {
@@ -323,14 +354,14 @@ impl Prefix {
         Some(Hit { id, len, tier: self.entries[&id].held.tier() })
     }
 
-    pub fn resident(&self, id: u64) -> Option<&Checkpoint> {
+    pub fn resident(&self, id: u64) -> Option<&R> {
         match &self.entries.get(&id)?.held {
             Held::Resident(c) => Some(c),
             Held::Parked(_) => None,
         }
     }
 
-    pub fn parked(&self, id: u64) -> Option<&Parked> {
+    pub fn parked(&self, id: u64) -> Option<&P> {
         match &self.entries.get(&id)?.held {
             Held::Parked(p) => Some(p),
             Held::Resident(_) => None,
@@ -351,7 +382,7 @@ impl Prefix {
     pub fn park<E>(
         &mut self,
         id: u64,
-        park: impl FnOnce(Checkpoint) -> std::result::Result<std::result::Result<Parked, Checkpoint>, E>,
+        park: impl FnOnce(R) -> std::result::Result<std::result::Result<P, R>, E>,
     ) -> std::result::Result<bool, E> {
         let e = self.entries.remove(&id).expect("entry");
         let buckets = e.buckets();
@@ -436,6 +467,10 @@ mod tests {
         Arc::new(Pool::new(&m, 4, 18, 3).unwrap().0)
     }
 
+    fn table() -> Prefix<Checkpoint, Parked> {
+        Prefix::new(4)
+    }
+
     fn toks(n: usize) -> Vec<i64> {
         (0..n as i64).map(|i| i * 7 + 3).collect()
     }
@@ -455,7 +490,7 @@ mod tests {
     #[test]
     fn one_entry_grows_a_page_at_a_time() {
         let p = pool();
-        let mut t = Prefix::new(4);
+        let mut t = table();
         let mut l = p.lease(12).unwrap();
         let a = t.insert(&Chain::over(4, &toks(4)), p.checkpoint(&mut l, 4).unwrap().0);
         let b = t.insert(&Chain::over(4, &toks(8)), p.checkpoint(&mut l, 8).unwrap().0);
@@ -488,7 +523,7 @@ mod tests {
     #[test]
     fn same_tokens_share_one_entry() {
         let p = pool();
-        let mut t = Prefix::new(4);
+        let mut t = table();
         let mut l = p.lease(8).unwrap();
         let a = t.insert(&Chain::over(4, &toks(8)), p.checkpoint(&mut l, 8).unwrap().0);
         assert_eq!(p.used(), 2);
@@ -505,7 +540,7 @@ mod tests {
     #[test]
     fn coldest_is_least_recent_and_a_hit_touches_the_chain() {
         let p = pool();
-        let mut t = Prefix::new(4);
+        let mut t = table();
         let mut l = p.lease(12).unwrap();
         let a = t.insert(&Chain::over(4, &toks(8)), p.checkpoint(&mut l, 8).unwrap().0);
         let mut other = toks(8);
@@ -530,7 +565,7 @@ mod tests {
     #[test]
     fn a_page_the_lease_still_holds_survives_removal() {
         let p = pool();
-        let mut t = Prefix::new(4);
+        let mut t = table();
         let mut l = p.lease(8).unwrap();
         let a = t.insert(&Chain::over(4, &toks(8)), p.checkpoint(&mut l, 8).unwrap().0);
         assert!(t.remove(a));
@@ -542,7 +577,7 @@ mod tests {
     #[test]
     fn restore_then_checkpoint_deeper() {
         let p = pool();
-        let mut t = Prefix::new(4);
+        let mut t = table();
         let mut l = p.lease(8).unwrap();
         let a = t.insert(&Chain::over(4, &toks(8)), p.checkpoint(&mut l, 8).unwrap().0);
         drop(l);
@@ -563,7 +598,7 @@ mod tests {
     #[test]
     fn a_branch_is_its_own_entry() {
         let p = pool();
-        let mut t = Prefix::new(4);
+        let mut t = table();
         let mut l = p.lease(8).unwrap();
         let a = t.insert(&Chain::over(4, &toks(8)), p.checkpoint(&mut l, 8).unwrap().0);
         drop(l);
@@ -585,7 +620,7 @@ mod tests {
     #[test]
     fn a_stateful_entry_is_usable_at_its_length_only() {
         let p = hybrid_pool();
-        let mut t = Prefix::new(4);
+        let mut t = table();
         let l = p.lease(12).unwrap();
         let a = t.insert(&Chain::over(4, &toks(10)), p.retire(l, 10));
         assert_eq!(t.lookup(&toks(12)), Some(Hit { id: a, len: 10, tier: Tier::Resident }));
@@ -605,7 +640,7 @@ mod tests {
     fn parked_entries_are_found_after_resident_ones() {
         let p = pool();
         let h = Arc::new(Host::new(64, 4));
-        let mut t = Prefix::new(4);
+        let mut t = table();
         let mut l = p.lease(12).unwrap();
         let a = t.insert(&Chain::over(4, &toks(12)), p.checkpoint(&mut l, 12).unwrap().0);
         drop(l);
@@ -630,7 +665,7 @@ mod tests {
     fn a_stateful_park_keeps_its_slot_and_its_length() {
         let p = hybrid_pool();
         let h = Arc::new(Host::new(64, 4));
-        let mut t = Prefix::new(4);
+        let mut t = table();
         let l = p.lease(12).unwrap();
         let a = t.insert(&Chain::over(4, &toks(10)), p.retire(l, 10));
         assert_eq!((p.used(), p.slots_used()), (3, 1));
@@ -679,7 +714,7 @@ mod tests {
     #[test]
     fn lookup_matches_the_brute_force_model() {
         let p = pool();
-        let mut t = Prefix::new(4);
+        let mut t = table();
         let mut model: BTreeMap<u64, Vec<i64>> = BTreeMap::new();
         let mut x = 0x1234_5678_9ABC_DEF1u64;
         let mut rand = move |n: usize| {

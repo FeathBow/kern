@@ -198,6 +198,11 @@ impl Parked {
         self.slot.is_some()
     }
 
+    /// Whether any page is held (a slot-only checkpoint parks its slot alone).
+    pub fn paged(&self) -> bool {
+        self.chain.is_some()
+    }
+
     /// Host offsets of the first `n` pages, root first.
     pub(crate) fn pages(&self, n: usize) -> Vec<u64> {
         let mut out = Vec::new();

@@ -25,6 +25,18 @@ cluster 数一超过一波（nsm/2）就排第二波，归约还按 (行 × spli
 **manifest 里凡是能引用接口参的位置，normalize 的每个 pass 都得覆盖**（`fold_constants` 现在
 遍历 pack 字段与 tensormap）。
 
+## 2026-09-03，E5 tray 级 checkpoint 的 smoke
+
+**随机 token 的 prompt 不能做 warm == cold 的相等测试。** 15k 个均匀随机 token id 的 prompt，
+prefix 命中后 8 token 的短 prefill 与 30 块整 prefill 给出不同的首 token（' 1000…' 对
+'Okay, I need…'），resident 命中和 host wake 一样，HEAD 一样，逐页 digest 证明 wake 回来的字节
+与 park 时相等——花了两小时在 room / park / wake 里找一个不存在的 bug。随机上下文下每个
+logit 都是近似平局，两条数值路径（chunk 形状不同）必翻。规则：**相等测试用自然语言 prompt
+（docs/*.md 拼起来就够），随机 id 只用来占页**；见到 warm ≠ cold 先换 prompt 再读代码。
+
+**字节问题用字节证明。** 这次真正切开问题的是给每页算 digest 对比 park 与 wake，五分钟；
+读代码找了两小时。规则：**数据搬运路径上的疑点，先在两端 hash，再谈逻辑。**
+
 ## 2026-09-03，E5 tray 内 TP
 
 **`asm volatile` 上的 `"memory"` clobber 把整条链路串行化。** LL collective 的 16 B

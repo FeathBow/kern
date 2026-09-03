@@ -3,7 +3,7 @@
 ```bash
 # 独立 workspace（serving 栈不进 runtime 的依赖图和 CI）；binary 在 crates/kern-serve/target/
 cd crates/kern-serve && cargo build --release
-target/release/kern-serve --model-path /mnt/shared/weights/Qwen3-4B --gpu 3 --port 8000
+target/release/kern-serve --model-path /mnt/shared/weights/Qwen3-4B --gpus 3 --port 8000   # --gpus 0,1,2,3 drives a tray
 # state 池默认按显存自动定：权重/激活/scratch 分完后，剩余显存减 1 GiB 全给 state，
 # KV 页与 state slot 共用这份预算、按需互换（runtime.md）。`--capacity <tokens>` 或
 # kern.toml 的 `capacity` 显式给则照旧。
@@ -185,6 +185,57 @@ resident 命中同样如此。这是 K5（prefill 作为 decode 步的 filler）
 
 同一 session 醒来后再睡，host 上按 device 页节点去重的链认不出它（醒来的是新页），会
 再拷一份；旧的那份最冷，缺地方时先走。
+
+## tray 级（E5 第四块，2026-09-03，t=1 smoke 过，多卡待测）
+
+`kern-serve --gpus 0,1,2,3` 一个进程驱一个 tray：`tray.rs` 持 n 个 `Runtime`，单线程
+按序驱动（graph launch 1–3 µs，一线程驱四卡与四线程等价，实测见 multi-gpu.md），每步
+所有 rank 跑同一个 program、同一组 var 值、同样的行数；manifest 的 `topology` 里 `tp`
+组是"一个 batch 的组"（连续的 rank），其余组（`ep`）跨全部 rank；跨 tray 的 world
+不在这里（rendezvous 是 harness 的事）。scheduler 只看得到 `Row` / `Snapshot` /
+`Sleeping` / `Rising` 和 `Cell`，看不到 `Runtime`、`Lease` 或某个 rank 的输入。
+
+- **一行 = tp 组每个成员一份**：owner 卡持 MLA 页 + KDA slot（`Runtime::lease`），
+  peer 卡只持 slot（`Runtime::lease_slot`，runtime 新增 slot-only 租约，见 runtime.md）。
+  lease / lease_from / fork / checkpoint / retire / park / wake / awake 各在组里每个成员
+  做同样的事；**全成或全不成靠构造**：`Row` 只在每个 rank 都给了 `Lease` 之后才存在，
+  哪个 rank 说 `Denied`，`?` 提前返回把前面拿到的 drop 掉即回滚（各 rank 的 pool
+  独立记账、slot 编号不跨卡比对，所以没有一致性要重建）。park 是唯一不能半途撤销
+  的动作（拷贝已入队），runtime 拆成 `room`（找地方，`Room` drop 即退）+ `park`（拷），
+  tray 先在每个成员上找齐再拷。`Waking` 提前 drop 会等拷贝落地，所以 wake 的回滚就是 drop。
+- **owner**：新行落到"还开着（行数 < `--max-seqs`，per rank）且页占用最少"的 rank，
+  终身不变，后代（checkpoint、parked、wake 回来的）都跟着它——页在那张卡上，pinned
+  块绑在那张卡的 NUMA 节点上。
+- **`Prefix` 按 tray 键**：`Prefix<Snapshot, Sleeping>`，键还是 token 哈希链、与卡无关。
+- **staging 按 manifest 的形状**：`rows` var 存在即 tray 批；`token_ids [rows]` /
+  `kda.line_index [lines, rows]` / `next_token [rows]` 跨组（本卡的行先、再按组序轮到
+  其它成员的块，collective 假定的布局），`slot_mapping [tokens]` / `seq_lens [seqs]` /
+  `block_table [seqs, n]` 是本卡自己的行；qwen 的契约（全部 `tokens` / `seqs`）是 t=1
+  的特例，同一条代码。bucket 对整个 tray 取一次（行最多的 rank 决定），每卡各自 pad
+  到 b，pad 页每卡一页。`Staged` 借住 `&mut Tray` 直到输出读完，中间不能 lease / fork /
+  再 stage。manifest 有 `tp_err` 输出时每步读一次，非零即该步失败。
+- **K3 没有 prefill program**：`prefill` 可选；没有时 prompt 在 prefix 命中之外的部分
+  逐 token 走 decode 步（该行的输出在最后一个 prompt token 进去之前丢掉），正确但 12.9k
+  的 prompt 要 12.9k 步——真正的 prefill 是 K5 的事。`decode_batch` 也可选，没有时 b>1
+  也走 `decode`。`--spec` 限一个 rank。
+- 权重按 rank：kern.toml 的 `weights` 里 `{ep}` / `{tp}` 换成该 rank 在组里的下标，文件
+  名里的 `*` 按名字序展开（`dense-tp4/r{tp}/l*.safetensors`），mmap 不读入。
+  `--capacity` / `--host-gib` / `--max-seqs` 都是 per rank。
+
+**t=1 smoke（2026-09-03，tray03 GPU 1，qwen3-4b，`--capacity 65536`）**：conc1 输出与 `kern run`
+逐字同；4 路并发两次跑结果一致、与单跑一致（prompt 0 的分歧是 `decode` / `decode_batch`
+两个核的近似平局，见 lessons）；prefix 命中三条路径——resident（8972 token 的 prompt 命中
+4576）、host 全量 wake（命中 8960 后 12 token prefill）、host 半量 wake（4589 的 prompt 命中
+4576）——warm 与 cold 24 token 逐字同；wake 回来的 937 页与 park 时逐页 digest 相等（运行时
+`park_wake` 例子加了 `--wake` / `--every-page`，串接每页 checkpoint 的链与部分 wake 都逐字节回）。
+`--host-gib 8` 下 c4 的填充就把 host 层打穿（一条 15k 的快照 2.06 GiB），测 wake 用 24。
+
+**没测**（按 CLAUDE.md 的门禁排队）：
+1. t=1 qwen3.8-27b（有 slot 的路径）conc1 与 `kern run` 同，K1/K3 门禁数字不变；
+2. 4 层 K3 EP4×TP4（`k3-4l-ep4-tp4.json`）：kern-serve 逐 token 喂 fixture，与 `k3_golden` 同 37/40；
+3. owner-only 页在 t>1 下：mixed 行、prefix 命中（retire → lease_from）、park / wake 之后 warm == cold；
+4. 全成或全不成：某一卡 `--host-gib` 故意给小，park 整体退回、四卡 host 占用回到原值；
+5. 93 层短 prompt 的 conc1 / conc8 步时对 k3_golden 的 20.8 / 25.5 ms。
 
 ## 没做（按需要加）
 

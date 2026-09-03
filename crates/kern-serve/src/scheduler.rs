@@ -1,72 +1,81 @@
-//! The kern scheduler: one `Runtime`, many sequences.
+//! The kern scheduler: one tray, many sequences.
 //!
 //! Implements the pegainfer frontend's [`Scheduler`] contract — `submit`,
-//! `step`, `metrics` — over a kern manifest with the qwen3-4b caller
-//! contract: input buffers `token_ids` / `positions` / `slot_mapping` /
-//! `seq_lens` / `cu_seqlens_q` / `block_table`, programs `prefill`
-//! (single sequence, chunked), `decode` (single sequence, the manifest's
-//! bs=1 microprogram) and `decode_batch` (`seqs` sequences, one row each).
-//! Two prefill contracts: state only (the last prompt token is the first
-//! decode step's input) or, when `prefill` writes `next_token` (hybrid
-//! GDN models, whose chunked kernels must see every prompt token), every
+//! `step`, `metrics` — over a kern manifest driven by a [`Tray`] (one
+//! runtime per GPU, in lockstep; `tray.rs` is the design). The caller
+//! contract the manifest must speak: input buffers `token_ids` /
+//! `slot_mapping` / `seq_lens` (`positions` and `cu_seqlens_q` when it has
+//! them), a `block_table` page table, a `next_token` output, and programs
+//! `decode` (one row per sequence; `decode_batch` for batches of more than
+//! one when the manifest has it, the bs=1 microprogram otherwise) and,
+//! optionally, `prefill` (single sequence, chunked). Two prefill contracts
+//! when there is one: state only (the last prompt token is the first
+//! decode step's input) or, when `prefill` writes `next_token` (hybrid GDN
+//! models, whose chunked kernels must see every prompt token), every
 //! prompt token through prefill and the first generated token from it.
-//! A manifest with per-sequence states (`bytes_per_seq`) also has line
-//! tables (`[lines, seqs]` inputs indexing them); every call stages them
-//! from the leases, column i = sequence i of the batch.
+//! Without a `prefill` program the prompt goes through decode steps one
+//! token at a time — a row feeding its prompt is a row like any other,
+//! whose outputs are dropped until the last prompt token is in — which is
+//! what a decode-only tray manifest (K3 today) gets, correct and slow. A
+//! manifest with per-sequence states (`bytes_per_seq`) also has line
+//! tables indexing them; the tray stages them from the rows.
 //!
 //! Policy, deliberately simple:
 //! - prefill first: each step admits waiting requests (up to a token
-//!   budget) and prefills them one at a time, then runs one decode step
-//!   over every running sequence;
+//!   budget when there is a `prefill` program) and prefills them one at a
+//!   time, then runs one decode step over every running sequence;
 //! - a request leases every KV page its worst case (`prompt + max_tokens`)
-//!   needs at admission (`Runtime::lease`), so decode never runs out of
-//!   pages and nothing is ever preempted; the lease drops with the sequence;
-//! - decode batches are padded up to a bucket size and each bucket's
+//!   needs at admission (`Tray::lease`, on the rank with the fewest pages
+//!   in use), so decode never runs out of pages and nothing is ever
+//!   preempted; the row drops with the sequence;
+//! - decode batches are padded up to a bucket size — the same bucket on
+//!   every rank of the tray, from the most loaded one — and each bucket's
 //!   program is CUDA-graph-captured once; padding rows write into a page
-//!   the scheduler leases for them and nobody reads;
+//!   the tray leases for them and nobody reads;
 //! - greedy only: the manifest's `argmax` is the sampler. Non-greedy
 //!   sampling params are logged once and served greedily;
 //! - `--spec` (a manifest with a `spec` block and `draft` / `verify` /
-//!   `draft_precompute` / `decode_spec`): every step is one speculative round over the batch —
-//!   `draft` proposes `n` tokens per sequence, `verify` runs the target
-//!   over `[anchor, drafts]` per sequence, `draft_precompute` projects the
-//!   target's taps into the draft's context KV for every row (rejected
-//!   rows land past the sequence's position and are overwritten next
-//!   round, exactly like the target KV's free rollback), and the host
-//!   accepts each sequence's longest matching prefix. The lease grows by
-//!   `n` tokens so the last round's rejected rows have slots. A manifest
-//!   with a `round` program runs the whole round as one graph: draft,
-//!   verify's ids spliced on device, verify, precompute, accept on device,
-//!   `advance` from the device's `num_accepted` — one launch and one sync
-//!   per round instead of four; the host reads `draft_tokens` /
-//!   `verify_tokens` and accepts the same prefix. Whether a round beats a
-//!   plain step at a given batch size is the operator's call, not the
-//!   scheduler's: the flag picks the mode for the process.
-//! - prefix reuse: a finished sequence's KV lives on as checkpoints
-//!   (`Runtime::checkpoint` / `retire`, indexed by token hash in a
-//!   `Prefix` table), and a new prompt starts from the longest checkpoint
-//!   holding a proper prefix of it (`Runtime::lease_from`; prefill covers
-//!   the rest). A paged-only manifest checkpoints every whole page as a
-//!   sequence fills it — free, a shared page — so any earlier prompt or
-//!   output is reusable at page granularity; a manifest with a recurrent
-//!   state checkpoints only where a request ends (the finished sequence's
-//!   state slot becomes the checkpoint's, nothing is copied), so only a
-//!   prompt that continues an earlier request's whole context hits. A
-//!   `Busy` lease makes room and retries until it fits or nothing is left:
-//!   the least recently hit checkpoint is parked into the host tier
-//!   (`--host-gib`: pinned DRAM, `Runtime::park`; the coldest parked ones
-//!   are dropped when it is full) or, without one, dropped. A prompt
-//!   hitting a parked checkpoint wakes it (`Runtime::wake`): the copies
-//!   ride a transfer stream and the request waits in `waking` until
-//!   `Runtime::awake` hands out the lease, so no step queues behind them.
+//!   `draft_precompute` / `decode_spec`; one rank only): every step is one
+//!   speculative round over the batch — `draft` proposes `n` tokens per
+//!   sequence, `verify` runs the target over `[anchor, drafts]` per
+//!   sequence, `draft_precompute` projects the target's taps into the
+//!   draft's context KV for every row (rejected rows land past the
+//!   sequence's position and are overwritten next round, exactly like the
+//!   target KV's free rollback), and the host accepts each sequence's
+//!   longest matching prefix. The lease grows by `n` tokens so the last
+//!   round's rejected rows have slots. A manifest with a `round` program
+//!   runs the whole round as one graph: draft, verify's ids spliced on
+//!   device, verify, precompute, accept on device, `advance` from the
+//!   device's `num_accepted` — one launch and one sync per round instead
+//!   of four; the host reads `draft_tokens` / `verify_tokens` and accepts
+//!   the same prefix. Whether a round beats a plain step at a given batch
+//!   size is the operator's call, not the scheduler's: the flag picks the
+//!   mode for the process.
+//! - prefix reuse: a finished sequence's KV lives on as snapshots
+//!   (`Tray::checkpoint` / `retire`, indexed by token hash in a `Prefix`
+//!   table keyed over the whole tray), and a new prompt starts from the
+//!   longest snapshot holding a proper prefix of it (`Tray::lease_from`;
+//!   prefill covers the rest). A paged-only manifest checkpoints every
+//!   whole page as a sequence fills it — free, a shared page — so any
+//!   earlier prompt or output is reusable at page granularity; a manifest
+//!   with a recurrent state checkpoints only where a request ends (the
+//!   finished sequence's state slots become the snapshot's, nothing is
+//!   copied), so only a prompt that continues an earlier request's whole
+//!   context hits. A `Busy` lease makes room and retries until it fits or
+//!   nothing is left: the least recently hit snapshot is parked into the
+//!   host tier (`--host-gib`: pinned DRAM per rank, `Tray::park`, all of
+//!   its members' pieces or none; the coldest parked ones are dropped when
+//!   it is full) or, without one, dropped. A prompt hitting a parked
+//!   snapshot wakes it (`Tray::wake`): the copies ride the transfer
+//!   streams and the request waits in `waking` until `Tray::awake` hands
+//!   out the row, so no step queues behind them.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use kern_manifest::types::{Arg, Dim, Manifest};
-use kern_run::{first_i64, i64_from_le, le_bytes_i32, le_bytes_i64};
-use kern_runtime::{Chain, Denied, Error, Lease, Prefix, Runtime, Tier, Waking};
+use kern_runtime::{Chain, Denied, Error, Prefix, Tier};
 use pegainfer_frontend::engine::{
     FinishReason, QueuedRequest, RejectReason, RequestId, RequestLedger, Scheduler, SchedulerMetrics,
     SpecDecodeCounters, MAX_SPEC_TOKENS,
@@ -74,17 +83,15 @@ use pegainfer_frontend::engine::{
 use tracing::{debug, info, warn};
 
 use crate::logline;
-
-/// `Runtime` holds raw CUDA handles (graph execs, functions) and is used
-/// from the scheduler thread only; every entry point rebinds the context
-/// to the calling thread, so moving it there once is sound.
-struct Rt(Runtime);
-#[allow(unsafe_code)]
-unsafe impl Send for Rt {}
+use crate::tray::{Cell, Rising, Row, Shape, Sleeping, Snapshot, Tray};
 
 /// Decode batch buckets; a batch is padded up to the smallest one that
 /// fits and each bucket owns one captured graph.
 const BUCKETS: [usize; 13] = [1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 192, 256];
+
+fn bucket(n: usize) -> usize {
+    BUCKETS.iter().copied().find(|&b| b >= n).unwrap_or(n)
+}
 
 pub struct Policy {
     /// Prefill chunk (tokens per `prefill` call), clamped to the manifest's
@@ -95,36 +102,15 @@ pub struct Policy {
     pub prefill_budget: usize,
     /// Launch every call eagerly instead of capturing graphs.
     pub eager: bool,
-    /// Cap on concurrently running sequences (≤ the manifest's `seqs` bound).
+    /// Cap on concurrently running sequences per rank (≤ the manifest's
+    /// `seqs` bound).
     pub max_seqs: usize,
     /// Token ids that end a request unless it asked `ignore_eos`.
     pub stop_tokens: Vec<u32>,
     /// Speculative rounds instead of decode steps (needs the spec programs).
     pub spec: bool,
-    /// Pinned host memory for parked checkpoints (0: none).
+    /// Pinned host memory per rank for parked snapshots (0: none).
     pub host_bytes: u64,
-}
-
-/// A line table over a per-sequence state, shaped `[lines, seqs]` or
-/// `[lines, seqs, w]`: `rows` lines per sequence, `width` entries per
-/// (line, sequence) cell.
-struct LineTable {
-    name: String,
-    rows: usize,
-    width: usize,
-}
-
-impl LineTable {
-    /// `name` is a line table over a per-sequence state; batched decode
-    /// needs its `seqs` dimension (the runtime also allows `[lines]`).
-    fn check(m: &Manifest, name: &str) -> Result<LineTable> {
-        let (rows, width) = match shape(m, name)? {
-            [Dim::Const(rows), Dim::Var(v)] if v == "seqs" => (*rows, 1),
-            [Dim::Const(rows), Dim::Var(v), Dim::Const(w)] if v == "seqs" => (*rows, *w),
-            s => bail!("line table `{name}` shaped {s:?}, expected [lines, seqs] or [lines, seqs, w]"),
-        };
-        Ok(LineTable { name: name.to_string(), rows: rows as usize, width: width as usize })
-    }
 }
 
 /// The manifest's speculative contract, one row-group per sequence.
@@ -213,14 +199,18 @@ struct Seq {
     pos: usize,
     /// The token the next decode step feeds at `pos`.
     next: u32,
+    /// Prompt tokens still to feed after `next`, one per step, when the
+    /// prompt goes through decode; the outputs of those steps are dropped.
+    pending: VecDeque<u32>,
     generated: usize,
     max_tokens: usize,
     ignore_eos: bool,
-    /// Its KV pages; returned to the runtime when the sequence drops.
-    pages: Lease,
+    /// Its KV pages and state slots across the tray; returned when the
+    /// sequence drops.
+    row: Row,
     prompt_len: usize,
     /// The hash chain over the tokens in the state, `pos` of them; the
-    /// prefix table keys this sequence's checkpoints by it.
+    /// prefix table keys this sequence's snapshots by it.
     chain: Chain,
     /// Tokens already checkpointed, a whole number of pages.
     checkpointed: usize,
@@ -285,28 +275,22 @@ impl Seq {
 }
 
 pub struct KernScheduler {
-    rt: Rt,
-    /// One page (and sequence slot) no sequence owns: the padding rows of
-    /// a decode batch write their junk here.
-    pad: Lease,
+    tray: Tray,
     policy: Policy,
     spec: Option<SpecPlan>,
-    /// `prefill` emits `next_token` itself (see the module doc).
-    prefill_emits: bool,
-    /// The manifest's line tables over per-sequence states.
-    line_tables: Vec<LineTable>,
-    /// The page tables, each shaped `[seqs, n]`: `block_table` and, under
-    /// speculation, the draft's.
-    page_tables: Vec<String>,
-    /// The `seqs` bound: a line table's row width.
-    seqs_max: usize,
+    /// `Some(emits)`: the manifest has `prefill`, and whether it writes
+    /// `next_token` itself (see the module doc). `None`: prompts go
+    /// through decode steps.
+    prefill: Option<bool>,
+    /// The manifest has `decode_batch` for batches of more than one row.
+    decode_batch: bool,
     waiting: VecDeque<QueuedRequest>,
-    /// Admitted requests whose woken pages are still on the way in.
-    waking: VecDeque<(QueuedRequest, Waking)>,
+    /// Admitted requests whose woken rows are still on the way in.
+    waking: VecDeque<(QueuedRequest, Rising)>,
     running: Vec<Seq>,
-    /// Checkpoints of finished prefixes, for the next prompt that shares
+    /// Snapshots of finished prefixes, for the next prompt that shares
     /// one (see the module doc).
-    prefix: Prefix,
+    prefix: Prefix<Snapshot, Sleeping>,
     /// Checkpoint at every page (a paged-only manifest) rather than only
     /// where a request ends (one with a recurrent state).
     every_page: bool,
@@ -322,12 +306,13 @@ struct Stats {
     step_ns: u128,
     /// Tokens emitted to the ledger.
     tokens: u64,
+    /// Prompt tokens fed: through `prefill` (timed) or through decode steps.
     prefill_tokens: u64,
     prefill_ns: u128,
-    /// Prompt tokens found in a checkpoint, and checkpoints evicted for room.
+    /// Prompt tokens found in a snapshot, and snapshots evicted for room.
     prefix_hit_tokens: u64,
     evictions: u64,
-    /// Checkpoints parked to the host, dropped from it for room, woken
+    /// Snapshots parked to the host, dropped from it for room, woken
     /// from it, and the tokens woken.
     parks: u64,
     host_evictions: u64,
@@ -371,89 +356,69 @@ pub struct Facts {
 }
 
 /// The manifest's fit to this caller contract, settled before the GPU is
-/// touched: pure over the manifest and the runtime's table names, so a
+/// touched: pure over the manifest, the tray's shape and size, so a
 /// synthetic manifest exercises every rejection.
 struct Contract {
-    seqs_max: usize,
-    tokens_max: usize,
-    prefill_emits: bool,
-    line_tables: Vec<LineTable>,
-    page_tables: Vec<String>,
+    prefill: Option<bool>,
+    decode_batch: bool,
     spec: Option<SpecPlan>,
 }
 
 impl Contract {
-    /// `seq_tables` / `page_tables` are the runtime's, `page` its page in
-    /// tokens; `spec` asks for the speculative contract too.
-    fn check(m: &Manifest, seq_tables: &[&str], page_tables: &[&str], page: usize, spec: bool) -> Result<Contract> {
-        // `decode_batch` drives plain batched decode; a speculative run
-        // only ever runs `prefill` and the spec round's programs.
-        need_programs(m, if spec { &["prefill", "decode"] } else { &["prefill", "decode", "decode_batch"] })?;
-        need_buffers(m, &["token_ids", "positions", "slot_mapping", "seq_lens", "cu_seqlens_q"])?;
-        if !page_tables.contains(&"block_table") {
-            bail!("`block_table` is not a page table (an input indexing a paged state)");
+    /// `page` is the tray's page in tokens, `ranks` how many it drives;
+    /// `spec` asks for the speculative contract too.
+    fn check(m: &Manifest, page: usize, ranks: usize, spec: bool) -> Result<Contract> {
+        need_programs(m, &["decode"])?;
+        let prefill = m.programs.get("prefill").map(|calls| {
+            calls.iter().flat_map(|c| &c.args).any(|a| matches!(a, Arg::Buf { buf, .. } if buf == "next_token"))
+        });
+        if spec && ranks > 1 {
+            bail!("--spec drives one rank; this tray has {ranks}");
         }
-        let seqs_max = var_max(m, "seqs")?;
-        let tokens_max = var_max(m, "tokens")?;
-        let prefill_emits = m.programs["prefill"]
-            .iter()
-            .flat_map(|c| &c.args)
-            .any(|a| matches!(a, Arg::Buf { buf, .. } if buf == "next_token"));
-        let line_tables = seq_tables.iter().map(|name| LineTable::check(m, name)).collect::<Result<Vec<_>>>()?;
-        let page_tables =
-            page_tables.iter().map(|name| seqs_rows(m, name).map(|_| name.to_string())).collect::<Result<Vec<_>>>()?;
+        if spec && prefill.is_none() {
+            bail!("--spec needs a `prefill` program");
+        }
         let spec = spec
             .then(|| SpecPlan::check(m, page).context("--spec: the manifest's speculative contract"))
             .transpose()?;
-        Ok(Contract { seqs_max, tokens_max, prefill_emits, line_tables, page_tables, spec })
+        Ok(Contract { prefill, decode_batch: m.programs.contains_key("decode_batch"), spec })
     }
 
-    /// Concurrent sequences: `want` within the `seqs` bound and what one
-    /// call's rows — one per sequence, a round's row-group under
+    /// Concurrent sequences per rank: `want` within the `seqs` bound and
+    /// what one call's rows — one per sequence, a round's row-group under
     /// speculation — fit in `tokens`.
-    fn max_seqs(&self, want: usize) -> usize {
+    fn max_seqs(&self, shape: &Shape, want: usize) -> usize {
         let rows = self.spec.as_ref().map_or(1, SpecPlan::rows);
-        want.clamp(1, self.seqs_max).min(self.tokens_max / rows).max(1)
+        want.clamp(1, shape.seqs_max).min(shape.tokens_max / rows).max(1)
     }
 }
 
 /// What a lease attempt handed out.
 enum Got {
-    Lease(Lease),
-    Waking(Waking),
+    Row(Row),
+    Rising(Rising),
 }
 
 impl KernScheduler {
-    /// Wrap a loaded runtime (weights bound): check the manifest against
-    /// this caller contract, settle the policy within its bounds, lease
-    /// the padding page.
-    pub fn new(mut rt: Runtime, policy: Policy) -> Result<KernScheduler> {
-        let seq_tables: Vec<&str> = rt.seq_tables().collect();
-        let page_tables: Vec<&str> = rt.page_tables().collect();
-        let c = Contract::check(&rt.manifest, &seq_tables, &page_tables, rt.page() as usize, policy.spec)?;
-        let policy =
-            Policy { max_seqs: c.max_seqs(policy.max_seqs), chunk: policy.chunk.clamp(1, c.tokens_max), ..policy };
-        if policy.host_bytes > 0 {
-            let t = Instant::now();
-            rt.reserve_host(policy.host_bytes).context("reserving the host tier")?;
-            info!(gib = policy.host_bytes >> 30, reserve_s = logline::secs(t.elapsed()), "host tier reserved");
-        }
-        let pad = rt.lease(1).map_err(|e| anyhow::anyhow!("no page for the padding rows: {e}"))?;
-        if rt.pages_used() == rt.pages_total() {
-            bail!("capacity {} tokens holds one page; nothing left to serve from", rt.capacity());
-        }
+    /// Wrap a loaded tray (weights bound, peers connected, pads leased):
+    /// check the manifest against this caller contract and settle the
+    /// policy within its bounds.
+    pub fn new(tray: Tray, policy: Policy) -> Result<KernScheduler> {
+        let c = Contract::check(tray.manifest(), tray.page(), tray.len(), policy.spec)?;
+        let policy = Policy {
+            max_seqs: c.max_seqs(tray.shape(), policy.max_seqs),
+            chunk: policy.chunk.clamp(1, tray.shape().tokens_max),
+            ..policy
+        };
         let stats = Stats::new(&c.spec);
-        let every_page = !rt.has_seq_state();
-        let prefix = Prefix::new(rt.page() as usize);
+        let every_page = !tray.has_seq_state();
+        let prefix = Prefix::new(tray.page());
         let s = KernScheduler {
-            rt: Rt(rt),
-            pad,
+            tray,
             policy,
             spec: c.spec,
-            prefill_emits: c.prefill_emits,
-            line_tables: c.line_tables,
-            page_tables: c.page_tables,
-            seqs_max: c.seqs_max,
+            prefill: c.prefill,
+            decode_batch: c.decode_batch,
             waiting: VecDeque::new(),
             waking: VecDeque::new(),
             running: Vec::new(),
@@ -473,9 +438,9 @@ impl KernScheduler {
         // `max_tokens` to something admissible instead of the scheduler
         // bouncing it (the wire turns a scheduler reject into a 500).
         Facts {
-            total_blocks: self.kv_total(),
-            block_size: self.rt.0.page() as usize,
-            max_request_tokens: self.rt.0.max_seq_tokens() - self.headroom(),
+            total_blocks: self.tray.pages_total(),
+            block_size: self.tray.page(),
+            max_request_tokens: self.tray.max_seq_tokens() - self.headroom(),
         }
     }
 
@@ -487,21 +452,30 @@ impl KernScheduler {
     }
 
     fn log_ready(&self) {
-        let (rt, policy, spec, facts) = (&self.rt.0, &self.policy, self.spec.as_ref(), self.facts());
-        // Pages: what requests can lease (one more holds the padding rows).
-        // Graphs are captured per bucket on first use unless `eager`.
+        let (tray, policy, spec, facts) = (&self.tray, &self.policy, self.spec.as_ref(), self.facts());
+        let (slots, _) = tray.seq_slots();
+        // Pages: what requests can lease (one more per rank holds the
+        // padding rows). Graphs are captured per bucket on first use
+        // unless `eager`.
         info!(
+            ranks = tray.len(),
+            tray = tray.group_size(),
             pages = facts.total_blocks,
             page = facts.block_size,
-            seq_slots = (rt.seq_slots() > 0).then(|| rt.seq_slots()),
-            max_seqs = policy.max_seqs,
+            seq_slots = (slots > 0).then_some(slots),
+            max_seqs_per_rank = policy.max_seqs,
             max_request_tokens = facts.max_request_tokens,
             chunk = policy.chunk,
             buckets = ?BUCKETS.iter().filter(|&&b| b <= policy.max_seqs).collect::<Vec<_>>(),
             eager = policy.eager,
-            prefill_emits = self.prefill_emits,
+            prefill = match self.prefill {
+                Some(true) => "emits next_token",
+                Some(false) => "state only",
+                None => "through decode steps",
+            },
+            decode_batch = self.decode_batch,
             checkpoints = if self.every_page { "every page" } else { "at request end" },
-            host_gib = (policy.host_bytes > 0).then(|| policy.host_bytes >> 30),
+            host_gib_per_rank = (policy.host_bytes > 0).then_some(policy.host_bytes >> 30),
             drafts = spec.map(|s| s.n_drafts),
             draft_rows = spec.map(|s| s.draft_rows),
             verify_rows = spec.map(|s| s.verify_rows),
@@ -510,8 +484,16 @@ impl KernScheduler {
         );
     }
 
-    fn bucket(&self, n: usize) -> usize {
-        BUCKETS.iter().copied().find(|&b| b >= n).unwrap_or(n)
+    /// Rows each rank has (running, and woken ones on the way in).
+    fn rows_per_rank(&self) -> Vec<usize> {
+        let mut rows = vec![0usize; self.tray.len()];
+        for s in &self.running {
+            rows[s.row.owner().index()] += 1;
+        }
+        for (_, r) in &self.waking {
+            rows[r.owner().index()] += 1;
+        }
+        rows
     }
 
     /// Admit waiting requests in order and prefill each (single sequence,
@@ -519,19 +501,19 @@ impl KernScheduler {
     fn admit(&mut self, ledger: &mut RequestLedger) -> Result<()> {
         let mut budget_used = 0usize;
         // Wakes land in order: the first still in flight stops the scan.
-        while let Some((q, w)) = self.waking.pop_front() {
-            match self.rt.0.awake(w)? {
-                Ok(pages) => {
+        while let Some((q, r)) = self.waking.pop_front() {
+            match self.tray.awake(r)? {
+                Ok(row) => {
                     if ledger.is_aborted(q.id) {
                         ledger.retire(q.id);
                         continue;
                     }
                     self.stats.wakes += 1;
-                    self.stats.wake_tokens += pages.prefix() as u64;
-                    budget_used += self.admit_one(q, pages, true, ledger)?;
+                    self.stats.wake_tokens += row.prefix() as u64;
+                    budget_used += self.admit_one(q, row, true, ledger)?;
                 }
-                Err(w) => {
-                    self.waking.push_front((q, w));
+                Err(r) => {
+                    self.waking.push_front((q, r));
                     break;
                 }
             }
@@ -543,48 +525,59 @@ impl KernScheduler {
                 self.waiting.pop_front();
                 continue;
             }
-            if self.running.len() + self.waking.len() >= self.policy.max_seqs {
+            let cap = self.policy.max_seqs;
+            let rows = self.rows_per_rank();
+            if rows.iter().all(|&r| r >= cap) {
                 break;
             }
             let prompt = q.request.prompt_tokens.len();
             let max_tokens = q.request.max_tokens;
             let worst = prompt + max_tokens + self.headroom();
             if prompt == 0 {
-                let limit = self.rt.0.max_seq_tokens();
+                let limit = self.tray.max_seq_tokens();
                 ledger.reject(id, RejectReason::ContextLength { prompt_tokens: prompt, max_tokens, limit });
                 self.waiting.pop_front();
                 continue;
             }
-            if budget_used > 0 && budget_used + prompt - 1 > self.policy.prefill_budget {
+            if self.prefill.is_some() && budget_used > 0 && budget_used + prompt - 1 > self.policy.prefill_budget {
                 break; // enough prefill for this step; decode must run
             }
             let ids: Vec<i64> = q.request.prompt_tokens.iter().map(|&t| t as i64).collect();
             let hit = self.prefix.lookup(&ids);
+            // A hit continues on the snapshot's owner, which must have a row free.
+            let owner = hit.and_then(|h| match h.tier {
+                Tier::Resident => self.prefix.resident(h.id).map(Snapshot::owner),
+                Tier::Parked => self.prefix.parked(h.id).map(Sleeping::owner),
+            });
+            if owner.is_some_and(|o| rows[o.index()] >= cap) {
+                break;
+            }
             let got = loop {
+                let tray = &mut self.tray;
                 let attempt = match hit {
                     Some(h) => match h.tier {
                         Tier::Resident => {
-                            let cp = self.prefix.resident(h.id).expect("hit");
-                            self.rt.0.lease_from(cp, h.len, worst).map(Got::Lease)
+                            let snap = self.prefix.resident(h.id).expect("hit");
+                            tray.lease_from(snap, h.len, worst).map(Got::Row)
                         }
                         Tier::Parked => {
                             let p = self.prefix.parked(h.id).expect("hit");
-                            self.rt.0.wake(p, h.len, worst).map(Got::Waking)
+                            tray.wake(p, h.len, worst).map(Got::Rising)
                         }
                     },
-                    None => self.rt.0.lease(worst).map(Got::Lease),
+                    None => tray.lease(worst, |r| rows[r.index()] < cap).map(Got::Row),
                 };
                 match attempt {
                     Err(Error::Denied(Denied::Busy)) if self.make_room()? => {}
                     r => break r,
                 }
             };
-            let pages = match got {
-                Ok(Got::Lease(pages)) => pages,
-                Ok(Got::Waking(w)) => {
+            let row = match got {
+                Ok(Got::Row(row)) => row,
+                Ok(Got::Rising(r)) => {
                     // Its copies are in flight; it is admitted once they land.
                     let q = self.waiting.pop_front().unwrap();
-                    self.waking.push_back((q, w));
+                    self.waking.push_back((q, r));
                     continue;
                 }
                 Err(Error::Denied(Denied::Busy)) => break, // wait for pages / a slot
@@ -602,14 +595,16 @@ impl KernScheduler {
                 Err(e) => return Err(e.into()),
             };
             let q = self.waiting.pop_front().unwrap();
-            budget_used += self.admit_one(q, pages, false, ledger)?;
+            budget_used += self.admit_one(q, row, false, ledger)?;
         }
         Ok(())
     }
 
-    /// Prefill `q` into `pages` (past the lease's prefix) and start it
-    /// running; the prompt tokens prefilled, for the step's budget.
-    fn admit_one(&mut self, q: QueuedRequest, pages: Lease, woken: bool, ledger: &mut RequestLedger) -> Result<usize> {
+    /// Start `q` running in `row` (past the row's prefix): through
+    /// `prefill` when the manifest has one, else with the prompt queued
+    /// for the decode steps. Returns the prompt tokens prefilled, for the
+    /// step's budget.
+    fn admit_one(&mut self, q: QueuedRequest, row: Row, woken: bool, ledger: &mut RequestLedger) -> Result<usize> {
         let id = q.id;
         let prompt = q.request.prompt_tokens.len();
         let max_tokens = q.request.max_tokens;
@@ -626,37 +621,46 @@ impl KernScheduler {
         }
         ledger.admit(id);
         let t0 = Instant::now();
-        // Every prompt token goes through `prefill` when it emits the
-        // first generated token itself; otherwise everything but the
-        // last, which is the first decode step's input. A checkpoint
-        // hit skips its tokens (never the last one).
-        let n_pre = if self.prefill_emits { prompt } else { prompt - 1 };
-        let start = pages.prefix();
-        let first = self.prefill(&pages, &ids[..n_pre], start)?;
-        self.stats.prefill_ns += t0.elapsed().as_nanos();
-        self.stats.prefill_tokens += (n_pre - start) as u64;
+        let start = row.prefix();
+        // With a prefill program every prompt token goes through it when
+        // it emits the first generated token itself; otherwise everything
+        // but the last, which is the first decode step's input. A snapshot
+        // hit skips its tokens (never the last one). Without one the
+        // prompt past the hit is fed a token per decode step.
+        let (n_pre, first, pending) = match self.prefill {
+            Some(emits) => {
+                let n_pre = if emits { prompt } else { prompt - 1 };
+                let first = self.prefill(&row, &ids[..n_pre], start)?;
+                self.stats.prefill_ns += t0.elapsed().as_nanos();
+                self.stats.prefill_tokens += (n_pre - start) as u64;
+                (n_pre, first, VecDeque::new())
+            }
+            None => (start, None, q.request.prompt_tokens[start + 1..].iter().copied().collect()),
+        };
         self.stats.prefix_hit_tokens += start as u64;
         debug!(
             request = %id,
             prompt,
             max_tokens,
-            pages = ?pages,
+            row = ?row,
             prefix_hit = start,
             woken,
             prefill_ms = logline::ms(t0.elapsed()),
             "admitted"
         );
+        let page = self.tray.page();
         let mut seq = Seq {
             id,
             pos: n_pre,
-            next: *q.request.prompt_tokens.last().unwrap(),
+            next: q.request.prompt_tokens[n_pre.min(prompt - 1)],
+            pending,
             generated: 0,
             max_tokens,
             ignore_eos: q.request.params.ignore_eos,
-            pages,
+            row,
             prompt_len: prompt,
-            chain: Chain::over(self.rt.0.page() as usize, &ids[..n_pre]),
-            checkpointed: start / self.rt.0.page() as usize * self.rt.0.page() as usize,
+            chain: Chain::over(page, &ids[..n_pre]),
+            checkpointed: start / page * page,
             admitted: t0,
         };
         self.checkpoint(&mut seq)?;
@@ -684,16 +688,16 @@ impl KernScheduler {
         Ok(n_pre - start)
     }
 
-    /// Room for a `Busy` lease: the coldest resident checkpoint goes to
+    /// Room for a `Busy` lease: the coldest resident snapshot goes to
     /// the host tier when there is one (the coldest parked ones dropped
     /// until it fits), else is dropped. `false` when nothing is resident.
     fn make_room(&mut self) -> Result<bool> {
         let Some(id) = self.prefix.coldest(Tier::Resident) else { return Ok(false) };
         if self.policy.host_bytes > 0 {
             loop {
-                let rt = &mut self.rt;
-                if self.prefix.park(id, |cp| rt.0.park(cp))? {
-                    debug!(tokens = self.prefix.parked(id).map_or(0, |p| p.tokens()), "parked");
+                let tray = &mut self.tray;
+                if self.prefix.park(id, |snap| tray.park(snap))? {
+                    debug!(tokens = self.prefix.parked(id).map_or(0, kern_runtime::Kept::tokens), "parked");
                     self.stats.parks += 1;
                     return Ok(true);
                 }
@@ -717,25 +721,25 @@ impl KernScheduler {
         if !self.every_page {
             return Ok(());
         }
-        let unit = self.rt.0.page() as usize;
+        let unit = self.tray.page();
         while s.checkpointed + unit <= s.pos {
             let len = s.checkpointed + unit;
-            let cp = self.rt.0.checkpoint(&mut s.pages, len)?;
-            self.prefix.insert(&s.chain, cp);
+            let snap = self.tray.checkpoint(&mut s.row, len)?;
+            self.prefix.insert(&s.chain, snap);
             s.checkpointed = len;
         }
         Ok(())
     }
 
     /// A sequence is done: with a recurrent state, its whole context
-    /// becomes a checkpoint (the slot moves, nothing is copied); without
+    /// becomes a snapshot (the slots move, nothing is copied); without
     /// one, every whole page already is.
     fn finish(&mut self, s: Seq) {
         if self.every_page || s.pos == 0 {
             return;
         }
-        let cp = self.rt.0.retire(s.pages, s.pos);
-        self.prefix.insert(&s.chain, cp);
+        let snap = self.tray.retire(s.row, s.pos);
+        self.prefix.insert(&s.chain, snap);
     }
 
     /// Drop aborted sequences before a step so they neither pad nor compute.
@@ -751,74 +755,43 @@ impl KernScheduler {
         }
     }
 
-    /// Pages available to requests / held by them (the pad page excluded).
-    fn kv_total(&self) -> usize {
-        self.rt.0.pages_total() - self.pad.pages()
-    }
-
-    fn kv_used(&self) -> usize {
-        self.rt.0.pages_used() - self.pad.pages()
-    }
-
     /// Chunked single-sequence prefill of `ids[start..]` at positions
-    /// `start..` of a sequence holding `pages` (`start` is the pages'
-    /// prefix); the first generated token when the manifest's prefill
-    /// emits it.
-    fn prefill(&mut self, pages: &Lease, ids: &[i64], start: usize) -> Result<Option<u32>> {
+    /// `start..` of `row` (`start` is the row's prefix); the first
+    /// generated token when the manifest's prefill emits it.
+    fn prefill(&mut self, row: &Row, ids: &[i64], start: usize) -> Result<Option<u32>> {
         let chunk = self.policy.chunk;
-        self.stage_lines(&[pages], &[])?;
+        let emits = self.prefill == Some(true);
+        let spec = self.spec.is_some();
+        let mut first = None;
         let mut pos = start;
         while pos < ids.len() {
             let c = (ids.len() - pos).min(chunk);
-            let env = env(c, 1);
-            let positions: Vec<i64> = (pos..pos + c).map(|p| p as i64).collect();
-            let slots = pages.slots(pos..pos + c);
-            let rt = &mut self.rt.0;
-            rt.write_input_at("token_ids", &le_bytes_i64(&ids[pos..pos + c]), &env)?;
-            rt.write_input_at("positions", &le_bytes_i64(&positions), &env)?;
-            rt.write_input_at("slot_mapping", &le_bytes_i64(&slots), &env)?;
-            rt.write_input_at("seq_lens", &le_bytes_i32(&[(pos + c) as i32]), &env)?;
-            rt.write_input_at("cu_seqlens_q", &le_bytes_i32(&[0, c as i32]), &env)?;
-            stage_tables(rt, &self.page_tables, &[pages], &self.pad, 1, &env)?;
+            let cells = [Cell { row, ids: ids[pos..pos + c].to_vec(), pos, col: 0 }];
             let eager = self.policy.eager || c != chunk;
-            run_program(rt, "prefill", &env, eager)?;
-            if self.spec.is_some() {
+            let mut st = self.tray.stage(&cells, bucket)?;
+            st.run("prefill", eager)?;
+            if spec {
                 // The chunk's taps (`fc_out`) into the draft's context KV;
                 // positions/slot_mapping are still the chunk's.
-                run_program(rt, "draft_precompute", &env, eager)?;
+                st.run("draft_precompute", eager)?;
             }
             pos += c;
+            if emits && pos == ids.len() {
+                first = Some(st.read_i64("next_token")?[0][0] as u32);
+            }
         }
-        if !self.prefill_emits || ids.len() == start {
-            return Ok(None);
-        }
-        Ok(Some(first_i64(&self.rt.0.read_output("next_token")?) as u32))
-    }
-
-    /// Stage every line table: column i names sequence i's lines, the
-    /// columns past the batch the pad's (a manifest without per-sequence
-    /// states has no line tables; nothing is written). `cols[i]` picks the
-    /// entry of a wide table's cell that carries sequence i's line.
-    fn stage_lines(&mut self, seqs: &[&Lease], cols: &[usize]) -> Result<()> {
-        stage_lines(&mut self.rt.0, &self.line_tables, self.seqs_max, &self.pad, seqs, cols)
+        Ok(first)
     }
 
     /// Speculative admission: the last prompt token through `decode_spec`
     /// (bs=1, taps) and its row into the draft KV; returns the first
     /// generated token.
     fn first_token(&mut self, s: &Seq) -> Result<u32> {
-        let env = env(1, 1);
-        self.stage_lines(&[&s.pages], &[])?;
-        let rt = &mut self.rt.0;
-        rt.write_input_at("token_ids", &le_bytes_i64(&[s.next as i64]), &env)?;
-        rt.write_input_at("positions", &le_bytes_i64(&[s.pos as i64]), &env)?;
-        rt.write_input_at("slot_mapping", &le_bytes_i64(&[s.pages.slot(s.pos)]), &env)?;
-        rt.write_input_at("seq_lens", &le_bytes_i32(&[s.pos as i32 + 1]), &env)?;
-        rt.write_input_at("cu_seqlens_q", &le_bytes_i32(&[0, 1]), &env)?;
-        stage_tables(rt, &self.page_tables, &[&s.pages], &self.pad, 1, &env)?;
-        run_program(rt, "decode_spec", &env, self.policy.eager)?;
-        run_program(rt, "draft_precompute", &env, self.policy.eager)?;
-        Ok(first_i64(&rt.read_output("next_token")?) as u32)
+        let cells = [Cell { row: &s.row, ids: vec![s.next as i64], pos: s.pos, col: 0 }];
+        let mut st = self.tray.stage(&cells, bucket)?;
+        st.run("decode_spec", self.policy.eager)?;
+        st.run("draft_precompute", self.policy.eager)?;
+        Ok(st.read_i64("next_token")?[0][0] as u32)
     }
 
     /// One speculative round over every running sequence: draft, verify,
@@ -829,142 +802,94 @@ impl KernScheduler {
         if n == 0 {
             return Ok(());
         }
-        let b = self.bucket(n);
         let plan = self.spec.as_ref().unwrap();
-        let (nd, dr, vr, mask, advance, fused) =
-            (plan.n_drafts, plan.draft_rows, plan.verify_rows, plan.mask_token, plan.advance, plan.fused);
+        let (nd, dr, mask, advance, fused) =
+            (plan.n_drafts, plan.draft_rows, plan.mask_token, plan.advance, plan.fused);
+        let eager = self.policy.eager;
         let t0 = Instant::now();
-
-        // A batch of row-groups: `rows` per sequence, padding sequences
-        // write their rows into the pad page.
-        struct Group<'a> {
-            ids: Vec<i64>,
-            positions: Vec<i64>,
-            slots: Vec<i64>,
-            seq_lens: Vec<i32>,
-            cu: Vec<i32>,
-            pad: &'a Lease,
-        }
-        impl<'a> Group<'a> {
-            fn new(rows: usize, pad: &'a Lease) -> Group<'a> {
-                Group {
-                    ids: Vec::with_capacity(rows),
-                    positions: Vec::with_capacity(rows),
-                    slots: Vec::with_capacity(rows),
-                    seq_lens: Vec::new(),
-                    cu: vec![0],
-                    pad,
-                }
-            }
-            fn push(&mut self, ids: &[i64], pos: usize, pages: &Lease) {
-                let rows = ids.len();
-                self.ids.extend_from_slice(ids);
-                self.positions.extend((pos..pos + rows).map(|p| p as i64));
-                self.slots.extend(pages.slots(pos..pos + rows));
-                self.seq_lens.push((pos + rows) as i32);
-                self.cu.push(self.cu.last().unwrap() + rows as i32);
-            }
-            fn pad_to(&mut self, b: usize, rows: usize) {
-                let pad = self.pad;
-                while self.seq_lens.len() < b {
-                    self.push(&vec![0; rows], 0, pad);
-                }
-            }
-            fn stage(&self, rt: &mut Runtime, env: &BTreeMap<String, u64>) -> Result<()> {
-                rt.write_input_at("token_ids", &le_bytes_i64(&self.ids), env)?;
-                rt.write_input_at("positions", &le_bytes_i64(&self.positions), env)?;
-                rt.write_input_at("slot_mapping", &le_bytes_i64(&self.slots), env)?;
-                rt.write_input_at("seq_lens", &le_bytes_i32(&self.seq_lens), env)?;
-                rt.write_input_at("cu_seqlens_q", &le_bytes_i32(&self.cu), env)?;
-                Ok(())
-            }
-        }
+        let running = &self.running;
+        let tray = &mut self.tray;
 
         // Draft: [anchor, mask × (dr-1)] per sequence at pos.., non-causal.
-        let mut g = Group::new(b * dr, &self.pad);
-        let mut anchors = Vec::with_capacity(b);
-        let mut ids = vec![mask; dr];
-        for s in &self.running {
-            ids[0] = s.next as i64;
-            g.push(&ids, s.pos, &s.pages);
-            anchors.push(s.next as i64);
-        }
-        g.pad_to(b, dr);
-        anchors.resize(b, 0);
-        let env_d = env(b * dr, b);
-        let eager = self.policy.eager;
-        // The batch's page tables and line tables (the line in entry 0 of
-        // a wide table's cell: verify resumes from the committed state).
-        let leases: Vec<&Lease> = self.running.iter().map(|s| &s.pages).collect();
-        stage_lines(&mut self.rt.0, &self.line_tables, self.seqs_max, &self.pad, &leases, &[])?;
-        let rt = &mut self.rt.0;
-        stage_tables(rt, &self.page_tables, &leases, &self.pad, b, &env_d)?;
-        g.stage(rt, &env_d)?;
-        rt.write_input_at("anchor_token", &le_bytes_i64(&anchors), &env_d)?;
+        let cells: Vec<Cell> = running
+            .iter()
+            .map(|s| {
+                let mut ids = vec![mask; dr];
+                ids[0] = s.next as i64;
+                Cell { row: &s.row, ids, pos: s.pos, col: 0 }
+            })
+            .collect();
+        let mut st = tray.stage(&cells, bucket)?;
+        st.write_seqs("anchor_token", |i| running[i].next as i64, 0i64)?;
         let (drafts, vt) = if fused {
             // Verify resumes from the committed state; the round's accept
             // writes advance's own `num_accepted` and line table.
             if advance {
-                rt.write_input_at("num_accepted_tokens", &le_bytes_i32(&vec![1; b]), &env_d)?;
+                st.write_seqs("num_accepted_tokens", |_| 1i32, 1)?;
             }
-            run_program(rt, "round", &env_d, eager)?;
-            (i64_from_le(&rt.read_output("draft_tokens")?), i64_from_le(&rt.read_output("verify_tokens")?))
+            st.run("round", eager)?;
+            let out = (st.read_i64("draft_tokens")?, st.read_i64("verify_tokens")?);
+            drop(st);
+            out
         } else {
-            run_program(rt, "draft", &env_d, eager)?;
-            let drafts = i64_from_le(&rt.read_output("draft_tokens")?);
+            st.run("draft", eager)?;
+            let drafts = st.read_i64("draft_tokens")?;
+            drop(st);
 
             // Verify: [anchor, d0..] per sequence at pos.., causal; row i of
             // a group answers "what follows position pos+i".
-            let mut g = Group::new(b * vr, &self.pad);
-            let mut ids = vec![0i64; vr];
-            for (i, s) in self.running.iter().enumerate() {
-                ids[0] = s.next as i64;
-                ids[1..].copy_from_slice(&drafts[i * nd..i * nd + nd]);
-                g.push(&ids, s.pos, &s.pages);
-            }
-            g.pad_to(b, vr);
-            let env_v = env(b * vr, b);
-            g.stage(rt, &env_v)?;
+            let cells: Vec<Cell> = running
+                .iter()
+                .zip(&drafts)
+                .map(|(s, d)| {
+                    let mut ids = vec![s.next as i64];
+                    ids.extend_from_slice(d);
+                    Cell { row: &s.row, ids, pos: s.pos, col: 0 }
+                })
+                .collect();
+            let mut st = tray.stage(&cells, bucket)?;
             if advance {
-                rt.write_input_at("num_accepted_tokens", &le_bytes_i32(&vec![1; b]), &env_v)?;
+                st.write_seqs("num_accepted_tokens", |_| 1i32, 1)?;
             }
-            run_program(rt, "verify", &env_v, eager)?;
-            let vt = i64_from_le(&rt.read_output("verify_tokens")?);
+            st.run("verify", eager)?;
+            let vt = st.read_i64("verify_tokens")?;
             // Every row's tap into the draft KV (positions/slot_mapping are
             // still verify's): rejected rows land past the sequence's new
             // position and the next round overwrites them.
-            run_program(rt, "draft_precompute", &env_v, eager)?;
+            st.run("draft_precompute", eager)?;
             (drafts, vt)
         };
 
         // Accept the longest matching prefix; vt[a] is the correction (or
         // the bonus token when everything matched).
-        let accepted: Vec<usize> = (0..n)
-            .map(|i| {
-                let d = &drafts[i * nd..i * nd + nd];
-                let v = &vt[i * vr..i * vr + vr];
-                d.iter().zip(v).take_while(|(x, y)| x == y).count()
-            })
-            .collect();
+        let accepted: Vec<usize> =
+            drafts.iter().zip(&vt).map(|(d, v)| d.iter().zip(v).take_while(|(x, y)| x == y).count()).collect();
         if advance && !fused {
             // Commit the accepted rows into the recurrent state: the
             // target re-runs verify's rows from the state after the anchor
             // and stores after the last accepted one — the line moves to
             // entry `a` of its cell, `num_accepted_tokens` = a + 1.
-            let mut nacc: Vec<i32> = accepted.iter().map(|&a| a as i32 + 1).collect();
-            nacc.resize(b, 1);
-            stage_lines(&mut self.rt.0, &self.line_tables, self.seqs_max, &self.pad, &leases, &accepted)?;
-            let rt = &mut self.rt.0;
-            let env_v = env(b * vr, b);
-            rt.write_input_at("num_accepted_tokens", &le_bytes_i32(&nacc), &env_v)?;
-            run_program(rt, "advance", &env_v, eager)?;
+            let cells: Vec<Cell> = running
+                .iter()
+                .zip(&drafts)
+                .zip(&accepted)
+                .map(|((s, d), &a)| {
+                    let mut ids = vec![s.next as i64];
+                    ids.extend_from_slice(d);
+                    Cell { row: &s.row, ids, pos: s.pos, col: a }
+                })
+                .collect();
+            let mut st = tray.stage(&cells, bucket)?;
+            st.write_seqs("num_accepted_tokens", |i| accepted[i] as i32 + 1, 1)?;
+            st.run("advance", eager)?;
         }
+        debug_assert_eq!(vt.len(), n);
         self.stats.step_ns += t0.elapsed().as_nanos();
         self.stats.steps += 1;
 
         let running = std::mem::take(&mut self.running);
         for (i, mut s) in running.into_iter().enumerate() {
-            let v = &vt[i * vr..i * vr + vr];
+            let v = &vt[i];
             let a = accepted[i];
             let plan = self.spec.as_mut().unwrap();
             for p in &mut plan.counters.num_accepted_tokens_per_pos[..a] {
@@ -994,48 +919,34 @@ impl KernScheduler {
         if n == 0 {
             return Ok(());
         }
-        let b = self.bucket(n);
-        let env = env(b, b);
-        let pad_slot = self.pad.slot(0);
-        let mut token_ids = Vec::with_capacity(b);
-        let mut positions = Vec::with_capacity(b);
-        let mut slots = Vec::with_capacity(b);
-        let mut seq_lens = Vec::with_capacity(b);
-        for s in &self.running {
-            token_ids.push(s.next as i64);
-            positions.push(s.pos as i64);
-            slots.push(s.pages.slot(s.pos));
-            seq_lens.push(s.pos as i32 + 1);
-        }
-        for _ in n..b {
-            token_ids.push(0);
-            positions.push(0);
-            slots.push(pad_slot);
-            seq_lens.push(1);
-        }
-        let cu: Vec<i32> = (0..=b as i32).collect();
-        let program = if b == 1 { "decode" } else { "decode_batch" };
         let t0 = Instant::now();
-        let leases: Vec<&Lease> = self.running.iter().map(|s| &s.pages).collect();
-        stage_lines(&mut self.rt.0, &self.line_tables, self.seqs_max, &self.pad, &leases, &[])?;
-        let rt = &mut self.rt.0;
-        stage_tables(rt, &self.page_tables, &leases, &self.pad, b, &env)?;
-        rt.write_input_at("token_ids", &le_bytes_i64(&token_ids), &env)?;
-        rt.write_input_at("positions", &le_bytes_i64(&positions), &env)?;
-        rt.write_input_at("slot_mapping", &le_bytes_i64(&slots), &env)?;
-        rt.write_input_at("seq_lens", &le_bytes_i32(&seq_lens), &env)?;
-        rt.write_input_at("cu_seqlens_q", &le_bytes_i32(&cu), &env)?;
-        run_program(rt, program, &env, self.policy.eager)?;
-        let out = i64_from_le(&rt.read_output("next_token")?);
+        let cells: Vec<Cell> =
+            self.running.iter().map(|s| Cell { row: &s.row, ids: vec![s.next as i64], pos: s.pos, col: 0 }).collect();
+        let mut st = self.tray.stage(&cells, bucket)?;
+        let program = if st.b() > 1 && self.decode_batch { "decode_batch" } else { "decode" };
+        st.run(program, self.policy.eager)?;
+        let out = st.read_i64("next_token")?;
+        drop(st);
         self.stats.step_ns += t0.elapsed().as_nanos();
         self.stats.steps += 1;
 
         let running = std::mem::take(&mut self.running);
         for (i, mut s) in running.into_iter().enumerate() {
-            let tok = out[i] as u32;
             s.advance([s.next]);
-            let (n, done) = s.emit(&[tok], &self.policy.stop_tokens, ledger);
-            self.stats.tokens += n;
+            // A row still feeding its prompt: this step's output is
+            // dropped, the next prompt token is the next input.
+            let done = match s.pending.pop_front() {
+                Some(t) => {
+                    s.next = t;
+                    self.stats.prefill_tokens += 1;
+                    false
+                }
+                None => {
+                    let (n, done) = s.emit(&[out[i][0] as u32], &self.policy.stop_tokens, ledger);
+                    self.stats.tokens += n;
+                    done
+                }
+            };
             if done {
                 self.finish(s);
             } else {
@@ -1058,20 +969,23 @@ impl KernScheduler {
         }
         if st.tokens > 0 || st.prefill_tokens > 0 {
             let round = |x: f64, d: f64| (x * d).round() / d;
-            let host = self.rt.0.host_tier();
+            let host = self.tray.host_tier();
+            let (slots, slots_used) = self.tray.seq_slots();
             let (drafts, draft_tokens, accepted) = self.spec.as_ref().map_or((0, 0, 0), |p| {
                 let c = &p.counters;
                 (c.num_drafts - st.spec_at.0, c.num_draft_tokens - st.spec_at.1, c.num_accepted_tokens - st.spec_at.2)
             });
             info!(
                 running = self.running.len(),
+                rows_per_rank = ?self.rows_per_rank(),
                 waiting = self.waiting.len() + self.waking.len(),
-                kv_pct = round(self.kv_used() as f64 * 100.0 / self.kv_total().max(1) as f64, 10.0),
+                kv_pct = round(self.tray.pages_used() as f64 * 100.0 / self.tray.pages_total().max(1) as f64, 10.0),
                 steps = st.steps,
                 step_ms = round(st.step_ns as f64 / 1e6 / st.steps.max(1) as f64, 100.0),
                 tok_s = round(st.tokens as f64 / dt.as_secs_f64(), 1.0),
                 prefill_tokens = st.prefill_tokens,
-                prefill_tok_s = round(st.prefill_tokens as f64 / (st.prefill_ns as f64 / 1e9).max(1e-9), 1.0),
+                prefill_tok_s =
+                    (st.prefill_ns > 0).then(|| round(st.prefill_tokens as f64 / (st.prefill_ns as f64 / 1e9), 1.0)),
                 prefix_hit_tokens = st.prefix_hit_tokens,
                 checkpoints = self.prefix.len(),
                 evictions = st.evictions,
@@ -1081,9 +995,9 @@ impl KernScheduler {
                 host_evictions = host.map(|_| st.host_evictions),
                 wakes = host.map(|_| st.wakes),
                 wake_tokens = host.map(|_| st.wake_tokens),
-                slots_used = self.rt.0.has_seq_state().then(|| self.rt.0.seq_slots_used()),
-                slots = self.rt.0.has_seq_state().then(|| self.rt.0.seq_slots()),
-                remaps = self.rt.0.remaps(),
+                slots_used = self.tray.has_seq_state().then_some(slots_used),
+                slots = self.tray.has_seq_state().then_some(slots),
+                remaps = self.tray.remaps(),
                 accepted = self.spec.as_ref().map(|_| round((accepted + drafts) as f64 / drafts.max(1) as f64, 100.0)),
                 accept_pct =
                     self.spec.as_ref().map(|_| round(accepted as f64 * 100.0 / draft_tokens.max(1) as f64, 1.0)),
@@ -1112,8 +1026,8 @@ impl Scheduler for KernScheduler {
 
     fn metrics(&self) -> SchedulerMetrics {
         SchedulerMetrics {
-            kv_used_blocks: self.kv_used() as u64,
-            kv_total_blocks: self.kv_total() as u64,
+            kv_used_blocks: self.tray.pages_used() as u64,
+            kv_total_blocks: self.tray.pages_total() as u64,
             num_running_reqs: self.running.len() as u64,
             num_waiting_reqs: self.waiting.len() as u64,
             spec_decode: self.spec.as_ref().map(|p| p.counters),
@@ -1121,98 +1035,11 @@ impl Scheduler for KernScheduler {
     }
 }
 
-/// Run `program` at `env`: eagerly, or through its CUDA graph, captured
-/// on first use.
-fn run_program(rt: &mut Runtime, program: &str, env: &BTreeMap<String, u64>, eager: bool) -> Result<()> {
-    if eager {
-        return Ok(rt.run(program, env)?);
-    }
-    if !rt.is_captured(program, env) {
-        let t = Instant::now();
-        rt.capture(program, env)?;
-        info!(
-            program,
-            seqs = env.get("seqs"),
-            tokens = env.get("tokens"),
-            capture_ms = logline::ms(t.elapsed()),
-            "captured"
-        );
-    }
-    Ok(rt.run_captured(program, env)?)
-}
-
-/// See [`KernScheduler::stage_lines`].
-/// Every line table for a batch: cell `[r, i]` carries sequence i's line
-/// r — in entry `cols[i]` (0 past `cols`) of a wide table's cell, the
-/// null line 0 in the rest — and the pad's line past the batch.
-fn stage_lines(
-    rt: &mut Runtime,
-    tables: &[LineTable],
-    seqs_max: usize,
-    pad: &Lease,
-    seqs: &[&Lease],
-    cols: &[usize],
-) -> Result<()> {
-    for LineTable { name, rows, width: w } in tables {
-        let mut t = vec![0i32; rows * seqs_max * w];
-        for r in 0..*rows {
-            let fill = pad.seq_line(name, r)?;
-            for i in 0..seqs_max {
-                let (line, col) = match seqs.get(i) {
-                    Some(l) => (l.seq_line(name, r)?, cols.get(i).copied().unwrap_or(0)),
-                    None => (fill, 0),
-                };
-                if col >= *w {
-                    bail!("line table `{name}`: entry {col} of a {w}-wide cell");
-                }
-                t[(r * seqs_max + i) * w + col] = line;
-            }
-        }
-        rt.write_input(name, &le_bytes_i32(&t))?;
-    }
-    Ok(())
-}
-
-/// Every page table for a batch of `b` rows: sequence i's row, the pad's
-/// past the batch.
-fn stage_tables(
-    rt: &mut Runtime,
-    tables: &[String],
-    seqs: &[&Lease],
-    pad: &Lease,
-    b: usize,
-    env: &BTreeMap<String, u64>,
-) -> Result<()> {
-    for name in tables {
-        let mut t = Vec::new();
-        for i in 0..b {
-            seqs.get(i).copied().unwrap_or(pad).extend_row(name, &mut t)?;
-        }
-        rt.write_input_at(name, &le_bytes_i32(&t), env)?;
-    }
-    Ok(())
-}
-
-fn env(tokens: usize, seqs: usize) -> BTreeMap<String, u64> {
-    BTreeMap::from([("tokens".to_string(), tokens as u64), ("seqs".to_string(), seqs as u64)])
-}
-
 fn need_programs(m: &Manifest, names: &[&str]) -> Result<()> {
     match names.iter().find(|p| !m.programs.contains_key(**p)) {
         Some(p) => bail!("manifest has no program `{p}`"),
         None => Ok(()),
     }
-}
-
-fn need_buffers(m: &Manifest, names: &[&str]) -> Result<()> {
-    match names.iter().find(|b| !m.buffers.contains_key(**b)) {
-        Some(b) => bail!("manifest has no input buffer `{b}`"),
-        None => Ok(()),
-    }
-}
-
-fn var_max(m: &Manifest, name: &str) -> Result<usize> {
-    m.vars.get(name).map(|v| v.max as usize).with_context(|| format!("manifest has no var `{name}`"))
 }
 
 fn shape<'m>(m: &'m Manifest, name: &str) -> Result<&'m [Dim]> {
@@ -1254,7 +1081,8 @@ mod tests {
                 "seq_lens": {"kind": "input", "dtype": "i32", "shape": ["seqs"]},
                 "cu_seqlens_q": {"kind": "input", "dtype": "i32", "shape": ["seqs"]},
                 "block_table": {"kind": "input", "dtype": "i32", "shape": ["seqs", 3], "domain": {"index_into": "kv", "stride": 16}},
-                "line_index": {"kind": "input", "dtype": "i32", "shape": [3, "seqs"], "domain": {"index_into": "gdn", "stride": 8}}
+                "line_index": {"kind": "input", "dtype": "i32", "shape": [3, "seqs"], "domain": {"index_into": "gdn", "stride": 8}},
+                "next_token": {"kind": "output", "dtype": "i64", "shape": ["seqs"]}
             },
             "modules": {}, "ops": {}, "programs": {"prefill": [], "decode": [], "decode_batch": []}
         }"#,
@@ -1279,8 +1107,14 @@ mod tests {
         m
     }
 
+    fn check_on(m: &Manifest, ranks: usize, spec: bool) -> Result<(Shape, Contract)> {
+        let shape = Shape::check(m, &["line_index"], &["block_table"], 1)?;
+        let c = Contract::check(m, 16, ranks, spec)?;
+        Ok((shape, c))
+    }
+
     fn check(m: &Manifest, spec: bool) -> Result<Contract> {
-        Contract::check(m, &["line_index"], &["block_table"], 16, spec)
+        check_on(m, 1, spec).map(|(_, c)| c)
     }
 
     fn rejects(m: &Manifest, spec: bool, what: &str) {
@@ -1291,12 +1125,9 @@ mod tests {
 
     #[test]
     fn plain_contract() {
-        let c = check(&plain(), false).unwrap();
-        assert!(!c.prefill_emits && c.spec.is_none());
-        assert_eq!((c.seqs_max, c.tokens_max), (4, 8));
-        let lines: Vec<_> = c.line_tables.iter().map(|t| (t.name.as_str(), t.rows, t.width)).collect();
-        assert_eq!((lines, c.page_tables.clone()), (vec![("line_index", 3, 1)], vec!["block_table".to_string()]));
-        assert_eq!((c.max_seqs(0), c.max_seqs(3), c.max_seqs(100)), (1, 3, 4));
+        let (shape, c) = check_on(&plain(), 1, false).unwrap();
+        assert_eq!((c.prefill, c.decode_batch, c.spec.is_none()), (Some(false), true, true));
+        assert_eq!((c.max_seqs(&shape, 0), c.max_seqs(&shape, 3), c.max_seqs(&shape, 100)), (1, 3, 4));
     }
 
     #[test]
@@ -1304,30 +1135,31 @@ mod tests {
         let mut m = plain();
         let call = serde_json::from_str(r#"{"op": "head", "args": [{"buf": "next_token"}]}"#).unwrap();
         m.programs.insert("prefill".into(), vec![call]);
-        assert!(check(&m, false).unwrap().prefill_emits);
+        assert_eq!(check(&m, false).unwrap().prefill, Some(true));
+    }
+
+    #[test]
+    fn decode_only_manifests_feed_the_prompt_through_decode() {
+        let mut m = plain();
+        m.programs.remove("prefill");
+        m.programs.remove("decode_batch");
+        let c = check(&m, false).unwrap();
+        assert_eq!((c.prefill, c.decode_batch), (None, false));
+        rejects(&m, true, "--spec needs a `prefill` program");
     }
 
     #[test]
     fn plain_rejections() {
         let mut m = plain();
-        m.programs.remove("decode_batch");
-        rejects(&m, false, "no program `decode_batch`");
-        let mut m = plain();
-        m.buffers.remove("cu_seqlens_q");
-        rejects(&m, false, "no input buffer `cu_seqlens_q`");
-        let mut m = plain();
-        m.buffers.get_mut("line_index").unwrap().shape = vec![Dim::Const(3)];
-        rejects(&m, false, "expected [lines, seqs]");
-        let mut m = plain();
-        m.buffers.get_mut("block_table").unwrap().shape = vec![Dim::Var("seqs".into())];
-        rejects(&m, false, "`block_table` shaped [Var(\"seqs\")], expected [seqs, n]");
-        let Err(e) = Contract::check(&plain(), &[], &[], 16, false) else { panic!("no page table accepted") };
-        assert!(e.to_string().contains("block_table"), "{e}");
+        m.programs.remove("decode");
+        rejects(&m, false, "no program `decode`");
+        let Err(e) = check_on(&speculative(), 4, true) else { panic!("--spec on 4 ranks accepted") };
+        assert!(format!("{e:#}").contains("--spec drives one rank; this tray has 4"), "{e:#}");
     }
 
     #[test]
     fn speculative_contract() {
-        let c = check(&speculative(), true).unwrap();
+        let (shape, c) = check_on(&speculative(), 1, true).unwrap();
         let s = c.spec.as_ref().unwrap();
         assert_eq!(
             (s.n_drafts, s.draft_rows, s.verify_rows, s.mask_token, s.advance, s.fused),
@@ -1335,7 +1167,7 @@ mod tests {
         );
         assert_eq!(s.counters.num_spec_tokens, 3);
         // Four rows per sequence per round fit twice in 8 tokens.
-        assert_eq!((c.max_seqs(1), c.max_seqs(4)), (1, 2));
+        assert_eq!((c.max_seqs(&shape, 1), c.max_seqs(&shape, 4)), (1, 2));
         // A plain manifest has no `decode_batch` to miss under --spec.
         let mut m = speculative();
         m.programs.remove("decode_batch");
@@ -1373,9 +1205,7 @@ mod tests {
         m.spec = Some(Spec { block: 3, mask_token: 7 });
         rejects(&m, true, "coincide, got 3 and 4");
         // A round's rows must fit the pad page.
-        let Err(e) = Contract::check(&speculative(), &["line_index"], &["block_table"], 2, true) else {
-            panic!("4 rows in a 2-token page")
-        };
+        let Err(e) = Contract::check(&speculative(), 2, 1, true) else { panic!("4 rows in a 2-token page") };
         assert!(format!("{e:#}").contains("exceed the 2-token pad page"), "{e:#}");
     }
 }
