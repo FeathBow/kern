@@ -40,7 +40,9 @@ dozen kernels. The launch sequence still follows pegainfer's certified
 """
 import argparse
 import json
+import math
 import pathlib
+import struct
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -53,6 +55,7 @@ V = 163840
 HEADS, HEAD_DIM = 96, 128
 INNER = HEADS * HEAD_DIM           # 12288
 Q_LORA, KV_LORA, ROPE = 1536, 512, 64
+NOPE_DIM = 128  # per-head q/k dim before the rope part
 KV_A = KV_LORA + ROPE              # 576
 Q_B = HEADS * 192                  # 18432
 MLA_FUSED = Q_LORA + KV_A + INNER  # 14400
@@ -75,6 +78,20 @@ KDA_LINE_BYTES = KDA_REC_BYTES + 3 * KDA_WIN_BYTES
 PAGE = 64
 LATENT_ROW = KV_A
 
+# MLA decode attention: FlashInfer's CuTe-DSL Blackwell kernel, prebuilt
+# (tools/kernels-bin/README.md), two entries in one module. It walks a row
+# in 128-token tiles; each row runs as `mla_bsk[b]` splits of a 2-CTA
+# cluster and a reduction merges them. The parameter ABI packed below is
+# the DSL's flattened struct layout (docs/k3-kernel-abi.md K5).
+MLA_MODULE = "mla_decode_h96_p64"
+MLA_MAIN = ("kernel_cutlass_split_kv_kernel_flashinfercute_dslattentionmonolithicmla_decode_fp16"
+            "BlackwellMultiHeadLatentAttentionForwardFP16_object_at__TiledMMA_ThrLayoutVMNK21111000_PermutationMNK____0")
+MLA_REDUCE = ("kernel_cutlass_reduction_kernel_flashinfercute_dslattentionmonolithicmla_decode_fp16"
+              "BlackwellMultiHeadLatentAttentionForwardFP16_object_at__tensorptrbf16gmemalign16odiv16i64div161i64div16_1")
+MLA_M_TILE = 128          # the MMA's row tile: 96 heads pad to one
+MLA_MAIN_SMEM = 232448
+MLA_REDUCE_SMEM = 1024    # 256-split reducer scratch
+
 T = "tokens"
 R = "rows"
 TP_GRID = 256
@@ -89,7 +106,9 @@ GEOM = {
     "kern_k3_conv_silu": ([T, 3, INNER // 512], [128, 1, 1], 0),  # 4 columns per thread
     "kern_k3_kda_core": ([T, HEADS, 1], [128, 1, 1], 0),
     "kern_k3_mla_prep": ([T, 4, 1], [512, 1, 1], 0),  # 1 norm/append block + 3 gate segments
-    "kern_k3_mla_paged_attn": ([T, 48, 1], [512, 1, 1], 0),  # 6 head groups x 8 KV splits (cluster of 8), 216 KB static smem
+    "kern_k3_mla_absorb": ([{"ceil_div": [T, 32]}, HEADS, 8], [128, 1, 1], 0),  # 32 rows x 64 columns per block
+    "kern_k3_mla_vup_gate": ([{"ceil_div": [T, 32]}, HEADS, 4], [256, 1, 1], 0),  # 32 rows x 32 dv per block
+    "kern_k3_mla_split_plan": ([1, 1, 1], [1024, 1, 1], 0),
     "kern_k3_router_topk": ([T, 1, 1], [256, 1, 1], 0),
     "kern_k3_argmax_f32_partial": ([T, 64, 1], [1024, 1, 1], 0),
     "kern_k3_argmax_f32_final": ([T, 1, 1], [64, 1, 1], 0),
@@ -113,7 +132,92 @@ def launch(cubin, entry, grid=None, block=None, smem=None, var=T, defines=None, 
     return l
 
 
-def build(layers, ranks, max_ctx, seqs_max, tp=1):
+def bf16(x):
+    """x rounded to bf16 (nearest even), as a float."""
+    bits = struct.unpack("<I", struct.pack("<f", x))[0]
+    return struct.unpack("<f", struct.pack("<I", ((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16) << 16))[0]
+
+
+def fast_divmod(d):
+    """The DSL's 32-bit FastDivmod divisor image: {divisor, multiplier, shift1, shift2},
+    q = ((x - mulhi(x, m)) >> s1 + mulhi(x, m)) >> s2."""
+    if d == 1:
+        return [{"at": 0, "i32": 1}, {"at": 4, "i32": 1}]
+    l = (d - 1).bit_length()
+    m = ((1 << (32 + l)) + d - 1) // d - (1 << 32)
+    return [{"at": 0, "i32": d}, {"at": 4, "i32": m - (1 << 32) if m >= 1 << 31 else m}, {"at": 8, "u8": 1},
+            {"at": 9, "u8": l - 1}]
+
+
+def pack(size, *fields):
+    return {"pack": {"size": size, "fields": list(fields)}}
+
+
+def mla_attn_op(seqs_max, page_stride, split_max):
+    """The DSL attention as one op: split kernel + reduction, structs packed from the interface.
+    Interface: q_abs latent | q_abs rope (+1024 B) | kv latent | kv rope (+1024 B) | block_table |
+    seq_lens | mla_bsk | o_lat | lse | acc_o | acc_lse | B | max_pages."""
+    V = {"at": 0, "var": T}
+    tmap = lambda param, d0, page, box1, stride1: {"tensormap": {
+        "param": param, "dtype": "bf16", "dims": [d0, page, 0 if page == PAGE else seqs_max],
+        "strides": [LATENT_ROW * 2, stride1], "box": [64, box1, 1], "swizzle": 128, "l2_promotion": 128}}
+    at = lambda off, f: {**f, "at": off}
+    q_stride, kv_stride = HEADS * LATENT_ROW * 2, page_stride * 2
+    acc_o = pack(48, {"at": 0, "param": 9}, {"at": 8, "i32": MLA_M_TILE}, {"at": 12, "i32": split_max}, {"at": 16, "i32": KV_LORA},
+                 {"at": 20, "i32": 1}, at(24, V), {"at": 28, "i32": split_max * KV_LORA}, {"at": 32, "i32": KV_LORA},
+                 {"at": 36, "i32": split_max * MLA_M_TILE * KV_LORA}, {"at": 40, "i32": MLA_M_TILE * split_max * KV_LORA})
+    acc_lse = pack(40, {"at": 0, "param": 10}, {"at": 8, "i32": MLA_M_TILE}, {"at": 12, "i32": split_max}, {"at": 16, "i32": 1},
+                   at(20, V), {"at": 24, "i32": split_max}, {"at": 28, "i32": MLA_M_TILE * split_max},
+                   {"at": 32, "i32": MLA_M_TILE * split_max})
+    seqs = pack(16, {"at": 0, "param": 5}, {"at": 8, "var": T, "width": 8})
+    bsk = pack(16, {"at": 0, "param": 6}, {"at": 8, "var": T, "width": 8})
+    # the tiled-MMA descriptors and the TMA coordinate shapes are not read by this build; zero
+    main_params = ["bytes<64>", "bytes<64>", "tensormap", "bytes<8>", "tensormap", "bytes<8>", "tensormap", "bytes<12>",
+                   "tensormap", "bytes<12>", "tensormap", "bytes<12>", "bytes<24>", "bytes<48>", "bytes<24>", "bytes<48>",
+                   "bytes<40>", "i32", "bytes<16>", "bytes<16>", "f32", "f32", "i32", "i32", "i32", "bytes<12>", "bytes<12>",
+                   "bytes<12>"]
+    main_args = [
+        pack(64), pack(64),
+        tmap(0, KV_LORA, HEADS, 64, q_stride), pack(8, {"at": 0, "i32": KV_LORA}, at(4, V)),
+        tmap(1, ROPE, HEADS, 64, q_stride), pack(8, {"at": 0, "i32": ROPE}, at(4, V)),
+        tmap(2, KV_LORA, PAGE, 64, kv_stride), pack(12, {"at": 0, "i32": PAGE}, {"at": 4, "i32": KV_LORA}),
+        tmap(3, ROPE, PAGE, 64, kv_stride), pack(12, {"at": 0, "i32": PAGE}, {"at": 4, "i32": ROPE}),
+        tmap(2, KV_LORA, PAGE, 32, kv_stride), pack(12, {"at": 0, "i32": KV_LORA}, {"at": 4, "i32": PAGE}),
+        # page table [max_pages, B] strides (1, max_pages)
+        pack(24, {"at": 0, "param": 4}, {"at": 8, "param": 12}, at(12, V), {"at": 16, "param": 12, "width": 8}),
+        # o as (128, 512, tiles=1, B); lse as (128, 1, B): the split path never stores through these
+        pack(48, {"at": 0, "param": 7}, {"at": 8, "i32": KV_LORA}, {"at": 12, "i32": 1}, at(16, V), {"at": 24, "i64": KV_LORA},
+             {"at": 32, "i64": MLA_M_TILE * KV_LORA}, {"at": 40, "i64": HEADS * KV_LORA}),
+        pack(24, {"at": 0, "param": 8}, {"at": 8, "i32": 1}, at(12, V), {"at": 16, "i64": HEADS}),
+        acc_o, acc_lse,
+        {"i32": split_max}, seqs, bsk,
+        {"f32": bf16((NOPE_DIM + ROPE) ** -0.5) * math.log2(math.e)}, {"f32": 1.0},
+        {"param": 11}, {"i32": 1}, {"i32": split_max},
+        pack(12), pack(12, *fast_divmod(1)), pack(12, *fast_divmod(split_max)),
+    ]
+    reduce_params = ["bytes<48>", "bytes<40>", "bytes<48>", "bytes<40>", "i32", "bytes<16>", "bytes<16>"]
+    reduce_args = [
+        # o as (H, 512, S=1, B), lse as (H, 1, B)
+        pack(48, {"at": 0, "param": 7}, {"at": 8, "i32": HEADS}, {"at": 12, "i32": KV_LORA}, {"at": 16, "i32": 1}, at(20, V),
+             {"at": 24, "i64": KV_LORA}, {"at": 32, "i64": HEADS * KV_LORA}, {"at": 40, "i64": HEADS * KV_LORA}),
+        pack(40, {"at": 0, "param": 8}, {"at": 8, "i32": HEADS}, {"at": 12, "i32": 1}, at(16, V), {"at": 24, "i64": HEADS},
+             {"at": 32, "i64": HEADS}),
+        acc_o, acc_lse, {"i32": split_max}, seqs, bsk,
+    ]
+    module = handwritten.prebuilt(MLA_MODULE)
+    return {
+        "params": ["in buffer<bf16>", "in buffer<bf16>", "in state", "in state", "in buffer<i32>", "in buffer<i32>",
+                   "in buffer<i32>", "out buffer<bf16>", "out buffer<f32>", "out buffer<f32>", "out buffer<f32>", "i32", "i32"],
+        "impl": {"launches": [
+            {**module, "entry": MLA_MAIN, "params": main_params, "args": main_args, "block": [384, 1, 1],
+             "grid": [2, T, split_max], "cluster": [2, 1, 1], "shared_mem": MLA_MAIN_SMEM},
+            {**module, "entry": MLA_REDUCE, "params": reduce_params, "args": reduce_args, "block": [128, 1, 1],
+             "grid": [HEADS, 1, T], "shared_mem": MLA_REDUCE_SMEM},
+        ]},
+    }
+
+
+def build(layers, ranks, max_ctx, seqs_max, tp=1, mla_split_max=32):
     assert 1 <= layers <= LAYERS
     assert tp == 1 or ranks % tp == 0, "the tp group is a subset of the ep world"
     n_kda = sum(1 for i in range(layers) if not is_mla(i))
@@ -196,10 +300,18 @@ def build(layers, ranks, max_ctx, seqs_max, tp=1):
                        "i64", "i64", "out buffer<bf16>", "out buffer<bf16>", "i32"],
             "impl": {"launches": [launch("k3_mla_prep", "kern_k3_mla_prep")]},
         },
-        "mla_paged_attn": {
-            "params": ["in buffer<f32>", "in buffer<bf16>", "inout state", "in buffer<i32>", "i32", "i64",
-                       "in buffer<i32>", "in buffer<bf16>", "in buffer<bf16>", "out buffer<bf16>", "i32"],
-            "impl": {"launches": [launch("k3_mla_paged_attn", "kern_k3_mla_paged_attn")]},
+        "mla_absorb": {
+            "params": ["in buffer<f32>", "in buffer<bf16>", "out buffer<bf16>", "i32"],
+            "impl": {"launches": [launch("k3_mla_absorb", "kern_k3_mla_absorb")]},
+        },
+        "mla_split_plan": {
+            "params": ["in buffer<i32>", "out buffer<i32>", "i32", "i32"],
+            "impl": {"launches": [launch("k3_mla_split_plan", "kern_k3_mla_split_plan")]},
+        },
+        "mla_attn": mla_attn_op(seqs_max, page_stride, mla_split_max),
+        "mla_vup_gate": {
+            "params": ["in buffer<bf16>", "in buffer<bf16>", "in buffer<bf16>", "out buffer<bf16>", "i32"],
+            "impl": {"launches": [launch("k3_mla_vup_gate", "kern_k3_mla_vup_gate")]},
         },
         # K6 / K7
         "router_topk": {
@@ -324,6 +436,12 @@ def build(layers, ranks, max_ctx, seqs_max, tp=1):
     work("mla_fused_partial", MLA_FUSED, "f32")
     work("q_norm", Q_LORA)
     work("q_partial", Q_B, "f32")
+    work("q_abs", HEADS * LATENT_ROW)
+    work("o_lat", HEADS * KV_LORA)
+    work("mla_lse", HEADS, "f32")
+    work("mla_acc_o", mla_split_max * MLA_M_TILE * KV_LORA, "f32")
+    work("mla_acc_lse", mla_split_max * MLA_M_TILE, "f32")
+    buffers["mla_bsk"] = {"dtype": "i32", "shape": [T], "kind": "workspace"}
     work("router_partial", EXPERTS, "f32")
     work("topk_idx", TOPK, "i32")
     work("topk_weight", TOPK, "f32")
@@ -377,6 +495,7 @@ def build(layers, ranks, max_ctx, seqs_max, tp=1):
         return whole
 
     step("embed", "embedding", b("token_ids"), b("embed"), b("hidden"), RB, i32(H))
+    step("mla_plan", "mla_split_plan", b("seq_lens"), b("mla_bsk"), i32(mla_split_max), B)
 
     blocks = 0
     kda_k = 0
@@ -400,9 +519,11 @@ def build(layers, ranks, max_ctx, seqs_max, tp=1):
             step(L + "mla_prep", "mla_prep", b("mla_fused_partial"), w("gamma_q_a"), w("gamma_kv_a"), b("slot_mapping"),
                  {"state": "kv"}, i64(layer_off), i64(page_stride), b("q_norm"), b("mla_gate"), B)
             gemm(L + "q_b", b("q_norm"), w("w_q_b"), b("q_partial"), Q_B, Q_LORA)
-            step(L + "attn", "mla_paged_attn", b("q_partial"), w("w_kv_b"), {"state": "kv", "offset": layer_off * 2},
-                 b("block_table"), i32(max_pages), i64(page_stride), b("seq_lens"), w("scale"), b("mla_gate"),
-                 b("gated"), B)
+            step(L + "absorb", "mla_absorb", b("q_partial"), w("w_kv_b"), b("q_abs"), B)
+            step(L + "attn", "mla_attn", b("q_abs"), b("q_abs", KV_LORA * 2), {"state": "kv", "offset": layer_off * 2},
+                 {"state": "kv", "offset": layer_off * 2 + KV_LORA * 2}, b("block_table"), b("seq_lens"), b("mla_bsk"),
+                 b("o_lat"), b("mla_lse"), b("mla_acc_o"), b("mla_acc_lse"), B, i32(max_pages))
+            step(L + "vup", "mla_vup_gate", b("o_lat"), w("w_kv_b"), b("mla_gate"), b("gated"), B)
         else:
             line = b("kda.line_index", kda_k * rows_max * 4)
             kda_k += 1
@@ -464,7 +585,6 @@ def build(layers, ranks, max_ctx, seqs_max, tp=1):
             weight(f"layers.{i}.gamma_kv_a", [KV_LORA])
             weight(f"layers.{i}.w_q_b", [Q_B, Q_LORA])
             weight(f"layers.{i}.w_kv_b", [HEADS * 256, KV_LORA])
-            weight(f"layers.{i}.scale", [1])
         else:
             weight(f"layers.{i}.wbig", [fused_l, H])
             weight(f"layers.{i}.wsm", [WSM, H])
@@ -516,8 +636,10 @@ def main():
     ap.add_argument("--max-ctx", type=int, default=16384)
     ap.add_argument("--seqs", type=int, default=64, help="sequences per rank (the `tokens`/`seqs` bound)")
     ap.add_argument("--tp", type=int, default=1, help="tray-batch group size (a divisor of --ranks)")
+    ap.add_argument("--mla-split-max", type=int, default=32,
+                    help="KV splits a row's attention may run as; the workspace is tokens x this x 256 KiB")
     a = ap.parse_args()
-    json.dump(build(a.layers, a.ranks, a.max_ctx, a.seqs, a.tp), sys.stdout, indent=1)
+    json.dump(build(a.layers, a.ranks, a.max_ctx, a.seqs, a.tp, a.mla_split_max), sys.stdout, indent=1)
     print()
 
 

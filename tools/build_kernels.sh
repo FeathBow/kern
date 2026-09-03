@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# nvcc every handwritten kernel (tools/kernels-src/*.cu) into one directory.
+# nvcc every handwritten kernel (tools/kernels-src/*.cu) into one directory,
+# next to a copy of every checked-in prebuilt cubin (tools/kernels-bin/).
 #
 #   tools/build_kernels.sh [out_dir=target/cubins]      KERN_SM=sm_103a  KERN_REBUILD=1  KERN_SRC=<dir of .cu>
 #
@@ -20,5 +21,9 @@ for src in "$srcdir"/*.cu; do
   if [ -z "${KERN_REBUILD:-}" ] && [ "$dst" -nt "$src" ]; then continue; fi
   nvcc -cubin -arch="$arch" -o "$dst" "$src"
   n=$((n+1))
+done
+for src in "$repo"/tools/kernels-bin/*.cubin; do
+  [ -e "$src" ] || continue
+  cp -u "$src" "$out/"
 done
 echo "built $n handwritten cubins ($arch) -> $out" >&2

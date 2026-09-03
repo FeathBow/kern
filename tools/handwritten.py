@@ -4,6 +4,10 @@ A generator writes `**hw("gemm8")` into a step and gets
 `{"cubin": "gemm8.cubin", "sha256": "<hash of the current build>"}` — the
 display name plus the identity the runtime resolves. The build happens at
 most once per process (tools/build_kernels.sh, into target/cubins/).
+
+`prebuilt("mla_decode_h96_p64")` does the same for a checked-in artifact
+(tools/kernels-bin/*.cubin, built by a toolchain nvcc is not: see the
+README there); build_kernels.sh lands those in target/cubins too.
 """
 import functools
 import hashlib
@@ -36,4 +40,11 @@ def hw(name: str, **defines) -> dict:
             arch = os.environ.get("KERN_SM", "sm_103a")
             flags = [f"-D{k}={v}" for k, v in sorted(defines.items())]
             subprocess.run(["nvcc", "-cubin", f"-arch={arch}", *flags, "-o", str(cb), str(src)], check=True)
+    return {"cubin": cb.name, "sha256": hashlib.sha256(cb.read_bytes()).hexdigest()}
+
+
+def prebuilt(name: str) -> dict:
+    """`cubin` + `sha256` fields for the checked-in tools/kernels-bin/<name>.cubin."""
+    build_dir()
+    cb = REPO / "tools" / "kernels-bin" / f"{name}.cubin"
     return {"cubin": cb.name, "sha256": hashlib.sha256(cb.read_bytes()).hexdigest()}

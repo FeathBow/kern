@@ -97,10 +97,12 @@ MLA 层把 conv/kda 换成：
 gemm normed·wfu → mla_fused_partial f32 [B, 14400]
 mla_prep(mla_fused_partial, slot_mapping, slab) → q_norm, mla_gate, slab 追加   [K4]
 gemm q_norm·w_q_b → q_partial f32 [B, 18432]
-mla_paged_attn(q_partial, w_kv_b, slab, block_table, seq_lens, mla_gate) → gated   [K5]
+mla_absorb(q_partial, w_kv_b) → q_abs bf16 [B, 96, 576]                            [K5a]
+mla_attn(q_abs, slab, block_table, seq_lens, mla_bsk) → o_lat bf16 [B, 96, 512]     [K5, DSL 主核 + 归约]
+mla_vup_gate(o_lat, w_kv_b, mla_gate) → gated                                        [K5c]
 ```
 
-尾部：`attnres_rms(8)` → `gemm w_lm` → `argmax_f32` [K6]。
+每步一次（embed 之后）：`mla_split_plan(seq_lens) → mla_bsk` [K5b]。尾部：`attnres_rms(8)` → `gemm w_lm` → `argmax_f32` [K6]。
 
 ### K1 残差流：`k3_attnres_rms` / `k3_land_add_attnres_rms` / `k3_land_add2`（一个 agent）
 
@@ -207,43 +209,93 @@ extern "C" __global__ void kern_k3_mla_prep(
 // 交付：grid (B, 4, 1)（y=0 做两个 norm + 追加，y=1..3 各落 1/3 的 gate），block 512，smem 12800（静态）
 ```
 
-### K5 `k3_mla_paged_attn`：absorbed MLA decode，多头共享 KV 读，gate 在 epilogue
+### K5 MLA decode attention：FlashInfer 的 CuTe-DSL Blackwell 核 + 三个配套小核
 
-现有核（`tools/kernels-src/k3_mla_paged_attn.cu`，pegainfer 原版）一 block 一头，每头把整个上下文
-读一遍：32k 上下文时每层每序列读 96 × 37 MB，24 层 ≈ 85 GB/步，这是长上下文的第一性能问题。
+自写核 `k3_mla_paged_attn`（2026-09-02 交付，下文"旧核"）在 12.9k 上下文下每层每行 ~42 µs，
+读 latent 只有 ~360 GB/s（<5% HBM）；agent 负载的 ctx p50 是 219k，这一项会是每步 ~17 ms/行，
+比 E5 剩下的所有东西都大。2026-09-03 换成 NVIDIA 用 CuTe DSL 写、随 FlashInfer 发行的
+Blackwell MLA decode 核（`flashinfer/cute_dsl/attention/monolithic/mla_decode_fp16.py`，BSD-3，
+tcgen05 2-CTA MMA + TMA 分页加载 + split-KV 归约），**预编译成 cubin 收进仓库**
+（`tools/kernels-bin/mla_decode_h96_p64.cubin`，构建配方 `tools/build_mla_dsl.py`，README 在同目录），
+runtime 不加任何模型代码：它的 struct 参数 ABI 由 manifest 的 `bytes<n>` + `pack` 铺平，
+五个 TMA 描述符走 `tensormap`（`docs/manifest.md`）。
+
+数学链和旧核一致处：q_abs 在 bf16 落地（f32 累加）、attention 输出 lat 在 bf16 落地、
+o = bf16(W_UV·lat) 后乘 bf16(σ(gate))；不同处：分数/softmax 在核内 f32（scale 取
+bf16(192^-0.5)·log2e 折进 exp2），P 以 bf16 进 MMA。
 
 ```c
-// 行 b：q_h = bf16(q_partial[b, h*192 .. +192])（nope 128 | rope 64），h = 0..95
-//   q_abs_h = [ bf16(Σ_d q_h[d]·W_UK_h[d, j]) for j<512 | q_h[128..192] ]        // W_UK_h = w_kv_b[h*256 + 0..128, :]
-//   s_h[t]  = f32( bf16(q_abs_h · row_t) · scale )   t < seq_lens[b]，row_t 走 block_table   // bf16 landing 后乘 bf16 scale
-//   p_h     = softmax_t(s_h)，概率 bf16 landing：p = f32(bf16(exp(s - m)/l))
-//   lat_h   = bf16(Σ_t p_h[t] · row_t[0..512])                                       // f32 累加
-//   o_h[dv] = bf16(Σ_j W_UV_h[dv, j] · f32(lat_h[j]))                                // W_UV_h = w_kv_b[h*256 + 128 + dv, :]
-//   gated[b, h*128+dv] = o_h[dv] · bf16(σ(f32(mla_gate[b, h*128+dv])))              // mul_sigmoid 融进 epilogue
-extern "C" __global__ void kern_k3_mla_paged_attn(
-    const f32*  q_partial,     // [B, Q_B]
-    const bf16* w_kv_b,        // [HEADS*256, KV_LORA]
-    const bf16* cache,         // slab 基址 + layer_off（生成器传 state 偏移）
-    const int*  block_table,   // [B, max_pages]
-    int max_pages, long long page_stride,
-    const int*  seq_lens,      // [B]
-    const bf16* scale,         // [1]  bf16 softmax scale（192^-0.5）
-    const bf16* mla_gate,      // [B, INNER]
-    bf16*       gated,         // [B, INNER]
-    int B);
-// grid (B, HEAD_GROUPS, 1)：一个 block 处理一组头（8/16/32/96 由你定），KV 每页只读一次供整组用；
-// 分数/累加可以用 mma（bf16 tensor core，[heads × 576] × [576 × 64]），也可以纯 FMA，看 ncu 说话
+// 一步一次：每行的 KV split 数（docs 里 K5b）
+extern "C" __global__ void kern_k3_mla_split_plan(const int* seq_lens, int* block_split_kvs, int split_max, int B);
+// grid (1,1,1) block 1024。行 b 按 128-token tile 计数，全 batch 的 tile 按 %nsmid/2 - B 个 cluster 摊
+// （一波跑完好过第二波），split_b = clamp(ceil(tiles_b / per), 1, split_max)。
+
+// 每个 MLA 层（K5a）：absorb
+extern "C" __global__ void kern_k3_mla_absorb(const f32* q_partial, const bf16* w_kv_b, bf16* q_abs, int B);
+// grid (ceil(B/32), 96, 8) block 128。q_abs[b, h, 0..512] = bf16(Σ_d bf16(q)[d]·W_UK_h[d, j])，[512..576] = rope
+// 原样。带宽问题（W_UK 12 MB 全 batch 共用）：block = 头 × 64 列，线程握 8 行 d × 8 列的 16 B load
+// 全部在飞，W 切片留在寄存器里连续吃最多 4 组 8 行；16 个 d 切片在 smem 归约。
+
+// 每个 MLA 层：DSL 主核 + 归约（一个 op `mla_attn`，两个 launch）
+//   主核  grid (2, B, split_max) block 384 cluster (2,1,1) smem 232448；行 b 只有 block_split_kvs[b] 个
+//         split 有活，其余 CTA 读到 k_tile_count = 0 立刻退出（实测 split_max 8 → 32 时间不变）
+//   归约  grid (96, 1, B) block 128 smem 1024；按 block_split_kvs[b] 合并 (acc_o, acc_lse) → o_lat[b, h, 512]
+//   工作区 acc_o [tokens, split_max·128·512] f32 + acc_lse [tokens, split_max·128] f32，
+//         生成器 --mla-split-max（默认 32）定 split_max，也定这块工作区（每行 split_max × 256 KiB）
+
+// 每个 MLA 层（K5c）：v_up + gate
+extern "C" __global__ void kern_k3_mla_vup_gate(const bf16* o_lat, const bf16* w_kv_b, const bf16* mla_gate, bf16* gated, int B);
+// grid (ceil(B/32), 96, 4) block 256。gated[b, h*128+dv] = bf16(Σ_j W_UV_h[dv,j]·lat[j]) · bf16(σ(gate))。
+// 同样的切法：block = 头 × 32 个 dv，线程握一个 dv 的 1/8 行（8 个 16 B load），8 个切片在 smem 归约。
 ```
 
-验收形状：ctx ∈ {1, 64, 65, 2048, 32768}，B ∈ {1, 8}。目标：ctx=32768、B=1 比现有核快 ≥ 3×
-（现有核基线由 harness 给出）；短上下文不慢于现有核。也交付一份 split-KV（长上下文按页段切、再合并 (m, l, acc)）的分析，
-不一定实现。
+DSL 主核的 28 个参数（生成器 `mla_attn_op` 写；PTX 里核真正读的只有描述符、页表、acc_o/acc_lse、
+split_kv、cache_seqs、block_split_kvs、两个 scale 和 S=1 的 FastDivmod，其余按 DSL 的布局填 0
+或常量，靠 `cuFuncGetParamInfo` 对齐字节数）：
 
-**交付（2026-09-02）**：grid `(B, 48, 1)` block 512，`__cluster_dims__(1, 8, 1)`，静态 smem 216 320 B：
-6 个头组 × 16 头，每组 8 个 KV split 各占一个 cluster block，(m, l, acc) 经 DSMEM 合并；两遍 softmax，
-分数与 P·V 走 `mma.m16n8k16` bf16。harness 全过；ctx=32768 B=1 **258 µs vs 旧核 10 047 µs（38.9×）**，
-ctx=64 24.6 µs vs 78 µs。SPL=16 变体（155 µs）没上：runtime 的 `cuLaunchKernelEx` 不设
-`NonPortableClusterSizeAllowed`；同理动态 smem > 48 KB 的 opt-in 也没有，所以是静态 smem。
+| # | 类型 | 内容 |
+|---|------|------|
+| 0,1 | bytes<64> | TiledMMA 描述（空） |
+| 2,4,6,8,10 | tensormap | q latent / q rope / c latent / c rope / c latent 转置：bf16、swizzle 128B、L2 promotion 128B，box [64,64,1]（转置 [64,32,1]）；q 的 dims [512\|64, 96, tokens_max]，KV 的 dims [512\|64, 64, **0 = 铺满 state**]，页步长 = 全部 MLA 层的一页字节 |
+| 3,5,7,9,11 | bytes<8/12> | TMA 坐标张量的动态 shape（核不读） |
+| 12 | bytes<24> | 页表 {ptr, max_pages, B, i64 max_pages} |
+| 13,14 | bytes<48/24> | o / lse 张量（split 路径不写） |
+| 15 | bytes<48> | acc_o {ptr, 128, split_max, 512, 1, B; strides split_max·512, 512, split_max·128·512, 128·split_max·512} |
+| 16 | bytes<40> | acc_lse {ptr, 128, split_max, 1, B; strides split_max, 128·split_max, 128·split_max} |
+| 17 | i32 | split_max |
+| 18,19 | bytes<16> | cache_seqs / block_split_kvs {ptr, i64 B} |
+| 20,21 | f32 | softmax scale·log2e，输出 scale 1.0 |
+| 22–24 | i32 | B, S=1, split_max（scheduler 参数） |
+| 25–27 | bytes<12> | FastDivmod(B)（核不读，0）、(1)、(split_max)：{d, ceil(2^(32+l)/d)−2^32, 1, l−1} |
+
+归约核 7 个参数：o {ptr, 96, 512, 1, B; i64 strides 512, 96·512, 96·512}、lse {ptr, 96, 1, B; i64 96, 96}、
+acc_o、acc_lse、split_max、cache_seqs、block_split_kvs。
+
+**ABI 是怎么拿到的**：DSL 的 JIT host 代码经 `libcute_dsl_runtime.so` 自己导出的
+`_cudaLaunchKernelEx` / `_cuTensorMapEncodeTiled` 包装启动（内部静态链接 cudart，驱动符号走
+export table），所以 LD_PRELOAD 钩 `cuLaunchKernelEx` 什么都看不到；钩那两个包装符号才拿到每个
+参数的字节。描述符的 dims/strides/box 能从字节里反解，但 DSL 自己 encode 的描述符比驱动
+`cuTensorMapEncodeTiled` 多两个 bit、box 字段错一字节——不追这个：用驱动 encode 的描述符
+独立起 cubin，输出和 DSL 逐位一致（`target/mla-bench/abi/launch.c`，四种形状 0 mismatch）。
+
+**实测（tray07 GB300，单卡，µs / 层，含归约，无 graph）**：
+
+| 形状 | 旧核 | DSL | 备注 |
+|------|------|-----|------|
+| B=1 13k | ~42 | 16.5 | split 26 |
+| B=1 65k | — | 31.9 / 26.5 | split 32 / 64 |
+| B=1 200k | — | 78 / 58 | split 32 / 72（72 ≈ 3.9 TB/s） |
+| B=16 13k 混合 | — | 55 / 67 / 87 | split 4 / 6 / 32：多一波 cluster 就慢，归约按 (行×split) 读 256 KB |
+
+split 数的教训：cluster 数刚好一波（≤ nsm/2）最好，切得更细只多付归约；B=1 长上下文才需要
+>32 的 split，`--mla-split-max` 默认 32 是工作区和长上下文之间的折中（64 时 B=1 200k 快 25%，
+工作区翻倍）。
+
+配套小核（tray03 GB300 单卡，µs，`target/mla-bench/abi/side.c`）：absorb B=1 6.5 / B=16 12 / B=64 38，
+vup_gate 11 / 18 / 60，split_plan 2.5（每步一次）。第一版按"一个 block 一个头、16 行共用"写，
+absorb B=1 17.7、vup B=16 58：每 block 在飞的 load 太少，纯延迟；改成上面的切法后 B=1 的下限是
+12 MB 权重的一次读（~2 µs）+ 波次延迟，再压每步只剩 <1%，没做。旧核把这两段算在 attention
+核里，短 ctx 下 B=1 全套 24.6 µs/层，新链 ≈ 6.5 + 12 + 3 + 11，持平；长 ctx 见上表。
 
 ### K6 `k3_router_topk` / `k3_argmax_f32`（一个 agent，顺带 embedding 与 rms）
 
@@ -311,8 +363,8 @@ pegainfer 的 TileLang 桶核、line shim 和它们的 manifest 已从树里删�
 遗留（都是契约层面，核本身不用改）：
 
 - K6 `k3_router_topk` 把 `EXPERTS=224` 烤进了核；满血 K3（896 expert）要另编一版或改成参数。
-- K5 SPL=16 变体要 kern-runtime 的 launch 设 `CU_LAUNCH_ATTRIBUTE_CLUSTER_SCHEDULING_POLICY_PREFERENCE` /
-  NonPortableClusterSizeAllowed；>48 KB 动态 smem 也要 `cuFuncSetAttribute` opt-in。两个都是 runtime 加一行属性的事。
+- K5 自写核 `k3_mla_paged_attn` 2026-09-03 被 DSL 核替掉（上文 K5、roadmap M1）；源码和 harness 条目
+  留着（`tools/k3-harness/run_all.sh` 还跑它），生成器不再引用。
 - K1a `nb == 8` 与 snapshot 不能同时用（snapshot 写 blocks 的第 8 槽）；生成器只在 `nb < 8` 时带 snapshot。
 - "snapshot" 在 K1a（把当前 hidden 存进 blocks[8]）和 K1b（把 landing 后的 hidden 存进 blocks[8]）里含义不同，
   签名同名不同义，改名的事等消融。

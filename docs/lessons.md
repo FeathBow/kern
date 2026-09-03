@@ -3,6 +3,28 @@
 设计写在 runtime.md / serve.md / multi-gpu.md 里；这里只记那些"不写下来下次还会
 再踩一遍"的事，以及它们落到了哪条规则上。
 
+## 2026-09-03，M1 MLA decode 核换成 CuTe DSL 预编译核
+
+**LD_PRELOAD 钩 `cuLaunchKernelEx` / `cuTensorMapEncodeTiled` 抓不到 CuTe DSL 的启动。**
+DSL 的 JIT host 代码调 `libcute_dsl_runtime.so` 自己导出的 `_cudaLaunchKernelEx` /
+`_cuTensorMapEncodeTiled`，里面静态链接 cudart，驱动函数走 export table，没有一次按名字的
+符号解析。规则：**抓一个闭源/JIT 栈的 ABI，先 `nm -D` 看它自己导出了哪层包装，钩最靠近
+调用方的那层**；参数字节用 `cuFuncGetParamInfo` 按核的真实布局切，不猜。
+
+**描述符字节对不上不等于参数错。** DSL 自己 encode 的 CUtensorMap 比驱动 encode 多两个 bit、
+box 字段错一字节，穷举 dtype/swizzle/L2/OOB 也复现不出。不追字节：用驱动 encode 的描述符
+独立起同一 cubin，输出逐位一致就是证明。规则：**反解 ABI 的验收是"独立 launcher 复现输出"，
+不是字节相等。**
+
+**split-KV 切多了反而慢。** B=16 × 13k：每行 4 个 split 55 µs，6 个 67 µs，32 个 87 µs——
+cluster 数一超过一波（nsm/2）就排第二波，归约还按 (行 × split) 读 256 KB。规则：**split 规划
+按"一波 cluster"摊 tile，B=1 长上下文才要 >32 的 split**；工作区大小跟 split 上限走，别默认开大。
+
+**生成器的常量折叠只认顶层 `{"param": i}`。** `pack` 字段和 `tensormap` 里的 `param`
+不改写，折掉一个标量参之后引用全错位，verifier 报"param #12 out of range"才发现。规则：
+**manifest 里凡是能引用接口参的位置，normalize 的每个 pass 都得覆盖**（`fold_constants` 现在
+遍历 pack 字段与 tensormap）。
+
 ## 2026-09-03，E5 tray 内 TP
 
 **`asm volatile` 上的 `"memory"` clobber 把整条链路串行化。** LL collective 的 16 B

@@ -199,6 +199,11 @@ LM head 2.35 GB、lat_down / lat_up 1.35 GB。
 5%。agent 负载的 ctx p50 是 219k（agent-workload.md），按这个斜率一行一步 17 ms——
 这是下一个该动的核，记进 roadmap。
 
+**M1（2026-09-03）把这项打掉了**：MLA decode 换成 FlashInfer 的 CuTe-DSL Blackwell 核（roadmap M1、
+`k3-kernel-abi.md` K5），同一 12.9k oracle、同一 tray07：B=1 23.1 → 21.1 ms，B=8 mixed 35.6 → 25.7，
+B=16 47.9 → 30.2；短 ctx B=16 29.2，长短差只剩 1 ms。一致性 114 / 111 / 112 of 128（之前 108 / 113 / 107）。
+剩下的 B=16 30 ms 里，collective ≈ 4.7 ms、复制的 MLA 投影 ≈ 1.35 ms，是 E5 的下一块。
+
 ### GPU 自提交
 
 `cudaGraphInstantiateFlagDeviceLaunch` + 图尾 kernel
