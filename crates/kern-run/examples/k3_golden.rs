@@ -476,6 +476,13 @@ fn run_rank(
     let blobs: Vec<&[u8]> = maps.iter().map(|m| &m[..]).collect();
     rt.load_weights(&blobs)?;
     rendezvous(&mut rt)?;
+    // A tray manifest's one-time setup after the peers are mapped (the
+    // allreduce's Lamport stages are poisoned, not zeroed).
+    if manifest.programs.contains_key("tp_init") {
+        let env =
+            BTreeMap::from([("tokens".to_string(), 1u64), ("seqs".to_string(), 1u64), ("rows".to_string(), tp as u64)]);
+        rt.run("tp_init", &env)?;
+    }
 
     let steps = golden.feed.len();
     let vocab = manifest.buffers["embed"].shape[0].clone();

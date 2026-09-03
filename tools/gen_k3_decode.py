@@ -95,6 +95,7 @@ MLA_REDUCE_SMEM = 1024    # 256-split reducer scratch
 T = "tokens"
 R = "rows"
 TP_GRID = 256
+TP_AR_GRID = 152  # the GB300's SM count, a multiple of the cluster of 8 and under the 256-row flag table
 TP_TIMEOUT_NS = 2_000_000_000
 
 # Launch geometry per entry, as the kernel headers document it
@@ -348,10 +349,20 @@ def build(layers, ranks, max_ctx, seqs_max, tp=1, mla_split_max=32):
                 "impl": {"launches": [launch("peer_collective", "kern_peer_allgather",
                                              grid=[TP_GRID, 1, 1], block=[256, 1, 1])]},
             }
+        # The allreduce is TensorRT-LLM's protocol (peer_allreduce.cu): one
+        # token per cluster of 8 CTAs, one float4 per thread; the Lamport
+        # stages are poisoned once by `tp_init` after the peers are imported.
         ops["tp_allreduce_f32"] = {
-            "params": ["in buffer<f32>", "out buffer<f32>"] + coll,
-            "impl": {"launches": [launch("peer_collective", "kern_peer_allreduce_f32",
-                                         grid=[TP_GRID, 1, 1], block=[256, 1, 1])]},
+            "params": ["in buffer<f32>", "out buffer<f32>", "inout buffer<u8>", "in buffer<u64>",
+                       "inout buffer<i32>", "in buffer<u64>", "inout buffer<u8>", "in buffer<u64>",
+                       "inout buffer<i32>", "out buffer<i32>", "i32", "i32", "i32", "i64", "i32", "i64"],
+            "impl": {"launches": [launch("peer_allreduce", "kern_peer_allreduce_f32", defines={"NRANKS": tp},
+                                         grid=[TP_AR_GRID, 1, 1], block=[H // 4 // 8, 1, 1], cluster=[8, 1, 1])]},
+        }
+        ops["tp_lamport_init"] = {
+            "params": ["inout buffer<u8>", "i64"],
+            "impl": {"launches": [launch("peer_allreduce", "kern_peer_lamport_init", defines={"NRANKS": tp},
+                                         grid=[256, 1, 1], block=[256, 1, 1])]},
         }
     # land / land_situ: grid.y depends on the width, one op per width.
     land_ops = {}
@@ -389,15 +400,21 @@ def build(layers, ranks, max_ctx, seqs_max, tp=1, mla_split_max=32):
         **mp["buffers"],
     }
     ag_region = seqs_max * H * 4 // 8  # packs: the widest gathered row is the f32 attention landing
-    ar_region = rows_max * H // 2  # packs: the whole tray batch's f32 [rows, H] partial
+    ar_stage = tp * rows_max * H * 4  # bytes: one Lamport stage, `tp` slots of the tray batch's f32 [rows, H]
     if tp > 1:
         buffers.update({
             "tp_sym": {"dtype": "u8", "shape": [2 * tp * ag_region * 16], "kind": "carry", "export": True},
             "tp_peers": {"dtype": "u64", "shape": [tp], "kind": "peer", "of": "tp_sym", "group": "tp"},
             "tp_epochs": {"dtype": "u32", "shape": [TP_GRID], "kind": "carry"},
-            "tp_sym_ar": {"dtype": "u8", "shape": [2 * tp * ar_region * 16], "kind": "carry", "export": True},
-            "tp_peers_ar": {"dtype": "u64", "shape": [tp], "kind": "peer", "of": "tp_sym_ar", "group": "tp"},
-            "tp_epochs_ar": {"dtype": "u32", "shape": [TP_GRID], "kind": "carry"},
+            # peer_allreduce.cu: the two-shot copy + sum, the barrier flag table,
+            # three Lamport stages, and the phase / stage / clear-size words.
+            "tp_ar_comm": {"dtype": "u8", "shape": [2 * rows_max * H * 4], "kind": "carry", "export": True},
+            "tp_ar_comm_peers": {"dtype": "u64", "shape": [tp], "kind": "peer", "of": "tp_ar_comm", "group": "tp"},
+            "tp_ar_flags": {"dtype": "i32", "shape": [tp * 256], "kind": "carry", "export": True},
+            "tp_ar_flag_peers": {"dtype": "u64", "shape": [tp], "kind": "peer", "of": "tp_ar_flags", "group": "tp"},
+            "tp_ar_lamport": {"dtype": "u8", "shape": [3 * ar_stage], "kind": "carry", "export": True},
+            "tp_ar_lamport_peers": {"dtype": "u64", "shape": [tp], "kind": "peer", "of": "tp_ar_lamport", "group": "tp"},
+            "tp_ar_state": {"dtype": "i32", "shape": [8], "kind": "carry"},
             "tp_err": {"dtype": "i32", "shape": [1], "kind": "output"},
         })
     states = {
@@ -490,8 +507,9 @@ def build(layers, ranks, max_ctx, seqs_max, tp=1, mla_split_max=32):
 
     def reduced(label, partial, whole):
         """The tray group's sum of a head-sharded f32 [rows, H] partial."""
-        step(label, "tp_allreduce_f32", partial, whole, b("tp_sym_ar"), b("tp_peers_ar"), b("tp_epochs_ar"),
-             b("tp_err"), {"rank": "tp"}, i32(tp), B, i32(H), i32(ar_region), i64(TP_TIMEOUT_NS))
+        step(label, "tp_allreduce_f32", partial, whole, b("tp_ar_comm"), b("tp_ar_comm_peers"), b("tp_ar_flags"),
+             b("tp_ar_flag_peers"), b("tp_ar_lamport"), b("tp_ar_lamport_peers"), b("tp_ar_state"), b("tp_err"),
+             {"rank": "tp"}, B, i32(H), i64(ar_stage), i32(0), i64(TP_TIMEOUT_NS))
         return whole
 
     step("embed", "embedding", b("token_ids"), b("embed"), b("hidden"), RB, i32(H))
@@ -616,6 +634,12 @@ def build(layers, ranks, max_ctx, seqs_max, tp=1, mla_split_max=32):
     step("out.argmax", "argmax_f32", b("logit_partial"), b("next_token"), i32(V))
 
     groups = {"ep": ranks, **({"tp": tp} if tp > 1 else {})}
+    # Run once after the peers are imported: the Lamport stages must read
+    # -0.0 before the first allreduce, and a carry starts at zero.
+    programs = {"decode": prog}
+    if tp > 1:
+        programs["tp_init"] = [{"label": "tp_init", "op": "tp_lamport_init",
+                                "args": [b("tp_ar_lamport"), i64(3 * ar_stage)]}]
     m = {
         "schema_version": kern_manifest.SCHEMA_VERSION,
         "model": f"kimi-k3-pruned-75pct/{layers}l/ep{ranks}" + (f"-tp{tp}" if tp > 1 else ""),
@@ -624,7 +648,7 @@ def build(layers, ranks, max_ctx, seqs_max, tp=1, mla_split_max=32):
         "states": states,
         "buffers": buffers,
         "ops": ops,
-        "programs": {"decode": prog},
+        "programs": programs,
     }
     return kern_manifest.normalize(m)
 

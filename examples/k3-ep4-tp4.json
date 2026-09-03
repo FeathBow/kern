@@ -139,27 +139,61 @@
    ],
    "kind": "carry"
   },
-  "tp_sym_ar": {
+  "tp_ar_comm": {
    "dtype": "u8",
    "shape": [
-    117440512
+    14680064
    ],
    "kind": "carry",
    "export": true
   },
-  "tp_peers_ar": {
+  "tp_ar_comm_peers": {
    "dtype": "u64",
    "shape": [
     4
    ],
    "kind": "peer",
-   "of": "tp_sym_ar",
+   "of": "tp_ar_comm",
    "group": "tp"
   },
-  "tp_epochs_ar": {
-   "dtype": "u32",
+  "tp_ar_flags": {
+   "dtype": "i32",
    "shape": [
-    256
+    1024
+   ],
+   "kind": "carry",
+   "export": true
+  },
+  "tp_ar_flag_peers": {
+   "dtype": "u64",
+   "shape": [
+    4
+   ],
+   "kind": "peer",
+   "of": "tp_ar_flags",
+   "group": "tp"
+  },
+  "tp_ar_lamport": {
+   "dtype": "u8",
+   "shape": [
+    88080384
+   ],
+   "kind": "carry",
+   "export": true
+  },
+  "tp_ar_lamport_peers": {
+   "dtype": "u64",
+   "shape": [
+    4
+   ],
+   "kind": "peer",
+   "of": "tp_ar_lamport",
+   "group": "tp"
+  },
+  "tp_ar_state": {
+   "dtype": "i32",
+   "shape": [
+    8
    ],
    "kind": "carry"
   },
@@ -16723,7 +16757,7 @@
   },
   "k3_mega_moe": {
    "source": "k3_mega_moe.cubin",
-   "sha256": "6ef2bc9ceaec10bd2b3d63a2a8d41acaad197e6b7ca75a7129150a1e93b45c92"
+   "sha256": "14a84fee2ee4486f5929376d354ff4921695c008af0ea111002e793ca49f7e0d"
   },
   "k3_mega_stage": {
    "source": "k3_mega_stage.cubin",
@@ -16757,9 +16791,13 @@
    "source": "mla_decode_h96_p64.cubin",
    "sha256": "791c7796dc32caad4688270b1524ea756542d3dec7e13b3bee433f8bdfafcbf4"
   },
+  "peer_allreduce+NRANKS=4": {
+   "source": "peer_allreduce+NRANKS=4.cubin",
+   "sha256": "f83b6e2f5fe800e5f8d54f5fbb3d7f86af29b73aaeb1b288ef2c953e6fd8416d"
+  },
   "peer_collective": {
    "source": "peer_collective.cubin",
-   "sha256": "5578dc834ddb7924bb4d1bb7ffe5eaeaaddfac62c41d56689abe9306d78c52ed"
+   "sha256": "7e1a7e25711c08fc38c28cdff5c80a941b56d22934f75eb8c05055320b8de140"
   }
  },
  "ops": {
@@ -18423,7 +18461,11 @@
     "out buffer<f32>",
     "inout buffer<u8>",
     "in buffer<u64>",
-    "inout buffer<u32>",
+    "inout buffer<i32>",
+    "in buffer<u64>",
+    "inout buffer<u8>",
+    "in buffer<u64>",
+    "inout buffer<i32>",
     "out buffer<i32>",
     "i32",
     "i32"
@@ -18431,29 +18473,38 @@
    "impl": {
     "launches": [
      {
-      "module": "peer_collective",
+      "module": "peer_allreduce+NRANKS=4",
       "entry": "kern_peer_allreduce_f32",
       "params": [
        "in buffer<f32>",
        "out buffer<f32>",
        "inout buffer<u8>",
        "in buffer<u64>",
-       "inout buffer<u32>",
+       "inout buffer<i32>",
+       "in buffer<u64>",
+       "inout buffer<u8>",
+       "in buffer<u64>",
+       "inout buffer<i32>",
        "out buffer<i32>",
        "i32",
        "i32",
        "i32",
-       "i32",
+       "i64",
        "i32",
        "i64"
       ],
       "block": [
-       256,
+       224,
        1,
        1
       ],
       "grid": [
-       256,
+       152,
+       1,
+       1
+      ],
+      "cluster": [
+       8,
        1,
        1
       ],
@@ -18480,19 +18531,66 @@
         "param": 6
        },
        {
-        "i32": 4
+        "param": 7
        },
        {
-        "param": 7
+        "param": 8
+       },
+       {
+        "param": 9
+       },
+       {
+        "param": 10
+       },
+       {
+        "param": 11
        },
        {
         "i32": 7168
        },
        {
-        "i32": 917504
+        "i64": 29360128
+       },
+       {
+        "i32": 0
        },
        {
         "i64": 2000000000
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "tp_lamport_init": {
+   "params": [
+    "inout buffer<u8>"
+   ],
+   "impl": {
+    "launches": [
+     {
+      "module": "peer_allreduce+NRANKS=4",
+      "entry": "kern_peer_lamport_init",
+      "params": [
+       "inout buffer<u8>",
+       "i64"
+      ],
+      "block": [
+       256,
+       1,
+       1
+      ],
+      "grid": [
+       256,
+       1,
+       1
+      ],
+      "args": [
+       {
+        "param": 0
+       },
+       {
+        "i64": 88080384
        }
       ]
      }
@@ -19391,13 +19489,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -19526,13 +19636,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -19768,13 +19890,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -20168,13 +20302,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -20410,13 +20556,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -20810,13 +20968,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -21492,13 +21662,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -21734,13 +21916,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -22134,13 +22328,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -22376,13 +22582,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -22776,13 +22994,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -23018,13 +23248,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -23418,13 +23660,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -24100,13 +24354,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -24342,13 +24608,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -24742,13 +25020,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -24984,13 +25274,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -25384,13 +25686,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -25626,13 +25940,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -26026,13 +26352,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -26708,13 +27046,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -26950,13 +27300,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -27350,13 +27712,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -27592,13 +27966,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -27992,13 +28378,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -28234,13 +28632,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -28634,13 +29044,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -29316,13 +29738,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -29558,13 +29992,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -29958,13 +30404,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -30200,13 +30658,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -30600,13 +31070,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -30842,13 +31324,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -31242,13 +31736,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -31924,13 +32430,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -32166,13 +32684,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -32566,13 +33096,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -32808,13 +33350,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -33208,13 +33762,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -33450,13 +34016,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -33850,13 +34428,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -34532,13 +35122,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -34774,13 +35376,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -35174,13 +35788,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -35416,13 +36042,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -35816,13 +36454,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -36058,13 +36708,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -36458,13 +37120,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -37140,13 +37814,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -37382,13 +38068,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -37782,13 +38480,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -38024,13 +38734,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -38424,13 +39146,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -38666,13 +39400,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -39066,13 +39812,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -39748,13 +40506,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -39990,13 +40760,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -40390,13 +41172,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -40632,13 +41426,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -41032,13 +41838,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -41274,13 +42092,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -41674,13 +42504,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -42356,13 +43198,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -42598,13 +43452,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -42998,13 +43864,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -43240,13 +44118,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -43640,13 +44530,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -43882,13 +44784,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -44282,13 +45196,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -44964,13 +45890,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -45206,13 +46144,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -45606,13 +46556,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -45848,13 +46810,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -46248,13 +47222,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -46490,13 +47476,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -46890,13 +47888,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -47572,13 +48582,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -47814,13 +48836,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -48214,13 +49248,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -48456,13 +49502,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -48856,13 +49914,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -49098,13 +50168,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -49498,13 +50580,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -50180,13 +51274,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -50422,13 +51528,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -50822,13 +51940,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -51064,13 +52194,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -51464,13 +52606,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -51706,13 +52860,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -52106,13 +53272,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -52788,13 +53966,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -53030,13 +54220,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -53430,13 +54632,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -53672,13 +54886,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -54072,13 +55298,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -54314,13 +55552,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -54714,13 +55964,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -55396,13 +56658,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -55638,13 +56912,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -56038,13 +57324,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -56280,13 +57578,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -56680,13 +57990,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -56922,13 +58244,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -57322,13 +58656,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -58004,13 +59350,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -58246,13 +59604,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -58646,13 +60016,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -58888,13 +60270,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -59288,13 +60682,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -59530,13 +60936,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -59930,13 +61348,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -60612,13 +62042,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -60854,13 +62296,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -61254,13 +62708,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -61496,13 +62962,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -61896,13 +63374,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -62138,13 +63628,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -62538,13 +64040,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -63220,13 +64734,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -63462,13 +64988,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -63862,13 +65400,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -64104,13 +65654,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -64504,13 +66066,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -64746,13 +66320,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -65146,13 +66732,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -65828,13 +67426,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -66070,13 +67680,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -66470,13 +68092,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -66712,13 +68346,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -67112,13 +68758,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -67354,13 +69012,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -67754,13 +69424,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -68436,13 +70118,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -68678,13 +70372,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -69078,13 +70784,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -69320,13 +71038,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -69720,13 +71450,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -69962,13 +71704,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -70362,13 +72116,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -71044,13 +72810,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -71286,13 +73064,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -71686,13 +73476,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -71928,13 +73730,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -72328,13 +74142,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -72570,13 +74396,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -72970,13 +74808,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -73652,13 +75502,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -73894,13 +75756,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -74294,13 +76168,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -74536,13 +76422,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -74936,13 +76834,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -75178,13 +77088,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -75578,13 +77500,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -76260,13 +78194,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -76502,13 +78448,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -76902,13 +78860,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -77144,13 +79114,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -77544,13 +79526,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -77786,13 +79780,25 @@
       "buf": "hidden_partial_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -78186,13 +80192,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -78868,13 +80886,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -79550,13 +81580,25 @@
       "buf": "mlp_all"
      },
      {
-      "buf": "tp_sym_ar"
+      "buf": "tp_ar_comm"
      },
      {
-      "buf": "tp_peers_ar"
+      "buf": "tp_ar_comm_peers"
      },
      {
-      "buf": "tp_epochs_ar"
+      "buf": "tp_ar_flags"
+     },
+     {
+      "buf": "tp_ar_flag_peers"
+     },
+     {
+      "buf": "tp_ar_lamport"
+     },
+     {
+      "buf": "tp_ar_lamport_peers"
+     },
+     {
+      "buf": "tp_ar_state"
      },
      {
       "buf": "tp_err"
@@ -79659,6 +81701,17 @@
      },
      {
       "buf": "next_token"
+     }
+    ]
+   }
+  ],
+  "tp_init": [
+   {
+    "label": "tp_init",
+    "op": "tp_lamport_init",
+    "args": [
+     {
+      "buf": "tp_ar_lamport"
      }
     ]
    }

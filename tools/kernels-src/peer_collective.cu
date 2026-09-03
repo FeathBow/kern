@@ -1,22 +1,23 @@
-// Tray-local collectives over exported buffers, Lamport style: every 16-byte
+// Tray-local all-gather over exported buffers, Lamport style: every 16-byte
 // store carries its own flag ({data0, epoch, data1, epoch}), so a receiver
 // spins on the slot it is waiting for and nothing surrounds the exchange —
 // no barrier before (the slot is fresh because the epoch is) and none after
 // (a slot holding the epoch is the arrival). Plain st/ld only: no TMA, no
-// bulk copy, no multicast. The shape is the low-latency LL protocol every
-// small-message allreduce ends up at (NCCL LL, TRT-LLM / vLLM one-shot);
-// this one speaks kern's peer ABI: a `u64[nranks]` of the group's copies of
-// the symmetric buffer, a carried epoch, a timeout that reports instead of
-// hanging.
+// bulk copy, no multicast. The shape is NCCL's LL protocol on kern's peer
+// ABI: a `u64[nranks]` of the group's copies of the symmetric buffer, a
+// carried epoch, a timeout that reports instead of hanging. The allreduce
+// that used to live beside it is `peer_allreduce.cu` (TensorRT-LLM's
+// protocol): the epoch-in-payload flag doubles the bytes on the link, which
+// is fine for a gather whose output is the data itself and was the ceiling
+// for the reduction.
 //
 // Row layout, "own rows first": a group of R ranks runs one batch of R*rows
 // rows; rank r's local row j is tray row (r*rows + j) mod R*rows, so a rank's
 // own rows are always rows 0..rows of every gathered buffer and the ops that
 // only work on their owner's rows (paged attention, the expert dispatch) need
 // no rank-dependent offset. Source q's rows land at local block
-// (q - r) mod R; the reduction reads source q's slot for its local row
-// ((r - q) mod R)*rows + j. Both kernels sum / place in source order 0..R-1,
-// so every rank produces bit-identical results.
+// (q - r) mod R, placed in source order 0..R-1, so every rank produces
+// bit-identical results.
 //
 // Symmetric buffer: `sym` holds 2 * nranks regions of `region_packs`
 // 16-byte slots — two sub-buffers by epoch parity (a peer may be one
@@ -26,30 +27,18 @@
 // every rank runs the same launch sequence with the same grid, so the
 // epochs agree. A stale slot holds an older epoch and never matches.
 //
-//   kern_peer_allreduce_f32(in f32 x[nranks*rows, n], out f32 y[same],
-//                           inout u8 sym, in u64 peers[nranks], inout u32 epochs[grid],
-//                           out i32 err[1], i32 rank, i32 nranks, i32 rows, i32 n,
-//                           i32 region_packs, i64 timeout_ns)
-//     one-shot: every rank broadcasts its whole partial to every peer, every
-//     rank sums all nranks contributions in rank order. n even.
-//
 //   kern_peer_allgather(in u8 x[rows * row_bytes], out u8 y[nranks * rows * row_bytes],
 //                       inout u8 sym, in u64 peers[nranks], inout u32 epochs[grid],
 //                       out i32 err[1], i32 rank, i32 nranks, i32 rows, i32 row_bytes,
 //                       i32 region_packs, i64 timeout_ns)
 //     own rows are copied to block 0, source q's to block (q - rank) mod nranks.
-//     row_bytes a multiple of 8.
+//     row_bytes a multiple of 8. block [256,1,1], grid [G,1,1] with G fixed
+//     per op (the epochs carry is per CTA), nranks <= 8; `err` is sticky:
+//     1 + the source rank a slot never arrived from within `timeout_ns`,
+//     left untouched otherwise.
 //
-//   both: block [256,1,1], grid [G,1,1] with G fixed per op (the epochs carry
-//   is per CTA), nranks <= 8; `err` is sticky: 1 + the source rank a slot never arrived
-//   from within `timeout_ns`, left untouched otherwise.
-//
-// Measured (tray03 GB300 x4, captured burst, grid 256): allreduce f32
-// [4B,7168] 5.2 us at B=1, 8.4 at B=4, 25 at B=16, 150 at B=64; allgather
-// [B,7168] bf16 4.5-5.4 us, [B,28672] f32 8.6 us at B=16. Send-only lands
-// the 11 MB of B=16 in 17.5 us (~630 GB/s); the rest is reading the slots
-// back through the flags, which is the LL protocol's known ceiling. Above
-// B~16 a 128-byte-line flag (LL128) or a two-shot exchange is the next step.
+// Measured (tray03 GB300 x4, captured burst, grid 256): allgather [B,7168]
+// bf16 4.5-5.4 us, [B,28672] f32 8.6 us at B=16.
 
 __device__ __forceinline__ unsigned long long gtimer() {
     unsigned long long t;
@@ -126,60 +115,6 @@ __device__ __forceinline__ void epoch_end(unsigned* epochs, int* err, unsigned e
         epochs[blockIdx.x] = e;
         if (*s_fail) atomicMax(err, *s_fail);
     }
-}
-
-extern "C" __global__ void kern_peer_allreduce_f32(const float* x, float* y, uint4* sym,
-                                                   const unsigned long long* peers, unsigned* epochs, int* err,
-                                                   int rank, int nranks, int rows, int n, int region_packs,
-                                                   long long timeout_ns) {
-    __shared__ unsigned s_e;
-    __shared__ int s_fail;
-    const unsigned e = epoch_begin(epochs, &s_e, &s_fail);
-    const int half = n >> 1;
-    const int rows_all = nranks * rows;
-    const int npacks = rows_all * half;
-    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    const int stride = gridDim.x * blockDim.x;
-    const int sub = (e & 1) * nranks;
-    const uint2* xp = reinterpret_cast<const uint2*>(x);
-
-    // Every pack out to every peer first, so no receive waits on a send this
-    // thread has not issued yet.
-    for (int p = tid; p < npacks; p += stride) {
-        const uint2 d = xp[p];
-        for (int q = 0; q < nranks; ++q) {
-            if (q == rank) continue;
-            st_ll(reinterpret_cast<uint4*>(peers[q]) + (long long)(sub + rank) * region_packs + p, d.x, d.y, e);
-        }
-    }
-    for (int p = tid; p < npacks; p += stride) {
-        const int j = p / half;
-        const int c = p - j * half;
-        // Source q's slot for my local row j: its local row ((rank-q) mod R)*rows + j.
-        const uint4* slots[MAX_RANKS];
-        int nslots = 0;
-        for (int q = 0; q < nranks; ++q) {
-            if (q == rank) continue;
-            int jq = ((rank - q + nranks) % nranks) * rows + j;
-            if (jq >= rows_all) jq -= rows_all;
-            slots[nslots++] = sym + (long long)(sub + q) * region_packs + (long long)jq * half + c;
-        }
-        uint2 d[MAX_RANKS];
-        const int missing = recv_ll(slots, nslots, e, timeout_ns, d);
-        if (missing) atomicMax(&s_fail, missing + (missing > rank ? 1 : 0));
-        // Sum in rank order, own contribution at its place: every rank adds
-        // the same numbers in the same order.
-        float a0 = 0.f, a1 = 0.f;
-        int i = 0;
-        for (int q = 0; q < nranks; ++q) {
-            const uint2 v = q == rank ? xp[p] : d[i++];
-            a0 += __uint_as_float(v.x);
-            a1 += __uint_as_float(v.y);
-        }
-        y[2 * p] = a0;
-        y[2 * p + 1] = a1;
-    }
-    epoch_end(epochs, err, e, &s_fail);
 }
 
 extern "C" __global__ void kern_peer_allgather(const uint2* x, uint2* y, uint4* sym, const unsigned long long* peers,
