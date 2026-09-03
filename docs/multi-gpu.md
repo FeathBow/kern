@@ -138,9 +138,11 @@ barrier ≈ 3.8 µs**，这是 TP 的固有成本，与提交方式无关。
 `tools/kernels-src/peer_collective.cu`：one-shot allreduce 与 all-gather，flag 随
 数据走（每 16 B 槽 {d0, epoch, d1, epoch}，Lamport / NCCL LL 的形状），epoch 每
 CTA 一条 carry，奇偶双缓冲，超时报 err 不挂；无 barrier。`crates/kern-runtime/
-examples/peer_collective.rs` 逐元素验证 + captured burst 计时（grid 256）：
+examples/peer_collective.rs` 逐元素验证 + captured burst 计时（grid 256）。
+**这个 LL allreduce 同日被下一节的 TensorRT-LLM 协议取代并删掉了**，文件里只剩
+all-gather；下表的 allreduce 列是它的历史数字，留作对照：
 
-| 每 rank 行数 B | allreduce f32 [4B, 7168] | all-gather [B, 7168] bf16 | all-gather [B, 28672] f32 |
+| 每 rank 行数 B | LL allreduce f32 [4B, 7168]（已删） | all-gather [B, 7168] bf16 | all-gather [B, 28672] f32 |
 |---:|---:|---:|---:|
 | 1 | 5.2 µs（0.11 MB） | 4.5 µs | |
 | 4 | 8.4 µs（0.46 MB） | 4.7 µs | |
@@ -203,6 +205,61 @@ LM head 2.35 GB、lat_down / lat_up 1.35 GB。
 `k3-kernel-abi.md` K5），同一 12.9k oracle、同一 tray07：B=1 23.1 → 21.1 ms，B=8 mixed 35.6 → 25.7，
 B=16 47.9 → 30.2；短 ctx B=16 29.2，长短差只剩 1 ms。一致性 114 / 111 / 112 of 128（之前 108 / 113 / 107）。
 剩下的 B=16 30 ms 里，collective ≈ 4.7 ms、复制的 MLA 投影 ≈ 1.35 ms，是 E5 的下一块。
+
+### allreduce 换成 TensorRT-LLM 的协议（2026-09-03）
+
+先量了上面 LL one-shot 的 e2e 吞吐：数据 / 耗时在 B ≥ 16 饱和在 **~80 GB/s algbw
+（busbw ×1.5 ≈ 120）**，而每卡出口链路已经 480 GB/s——kernel 把链路用起来了，但 6 字节
+里只有 1 字节是算法必需的（one-shot 每 peer 收全量 ×3，LL flag 再翻倍）。上限由协议定，
+不由实现定，所以不写新协议，搬现成的。候选逐个对过（TRT-LLM `allreduce_fusion` /
+MNNVL、vLLM `custom_all_reduce`、FlashInfer `mixed_comm`、NCCL device API、DeepGEMM
+无 allreduce）：**TRT-LLM `allreduce_fusion`**（Apache-2.0，FlashInfer 也 vendor 了同一份）
+最合适——`void** workspace` 就是三个"每 rank 一个指针"的表，和 kern 的 `peer` 数组一一
+对应；≤128 token 走 Lamport one-shot，poison（-0.0）当空槽标记所以 flag 不占字节；以上
+走 two-shot；f32 原生。NCCL device API 白拿 multimem 指针和 barrier，但 `ncclDevComm`
+要 host 侧 `ncclComm` 建，等于 runtime 背上 NCCL bootstrap，不要。
+
+移植成 `tools/kernels-src/peer_allreduce.cu`，改了四处：workspace 表拆成三个 peer 数组
++ 一个本地 carry；own-rows-first 的行旋转——one-shot 发送端按接收方的本地行号写，
+two-shot 按 **tray 行号**给 cluster 分派（它的 barrier 是 block b 对每个 peer 的 block b
+配对，不是全网格，同一 tray 行在各 rank 必须由同一个 cluster 处理，第一版按本地行分派
+就读到了零）；two-shot 的切片改成"自己的行"、在 kernel 里算；spin 加超时写 `tp_err`。
+Lamport 三级缓冲要预填 -0.0，manifest 多一个 `tp_init` program，`k3_golden` 在
+`import_peers` 后跑一次。`peer_collective.rs` 三个 allreduce 同输入并排（tray03，grid 152
+× 224 线程，cluster 8）：
+
+| tray 行 | 4 | 16 | 24 | 32 | 64 | 96 | 128 | 256 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| LL one-shot（旧） | 5.2 | 8.3 | 11.9 | 14.1 | 24.9 | 35.7 | 46.0 | 90.3 |
+| **TRT one-shot** | **5.1** | **6.4** | **8.2** | **9.3** | **15.0** | **21.3** | **27.9** | 54.0 |
+| TRT two-shot | 23.3 | | | | 30.5 | | | **49.1** |
+
+one-shot 从 16 行起快 1.6–1.7×，就是省掉的 flag 字节。two-shot 的地板是它的两个
+barrier：隔离测（不搬数据）17.3 µs，即 **8.5 µs 一个**，对 poison 交换的 3.8 µs；TRT
+原版每 block 写全部 256 行 flag（防 grid 变化的 ABA），kern 的 grid 是 manifest 常量，
+改成只写自己那行省了 5 µs。交叉点在 ~200 行（`ONESHOT_MAX_ROWS` 192），不是 TRT 的 128。
+
+93 层 EP4×TP4 像对像 A/B（tray07，同一 binary、同一 40 步 fixture、`--graph`，旧 manifest
+由 HEAD 的生成器重生成）：
+
+| 每 rank B | 旧 allreduce | **TRT one-shot** | 差 |
+|---:|---:|---:|---:|
+| 1 | 20.94 | 20.92 | 0 |
+| 8 | 24.07 | **23.30** | −0.8 ms |
+| 16 | 29.21 | **27.65** | −1.6 ms |
+
+与单测外推一致（162 次 × 10 µs）。4 层门禁（B=1、`--seqs 4 --mixed --distinct`、`--fork 12`）
+与换核前逐 token 相同（35/40 + 4 + step 13 近平局；37/40 + 2 + step 17 近平局；fork 双子
+行全对；`tp_err` 为零）。顺带：`--mixed --distinct` 的 B=16 步时是 34.2 ms，比 plain 的
+27.7 多 6.5 ms——随机行把 routed expert 打散，MegaMoE 多读权重；上面表里的短 ctx 数字
+都是 plain 口径。
+
+留在源码注释里的 follow-up：two-shot 的 barrier 换成 DeepGEMM `nvlink_barrier` 形状
+（grid 内计数 + 每 peer 一次 sys 信号）或 TRT MNNVL two-shot 的 poison 版，交叉点能压到
+~64 行；`kARResidualRMSNorm` 融合尾巴要先对 k3 的 landing/snapshot 语义；bf16 partial +
+f32 累加再减半字节。再往上是 NVLS 多播（驱动报 `MULTICAST_SUPPORTED=1`，每 rank 出口降到
+1× 数据），要 runtime 多一种分配（`cuMulticastCreate`），且要先在能重启的 tray 上探针——
+lessons 里挂卡的是 multicast TMA，multimem 没人试过。
 
 ### GPU 自提交
 
