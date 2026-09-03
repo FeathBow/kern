@@ -150,6 +150,42 @@ state 的 checkpoint，KV 页只是顺带共享（vLLM v1 也是这样：hit 取
 attention 的命中被截到 mamba 块边界）。快照放哪由调用方定——请求结束（agent 多轮）
 和显式断点（roadmap K1b），不在每个块边界都存。
 
+## 睡到 DRAM 的 session（K3，2026-09-03）
+
+`--host-gib N` 在 tray DRAM 里 pin 一块 N GiB（`Runtime::reserve_host`，落在这张卡的
+NUMA 节点上）。租约 `Busy` 时最久未命中的 resident checkpoint 不再直接丢，而是 park
+到这块 host 内存（`Runtime::park`，页和 slot 都拷；host 放不下就先丢最冷的 parked），
+runtime 攥着它直到拷贝落地才还页；命中 parked checkpoint 的 prompt 走 `Runtime::wake`：
+租新页、把前缀拷回来，请求在 `waking` 队列里等 `Runtime::awake` 交出 `Lease`，其间
+decode 步照常走——compute stream 从不等 transfer stream。stats 行多了
+`parked / host_gib / parks / host_evictions / wakes / wake_tokens`。
+
+门禁（tray08 GB300 单卡，qwen3-4b，`--capacity 32768 --host-gib 32`，greedy 64 token，
+prompt 8189 token）：第一次请求 cold prefill；14 个不同的 12–13k 长 filler 把它挤到 host
+（16 个 checkpoint 中 14 个 parked，24 GiB）；重发同一 prompt 命中 8176 token 的 parked
+条目，wake 后 prefill 19 ms、请求 0.31 s（首发 0.67 s），64 个 token 与首发、与 cold 服务
+逐字一致。
+
+decode 抖动（同卡，`--capacity 65536 --host-gib 48`，8 路 stream 各 256 token 的 decode
+负载，另一路 churn 轮流重发 3 个 25k-token 的 prompt、`max_tokens 1`、按 token id 发，
+每个请求 wake 3.5 GiB；40 s 一组，`target/gate-logs/jitter.py`）：
+
+| 负载 | token 间隔 mean / p50 / p90 / p99 (ms) | churn 请求 |
+|---|---|---|
+| 只有 decode（无 host 层） | 2.92 / 2.92 / 3.10 / 3.22 | — |
+| decode + churn，命中 resident（无 host 层，池够大） | 31.3 / 3.03 / 85.4 / 85.6 | 89 ms |
+| decode + churn，命中 parked（每个请求 wake 3.5 GiB） | 26.1 / 3.08 / 83.6 / 85.5 | 104 ms |
+| 只有 decode（host 层开着） | 2.95 / 2.94 / 3.11 / 3.25 | — |
+
+拷贝本身给 decode 添的抖动在 p50 上是 3.03 → 3.08 ms（+1.7%），p90/p99 不变，wake 的
+成本（+15 ms）全落在被唤醒的那个请求自己身上。p90 的 85 ms 与 host 层无关：命中之后
+剩下的几个 token 走 `prefill`，这一块在 25k 上下文上要 40 ms（挖来的 prefill attention
+核只按 head 并行，长上下文下带宽吃不满），prefill-first 的每步又把它排在 decode 前面——
+resident 命中同样如此。这是 K5（prefill 作为 decode 步的 filler）要解的，不是 K3 的。
+
+同一 session 醒来后再睡，host 上按 device 页节点去重的链认不出它（醒来的是新页），会
+再拷一份；旧的那份最冷，缺地方时先走。
+
 ## 没做（按需要加）
 
 混批（chunked prefill 进 decode 步）、抢占 / 动态页分配、

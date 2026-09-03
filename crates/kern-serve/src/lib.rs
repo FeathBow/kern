@@ -91,6 +91,12 @@ pub struct ServeOpts {
     /// Extra stop token ids (generation_config.json's eos ids always apply)
     #[arg(long, value_delimiter = ',')]
     pub stop_tokens: Vec<u32>,
+
+    /// Pinned host memory (GiB) for checkpoints parked off the device: a
+    /// lease short of pages or slots parks the coldest checkpoint there
+    /// instead of dropping it, and a prompt hitting one wakes it (0: off)
+    #[arg(long, default_value_t = 0.0)]
+    pub host_gib: f64,
 }
 
 /// Stop tokens from the HF directory: generation_config.json `eos_token_id`
@@ -148,6 +154,7 @@ pub fn serve(o: ServeOpts, art: Artifacts, d: Defaults) -> Result<()> {
         max_seqs: o.max_seqs,
         stop_tokens,
         spec: o.spec,
+        host_bytes: (o.host_gib * (1u64 << 30) as f64) as u64,
     };
     let join = std::thread::Builder::new()
         .name("kern-scheduler".into())

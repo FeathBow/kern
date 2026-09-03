@@ -52,8 +52,13 @@
 //!   state checkpoints only where a request ends (the finished sequence's
 //!   state slot becomes the checkpoint's, nothing is copied), so only a
 //!   prompt that continues an earlier request's whole context hits. A
-//!   `Busy` lease evicts the least recently hit checkpoint and retries
-//!   until it fits or nothing is left to evict.
+//!   `Busy` lease makes room and retries until it fits or nothing is left:
+//!   the least recently hit checkpoint is parked into the host tier
+//!   (`--host-gib`: pinned DRAM, `Runtime::park`; the coldest parked ones
+//!   are dropped when it is full) or, without one, dropped. A prompt
+//!   hitting a parked checkpoint wakes it (`Runtime::wake`): the copies
+//!   ride a transfer stream and the request waits in `waking` until
+//!   `Runtime::awake` hands out the lease, so no step queues behind them.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
@@ -61,7 +66,7 @@ use std::time::Instant;
 use anyhow::{bail, Context, Result};
 use kern_manifest::types::{Arg, Dim, Manifest};
 use kern_run::{first_i64, i64_from_le, le_bytes_i32, le_bytes_i64};
-use kern_runtime::{Chain, Denied, Error, Lease, Prefix, Runtime};
+use kern_runtime::{Chain, Denied, Error, Lease, Prefix, Runtime, Tier, Waking};
 use pegainfer_frontend::engine::{
     FinishReason, QueuedRequest, RejectReason, RequestId, RequestLedger, Scheduler, SchedulerMetrics,
     SpecDecodeCounters, MAX_SPEC_TOKENS,
@@ -96,6 +101,8 @@ pub struct Policy {
     pub stop_tokens: Vec<u32>,
     /// Speculative rounds instead of decode steps (needs the spec programs).
     pub spec: bool,
+    /// Pinned host memory for parked checkpoints (0: none).
+    pub host_bytes: u64,
 }
 
 /// A line table over a per-sequence state, shaped `[lines, seqs]` or
@@ -294,6 +301,8 @@ pub struct KernScheduler {
     /// The `seqs` bound: a line table's row width.
     seqs_max: usize,
     waiting: VecDeque<QueuedRequest>,
+    /// Admitted requests whose woken pages are still on the way in.
+    waking: VecDeque<(QueuedRequest, Waking)>,
     running: Vec<Seq>,
     /// Checkpoints of finished prefixes, for the next prompt that shares
     /// one (see the module doc).
@@ -318,6 +327,12 @@ struct Stats {
     /// Prompt tokens found in a checkpoint, and checkpoints evicted for room.
     prefix_hit_tokens: u64,
     evictions: u64,
+    /// Checkpoints parked to the host, dropped from it for room, woken
+    /// from it, and the tokens woken.
+    parks: u64,
+    host_evictions: u64,
+    wakes: u64,
+    wake_tokens: u64,
     /// The speculative counters at the window's start, so the window's
     /// acceptance is reported rather than the process's.
     spec_at: (u64, u64, u64),
@@ -338,6 +353,10 @@ impl Stats {
             prefill_ns: 0,
             prefix_hit_tokens: 0,
             evictions: 0,
+            parks: 0,
+            host_evictions: 0,
+            wakes: 0,
+            wake_tokens: 0,
             spec_at,
         }
     }
@@ -398,6 +417,12 @@ impl Contract {
     }
 }
 
+/// What a lease attempt handed out.
+enum Got {
+    Lease(Lease),
+    Waking(Waking),
+}
+
 impl KernScheduler {
     /// Wrap a loaded runtime (weights bound): check the manifest against
     /// this caller contract, settle the policy within its bounds, lease
@@ -408,6 +433,11 @@ impl KernScheduler {
         let c = Contract::check(&rt.manifest, &seq_tables, &page_tables, rt.page() as usize, policy.spec)?;
         let policy =
             Policy { max_seqs: c.max_seqs(policy.max_seqs), chunk: policy.chunk.clamp(1, c.tokens_max), ..policy };
+        if policy.host_bytes > 0 {
+            let t = Instant::now();
+            rt.reserve_host(policy.host_bytes).context("reserving the host tier")?;
+            info!(gib = policy.host_bytes >> 30, reserve_s = logline::secs(t.elapsed()), "host tier reserved");
+        }
         let pad = rt.lease(1).map_err(|e| anyhow::anyhow!("no page for the padding rows: {e}"))?;
         if rt.pages_used() == rt.pages_total() {
             bail!("capacity {} tokens holds one page; nothing left to serve from", rt.capacity());
@@ -425,6 +455,7 @@ impl KernScheduler {
             page_tables: c.page_tables,
             seqs_max: c.seqs_max,
             waiting: VecDeque::new(),
+            waking: VecDeque::new(),
             running: Vec::new(),
             prefix,
             every_page,
@@ -470,6 +501,7 @@ impl KernScheduler {
             eager = policy.eager,
             prefill_emits = self.prefill_emits,
             checkpoints = if self.every_page { "every page" } else { "at request end" },
+            host_gib = (policy.host_bytes > 0).then(|| policy.host_bytes >> 30),
             drafts = spec.map(|s| s.n_drafts),
             draft_rows = spec.map(|s| s.draft_rows),
             verify_rows = spec.map(|s| s.verify_rows),
@@ -486,6 +518,24 @@ impl KernScheduler {
     /// chunked) up to the step's token budget.
     fn admit(&mut self, ledger: &mut RequestLedger) -> Result<()> {
         let mut budget_used = 0usize;
+        // Wakes land in order: the first still in flight stops the scan.
+        while let Some((q, w)) = self.waking.pop_front() {
+            match self.rt.0.awake(w)? {
+                Ok(pages) => {
+                    if ledger.is_aborted(q.id) {
+                        ledger.retire(q.id);
+                        continue;
+                    }
+                    self.stats.wakes += 1;
+                    self.stats.wake_tokens += pages.prefix() as u64;
+                    budget_used += self.admit_one(q, pages, true, ledger)?;
+                }
+                Err(w) => {
+                    self.waking.push_front((q, w));
+                    break;
+                }
+            }
+        }
         while let Some(q) = self.waiting.front() {
             let id = q.id;
             if ledger.is_aborted(id) {
@@ -493,7 +543,7 @@ impl KernScheduler {
                 self.waiting.pop_front();
                 continue;
             }
-            if self.running.len() >= self.policy.max_seqs {
+            if self.running.len() + self.waking.len() >= self.policy.max_seqs {
                 break;
             }
             let prompt = q.request.prompt_tokens.len();
@@ -510,18 +560,33 @@ impl KernScheduler {
             }
             let ids: Vec<i64> = q.request.prompt_tokens.iter().map(|&t| t as i64).collect();
             let hit = self.prefix.lookup(&ids);
-            let pages = loop {
-                let attempt = match hit.and_then(|h| self.prefix.get(h.id)) {
-                    Some(cp) => self.rt.0.lease_from(cp, worst),
-                    None => self.rt.0.lease(worst),
+            let got = loop {
+                let attempt = match hit {
+                    Some(h) => match h.tier {
+                        Tier::Resident => {
+                            let cp = self.prefix.resident(h.id).expect("hit");
+                            self.rt.0.lease_from(cp, h.len, worst).map(Got::Lease)
+                        }
+                        Tier::Parked => {
+                            let p = self.prefix.parked(h.id).expect("hit");
+                            self.rt.0.wake(p, h.len, worst).map(Got::Waking)
+                        }
+                    },
+                    None => self.rt.0.lease(worst).map(Got::Lease),
                 };
                 match attempt {
-                    Err(Error::Denied(Denied::Busy)) if self.prefix.evict() => self.stats.evictions += 1,
+                    Err(Error::Denied(Denied::Busy)) if self.make_room()? => {}
                     r => break r,
                 }
             };
-            let pages = match pages {
-                Ok(pages) => pages,
+            let pages = match got {
+                Ok(Got::Lease(pages)) => pages,
+                Ok(Got::Waking(w)) => {
+                    // Its copies are in flight; it is admitted once they land.
+                    let q = self.waiting.pop_front().unwrap();
+                    self.waking.push_back((q, w));
+                    continue;
+                }
                 Err(Error::Denied(Denied::Busy)) => break, // wait for pages / a slot
                 Err(Error::Denied(Denied::Remapping)) => break, // pages or a slot are on their way
                 Err(Error::Denied(Denied::ExceedsRow { limit })) => {
@@ -537,75 +602,113 @@ impl KernScheduler {
                 Err(e) => return Err(e.into()),
             };
             let q = self.waiting.pop_front().unwrap();
-            if !q.request.params.is_greedy() && !self.warned_sampling {
-                warn!(
-                    request = %id,
-                    temperature = q.request.params.temperature,
-                    top_p = q.request.params.top_p,
-                    top_k = q.request.params.top_k,
-                    "non-greedy sampling params; this engine samples greedily (argmax in the manifest); further requests are not warned about"
-                );
-                self.warned_sampling = true;
-            }
-            ledger.admit(id);
-            let t0 = Instant::now();
-            // Every prompt token goes through `prefill` when it emits the
-            // first generated token itself; otherwise everything but the
-            // last, which is the first decode step's input. A checkpoint
-            // hit skips its tokens (never the last one).
-            let n_pre = if self.prefill_emits { prompt } else { prompt - 1 };
-            let start = pages.prefix();
-            let first = self.prefill(&pages, &ids[..n_pre], start)?;
-            self.stats.prefill_ns += t0.elapsed().as_nanos();
-            self.stats.prefill_tokens += (n_pre - start) as u64;
-            self.stats.prefix_hit_tokens += start as u64;
-            budget_used += n_pre - start;
-            debug!(
-                request = %id,
-                prompt,
-                max_tokens,
-                pages = ?pages,
-                prefix_hit = start,
-                prefill_ms = logline::ms(t0.elapsed()),
-                "admitted"
-            );
-            let mut seq = Seq {
-                id,
-                pos: n_pre,
-                next: *q.request.prompt_tokens.last().unwrap(),
-                generated: 0,
-                max_tokens,
-                ignore_eos: q.request.params.ignore_eos,
-                pages,
-                prompt_len: prompt,
-                chain: Chain::over(self.rt.0.page() as usize, &ids[..n_pre]),
-                checkpointed: start / self.rt.0.page() as usize * self.rt.0.page() as usize,
-                admitted: t0,
-            };
-            self.checkpoint(&mut seq)?;
-            let first = match first {
-                Some(tok) => Some(tok),
-                None if self.spec.is_some() => {
-                    // The last prompt token goes through `decode_spec` now
-                    // (a round needs an anchor and its tap in the draft
-                    // KV); its token is the first one emitted.
-                    let tok = self.first_token(&seq)?;
-                    seq.advance([seq.next]);
-                    Some(tok)
-                }
-                None => None,
-            };
-            if let Some(tok) = first {
-                let (emitted, done) = seq.emit(&[tok], &self.policy.stop_tokens, ledger);
-                self.stats.tokens += emitted;
-                if done {
-                    self.finish(seq);
-                    continue;
-                }
-            }
-            self.running.push(seq);
+            budget_used += self.admit_one(q, pages, false, ledger)?;
         }
         Ok(())
+    }
+
+    /// Prefill `q` into `pages` (past the lease's prefix) and start it
+    /// running; the prompt tokens prefilled, for the step's budget.
+    fn admit_one(&mut self, q: QueuedRequest, pages: Lease, woken: bool, ledger: &mut RequestLedger) -> Result<usize> {
+        let id = q.id;
+        let prompt = q.request.prompt_tokens.len();
+        let max_tokens = q.request.max_tokens;
+        let ids: Vec<i64> = q.request.prompt_tokens.iter().map(|&t| t as i64).collect();
+        if !q.request.params.is_greedy() && !self.warned_sampling {
+            warn!(
+                request = %id,
+                temperature = q.request.params.temperature,
+                top_p = q.request.params.top_p,
+                top_k = q.request.params.top_k,
+                "non-greedy sampling params; this engine samples greedily (argmax in the manifest); further requests are not warned about"
+            );
+            self.warned_sampling = true;
+        }
+        ledger.admit(id);
+        let t0 = Instant::now();
+        // Every prompt token goes through `prefill` when it emits the
+        // first generated token itself; otherwise everything but the
+        // last, which is the first decode step's input. A checkpoint
+        // hit skips its tokens (never the last one).
+        let n_pre = if self.prefill_emits { prompt } else { prompt - 1 };
+        let start = pages.prefix();
+        let first = self.prefill(&pages, &ids[..n_pre], start)?;
+        self.stats.prefill_ns += t0.elapsed().as_nanos();
+        self.stats.prefill_tokens += (n_pre - start) as u64;
+        self.stats.prefix_hit_tokens += start as u64;
+        debug!(
+            request = %id,
+            prompt,
+            max_tokens,
+            pages = ?pages,
+            prefix_hit = start,
+            woken,
+            prefill_ms = logline::ms(t0.elapsed()),
+            "admitted"
+        );
+        let mut seq = Seq {
+            id,
+            pos: n_pre,
+            next: *q.request.prompt_tokens.last().unwrap(),
+            generated: 0,
+            max_tokens,
+            ignore_eos: q.request.params.ignore_eos,
+            pages,
+            prompt_len: prompt,
+            chain: Chain::over(self.rt.0.page() as usize, &ids[..n_pre]),
+            checkpointed: start / self.rt.0.page() as usize * self.rt.0.page() as usize,
+            admitted: t0,
+        };
+        self.checkpoint(&mut seq)?;
+        let first = match first {
+            Some(tok) => Some(tok),
+            None if self.spec.is_some() => {
+                // The last prompt token goes through `decode_spec` now
+                // (a round needs an anchor and its tap in the draft
+                // KV); its token is the first one emitted.
+                let tok = self.first_token(&seq)?;
+                seq.advance([seq.next]);
+                Some(tok)
+            }
+            None => None,
+        };
+        if let Some(tok) = first {
+            let (emitted, done) = seq.emit(&[tok], &self.policy.stop_tokens, ledger);
+            self.stats.tokens += emitted;
+            if done {
+                self.finish(seq);
+                return Ok(n_pre - start);
+            }
+        }
+        self.running.push(seq);
+        Ok(n_pre - start)
+    }
+
+    /// Room for a `Busy` lease: the coldest resident checkpoint goes to
+    /// the host tier when there is one (the coldest parked ones dropped
+    /// until it fits), else is dropped. `false` when nothing is resident.
+    fn make_room(&mut self) -> Result<bool> {
+        let Some(id) = self.prefix.coldest(Tier::Resident) else { return Ok(false) };
+        if self.policy.host_bytes > 0 {
+            loop {
+                let rt = &mut self.rt;
+                if self.prefix.park(id, |cp| rt.0.park(cp))? {
+                    debug!(tokens = self.prefix.parked(id).map_or(0, |p| p.tokens()), "parked");
+                    self.stats.parks += 1;
+                    return Ok(true);
+                }
+                match self.prefix.coldest(Tier::Parked) {
+                    Some(c) => {
+                        self.prefix.remove(c);
+                        self.stats.host_evictions += 1;
+                    }
+                    None => break,
+                }
+            }
+        }
+        self.prefix.remove(id);
+        self.stats.evictions += 1;
+        Ok(true)
     }
 
     /// Checkpoint every whole page of `s` not yet checkpointed, when the
@@ -955,13 +1058,14 @@ impl KernScheduler {
         }
         if st.tokens > 0 || st.prefill_tokens > 0 {
             let round = |x: f64, d: f64| (x * d).round() / d;
+            let host = self.rt.0.host_tier();
             let (drafts, draft_tokens, accepted) = self.spec.as_ref().map_or((0, 0, 0), |p| {
                 let c = &p.counters;
                 (c.num_drafts - st.spec_at.0, c.num_draft_tokens - st.spec_at.1, c.num_accepted_tokens - st.spec_at.2)
             });
             info!(
                 running = self.running.len(),
-                waiting = self.waiting.len(),
+                waiting = self.waiting.len() + self.waking.len(),
                 kv_pct = round(self.kv_used() as f64 * 100.0 / self.kv_total().max(1) as f64, 10.0),
                 steps = st.steps,
                 step_ms = round(st.step_ns as f64 / 1e6 / st.steps.max(1) as f64, 100.0),
@@ -971,6 +1075,12 @@ impl KernScheduler {
                 prefix_hit_tokens = st.prefix_hit_tokens,
                 checkpoints = self.prefix.len(),
                 evictions = st.evictions,
+                parked = host.map(|_| self.prefix.count(Tier::Parked)),
+                host_gib = host.map(|(u, _)| round(u as f64 / (1u64 << 30) as f64, 10.0)),
+                parks = host.map(|_| st.parks),
+                host_evictions = host.map(|_| st.host_evictions),
+                wakes = host.map(|_| st.wakes),
+                wake_tokens = host.map(|_| st.wake_tokens),
                 slots_used = self.rt.0.has_seq_state().then(|| self.rt.0.seq_slots_used()),
                 slots = self.rt.0.has_seq_state().then(|| self.rt.0.seq_slots()),
                 remaps = self.rt.0.remaps(),
