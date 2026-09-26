@@ -109,11 +109,11 @@ pub(crate) fn gemm_bf16_tn(blt: &CudaBlasLT, stream: &Arc<CudaStream>, args: &[R
 /// A bf16 GEMM's shape: `C[m, n] = A[m, k] · W[n, k]ᵀ` with C's and A's row strides.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct GemmShape {
-    pub(crate) m: u64,
-    pub(crate) n: u64,
-    pub(crate) k: u64,
-    pub(crate) ldc: u64,
-    pub(crate) a_stride: u64,
+    m: u64,
+    n: u64,
+    k: u64,
+    ldc: u64,
+    a_stride: u64,
 }
 
 /// A matmul descriptor and the `w`, `a`, `c` layouts of a bf16 `C = A · Wᵀ`,
