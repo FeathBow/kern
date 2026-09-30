@@ -65,7 +65,7 @@ from kern_manifest import DumpIndex, normalize, program, SCHEMA_VERSION  # noqa:
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import mine_capture as mc
-from handwritten import hw  # tools/handwritten.py: build + pin handwritten cubins
+from kernels.index import variant  # noqa: E402
 
 HIDDEN = 2560
 LAYERS = 36
