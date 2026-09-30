@@ -71,7 +71,7 @@ import sys
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 from qwen_weights import qwen38  # noqa: E402
 from kern_manifest import normalize, program, resolve_constants, SCHEMA_VERSION  # noqa: E402
-from handwritten import hw  # tools/handwritten.py: build + pin handwritten cubins
+from kernels.index import variant  # noqa: E402
 
 # --- model geometry (config.json; asserted against the capture below)
 HIDDEN = 5120
