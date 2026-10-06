@@ -533,8 +533,6 @@ impl Protocol {
                     ));
                 }
             }
-            // A role on two buffers is already named above; a call writing
-            // both counts neither.
             let count = match writes(Fill::Count).as_slice() {
                 [i] => Some(*i),
                 _ => None,
