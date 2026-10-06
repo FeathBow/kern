@@ -295,4 +295,17 @@ fn what_a_forward_hands_back_is_dataflow() {
     m.programs.get_mut("decode").unwrap().calls =
         vec![serde_json::from_str(r#"{"op": "accept", "args": [{"buf": "next_token"}, {"buf": "nacc"}]}"#).unwrap()];
     rejects(&m, "no `tokens` output of several per sequence to count");
+    // Two counts written by one call are the manifest's error, not a panic.
+    let mut m = speculative();
+    m.buffers.insert(
+        "nacc_too".into(),
+        serde_json::from_str(r#"{"kind": "output", "dtype": "i32", "shape": ["seqs"], "fill": "count"}"#).unwrap(),
+    );
+    m.ops.insert("count".into(), op(&["out buffer<i32>"]));
+    m.programs
+        .get_mut("round")
+        .unwrap()
+        .calls
+        .push(serde_json::from_str(r#"{"op": "count", "args": [{"buf": "nacc_too"}]}"#).unwrap());
+    rejects(&m, "fill `count` is on more than one buffer");
 }

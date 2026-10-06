@@ -534,9 +534,8 @@ impl Protocol {
                 }
             }
             let count = match writes(Fill::Count).as_slice() {
-                [] => None,
                 [i] => Some(*i),
-                _ => unreachable!("one `count` fill"),
+                _ => None,
             };
             if let Some(c) = count {
                 match emits {
