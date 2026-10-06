@@ -351,6 +351,7 @@ fn execute(o: Opts) -> Result<()> {
         caller.rt.issue(&step.name, &vars)?;
         caller.rt.synchronize()?;
         let out = caller.emitted(&step)?;
+        ensure!(!out.is_empty(), "`{}` handed back no token; kern run steps through a forward that samples", step.name);
         decode_ns += t.elapsed().as_nanos();
         steps += 1;
         caller.advance(out.len() as u64);
